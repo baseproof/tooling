@@ -12,6 +12,11 @@
 .env
 .env.*
 env.*
+# ...but never ignore Go source named env.go (e.g. cmd/ledger/env.go, the
+# env-var parsing helpers). The env.* rule above targets dotenv config files;
+# without this negation a fresh `git add` silently drops env.go and the ledger
+# image build fails with "undefined: envOr / envIntOr / parseCSV".
+!**/env.go
 
 # Ignore plaintext image-warmer env (anywhere)
 **/image-warmer.env
