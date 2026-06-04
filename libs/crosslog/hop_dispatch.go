@@ -12,7 +12,7 @@ DESCRIPTION:
 	  on-log domain (GovernsOnLog) : RotationHistorySource → resolve the active
 	      key at the position (VerifyKeyAtPosition) → forward-verify the hop's
 	      secp256k1 signature (signatures.VerifyEntry). On-log domain DIDs
-	      (vendor/role DIDs JN governs) have a position-bound key history that
+	      (vendor/role DIDs the network governs) have a position-bound key history that
 	      the registry's current-key resolution cannot answer.
 	  did:pkh / did:web / did:key : the SDK SignatureVerifier registry, which
 	      dispatches per method — EIP-1271 block-pin, DID document, or the

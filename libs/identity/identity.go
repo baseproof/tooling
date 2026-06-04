@@ -3,26 +3,26 @@ FILE PATH: libs/identity/identity.go
 
 DESCRIPTION:
 
-	The IdentityProvider interface — the single seam between JN and
+	The IdentityProvider interface — the single seam between the network and
 	whichever Web2→Web3 IdP the deployment uses (in our case, Privy).
 
 	Two responsibilities:
 
 	  1. Token verification. The user signs into the dApp via the
 	     IdP; the IdP issues a JWT that travels with subsequent HTTP
-	     requests. JN verifies the JWT against the IdP's keys and
+	     requests. The network verifies the JWT against the IdP's keys and
 	     extracts Claims (subject did:key, expiration, email).
 
-	  2. Wallet signing. When JN needs to publish an on-log entry on
-	     a user's behalf — a delegation, a revocation, a filing —
+	  2. Wallet signing. When the network needs to publish an on-log entry on
+	     a user's behalf — a delegation, a revocation, an entry —
 	     it computes the entry's typed-data digest and asks the IdP
 	     to have the user's wallet sign it. The IdP shows a UX
-	     confirmation; the user approves or rejects. JN never holds
+	     confirmation; the user approves or rejects. The network never holds
 	     the private key.
 
-	Why this is a JN-side seam (not a direct Privy SDK import):
+	Why this is a network-side seam (not a direct Privy SDK import):
 
-	  - Privy's API surface evolves; pinning JN to a single SDK
+	  - Privy's API surface evolves; pinning the network to a single SDK
 	    version creates upgrade risk.
 	  - Test deployments need a deterministic stub that doesn't talk
 	    to a real IdP. The interface lets us swap a stub in.
@@ -32,13 +32,13 @@ DESCRIPTION:
 
 	Sign-time digest framing:
 	  Inputs to SignDigest are 32-byte digests. The SDK's signing
-	  contract (and EIP-712 typed-data convention) means JN computes
+	  contract (and EIP-712 typed-data convention) means the network computes
 	  keccak256(domain_separator || keccak256(typed_struct)) and
 	  passes the result. The provider does NOT hash again; it signs
 	  the bytes given. This keeps the wallet UX accurate (the wallet
 	  displays the typed structure to the user) and the protocol
 	  framing (the domain separator binds the signature to a specific
-	  court + schema version, preventing cross-court replay).
+	  exchange + schema version, preventing cross-exchange replay).
 
 KEY DEPENDENCIES:
   - api/exchange/identity/identity_signing.go (SignRequest,
@@ -53,7 +53,7 @@ import (
 	"time"
 )
 
-// IdentityProvider is the seam between JN and the Web2→Web3 IdP.
+// IdentityProvider is the seam between the network and the Web2→Web3 IdP.
 // Implementations: PrivyProvider (production), StubProvider (tests).
 type IdentityProvider interface {
 	// VerifyToken validates a token presented by an HTTP caller and
@@ -94,7 +94,7 @@ type Claims struct {
 	Subject string
 
 	// Issuer identifies the IdP. For Privy: a known Privy issuer URL.
-	// JN's middleware checks this against the configured allowlist.
+	// The network's middleware checks this against the configured allowlist.
 	Issuer string
 
 	// IssuedAt / NotBefore / ExpiresAt are populated from the JWT's
@@ -109,12 +109,12 @@ type Claims struct {
 	Email string
 
 	// EmailVerified is true iff the IdP attests the email is
-	// confirmed (e.g., the user clicked a verification link). JN
+	// confirmed (e.g., the user clicked a verification link). The network
 	// does not trust unverified emails for any authority decision.
 	EmailVerified bool
 
 	// Custom is the JWT's custom-claims object (Privy-specific
-	// fields like privy_user_id, linked_accounts). JN treats this
+	// fields like privy_user_id, linked_accounts). The network treats this
 	// as opaque metadata; only the Subject DID drives authority.
 	Custom map[string]any
 }
@@ -151,7 +151,7 @@ func (c *Claims) Validate(now time.Time) error {
 }
 
 // IsEmailTrusted returns true iff the claims carry a verified email.
-// JN audit trails record (Subject, Email) only when this is true.
+// The network audit trails record (Subject, Email) only when this is true.
 func (c *Claims) IsEmailTrusted() bool {
 	return c != nil && c.Email != "" && c.EmailVerified
 }

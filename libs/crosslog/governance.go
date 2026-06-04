@@ -103,7 +103,7 @@ func GovernanceGenesisFromBootstrap(
 // from the bootstrap document, through the SDK governance walker
 // (network.ResolveSignaturePolicyAt over MaterializeGovernance's genesis-seeded
 // chain). It is the ONE canonical path for "read the cosign policy from the
-// bootstrap", so every consumer (auditor, judicial-network, ...) resolves it
+// bootstrap", so every consumer (auditor, network, ...) resolves it
 // identically instead of each composing the walker — or field-reading
 // doc.GenesisSignaturePolicy.AllowedCosignSchemeTags — on its own. Pair it with
 // BuildWitnessSetsForPolicy.

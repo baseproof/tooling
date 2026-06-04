@@ -90,7 +90,7 @@ func TestVerifyHop_Registry_Nil(t *testing.T) {
 
 // ── on-log (rotation) path ────────────────────────────────────────────────
 
-const onLogSigner = "did:web:state:tn:davidson#signer-1"
+const onLogSigner = "did:web:example:exchange-a#signer-1"
 
 func onLogDispatcher(initial []byte, recs []verifier.RotationRecord) *HopDispatcher {
 	return &HopDispatcher{

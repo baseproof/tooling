@@ -85,6 +85,14 @@ func (s *TailedNodeStore) PutBatch(nodes []smt.Node) {
 // un-tiled gap. `exists` is the tile store's existence oracle (S3 HEAD / stat).
 // Off the hot path; a transient existence error leaves the node in the tail
 // (re-checked next cycle — never wrongly evicts a still-needed node).
+//
+// RETENTION INVARIANT (load-bearing for offline as-of regeneration at the
+// 15-year horizon): a node leaves the tail ONLY after `exists` confirms it is
+// durably present in tiles, so for every committed node, at every instant,
+// (in tail) OR (durably in tiles) holds — there is never a window in which a
+// published checkpoint root's node is unservable (no GC window). This is the
+// only SMT-node eviction in the store and it is fail-closed on an inconclusive
+// existence check. Guarded by tailed_node_store_retention_test.go.
 func (s *TailedNodeStore) PruneTiled(ctx context.Context, exists func(ctx context.Context, id [32]byte) (bool, error)) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
