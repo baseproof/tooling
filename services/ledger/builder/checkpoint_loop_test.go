@@ -416,3 +416,59 @@ func TestCheckpoint_HoldsWhenMerkleLagsCommit(t *testing.T) {
 		t.Fatal("cosigned despite the Merkle durability HOLD")
 	}
 }
+
+// TestCheckpoint_WitnessQuorumFailureHook verifies the injected SRE hook fires
+// exactly once per cycle the witness K-of-N cosign is unavailable, and never on
+// a clean publish or on an upstream (pre-cosign) hold. This is the seam the
+// composition root binds to gossipnet.IncWitnessQuorumFailure — the core loop
+// itself stays free of any metrics/gossip dependency. (The nil-hook no-op path
+// is exercised by every other test, which sets no hook.)
+func TestCheckpoint_WitnessQuorumFailureHook(t *testing.T) {
+	t.Run("fires on the witness-quorum hold", func(t *testing.T) {
+		commit := &fakeCommit{seq: 7, root: rootN(0x33)}
+		loop := newLoop(commit, &fakeFrontier{root: smt.EmptyHash}, newFakeTiles(),
+			&fakeWitness{err: errors.New("no quorum")}, &fakePublisher{})
+		fired := 0
+		loop.OnWitnessQuorumFailure(func(context.Context) { fired++ })
+
+		if err := loop.CheckpointOnce(context.Background()); err != nil {
+			t.Fatalf("witness-outage should HOLD (nil), got %v", err)
+		}
+		if fired != 1 {
+			t.Fatalf("hook fired %d times, want exactly 1 on the witness-quorum hold", fired)
+		}
+	})
+
+	t.Run("does not fire on a clean publish", func(t *testing.T) {
+		commit := &fakeCommit{seq: 41, root: rootN(0x11)}
+		loop := newLoop(commit, &fakeFrontier{root: smt.EmptyHash}, newFakeTiles(),
+			&fakeWitness{}, &fakePublisher{})
+		fired := 0
+		loop.OnWitnessQuorumFailure(func(context.Context) { fired++ })
+
+		if err := loop.CheckpointOnce(context.Background()); err != nil {
+			t.Fatalf("CheckpointOnce: %v", err)
+		}
+		if fired != 0 {
+			t.Fatalf("hook fired %d times on a clean publish, want 0", fired)
+		}
+	})
+
+	t.Run("does not fire on a pre-cosign hold", func(t *testing.T) {
+		// A blob-store outage HOLDS at Step 1, before the cosign is ever reached.
+		commit := &fakeCommit{seq: 5, root: rootN(0x22)}
+		tiles := newFakeTiles()
+		tiles.err = errors.New("blob store down")
+		loop := newLoop(commit, &fakeFrontier{root: smt.EmptyHash}, tiles,
+			&fakeWitness{}, &fakePublisher{})
+		fired := 0
+		loop.OnWitnessQuorumFailure(func(context.Context) { fired++ })
+
+		if err := loop.CheckpointOnce(context.Background()); err != nil {
+			t.Fatalf("emit-outage should HOLD (nil), got %v", err)
+		}
+		if fired != 0 {
+			t.Fatalf("hook fired %d times on a pre-cosign (blob-store) hold, want 0", fired)
+		}
+	})
+}

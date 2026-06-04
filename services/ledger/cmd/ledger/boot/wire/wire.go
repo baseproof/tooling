@@ -311,6 +311,16 @@ func Wire(ctx context.Context, cfg Config, d *deps.AppDeps) error {
 			0, // interval → 1s default
 			d.Logger,
 		)
+		// Witness-quorum SRE signal (Backpressure-Stall trigger). The core loop
+		// stays gossip/metrics-agnostic and fires an injected hook on each
+		// "witness_quorum_unavailable" hold; bind it here to the canonical counter
+		// baseproof_witness_quorum_failures_total, labelled with the deployment's
+		// NetworkID hex prefix (cardinality 1). The counter no-ops until
+		// installPrebuilderInstruments wires the gossip meter.
+		networkIDHex := lifecycle.NetworkIDHex(cfg.NetworkID[:])
+		checkpointLoop.OnWitnessQuorumFailure(func(ctx context.Context) {
+			gossipnet.IncWitnessQuorumFailure(ctx, networkIDHex)
+		})
 		d.Logger.Info("checkpoint loop enabled", "tile_dir", tileDir, "quorum_k", cfg.WitnessQuorumK)
 	}
 
