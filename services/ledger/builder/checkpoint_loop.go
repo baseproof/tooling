@@ -140,6 +140,13 @@ type CheckpointLoop struct {
 	interval  time.Duration
 	logger    *slog.Logger
 
+	// onWitnessQuorumFailure, when non-nil, fires once per cycle the K-of-N
+	// witness cosign is unavailable (the "witness_quorum_unavailable" hold) —
+	// the SRE Backpressure-Stall signal. Injected by the composition root
+	// (cmd/ledger/boot/wire) so this core loop carries no metrics/gossip
+	// dependency; nil ⇒ no-op (tests, metric-free deployments).
+	onWitnessQuorumFailure func(context.Context)
+
 	// lastPublishedSize is the tree_size of the most recently published horizon;
 	// 0 ⇒ nothing published yet. The skip-if-unchanged guard keys on THIS (the
 	// CT-native commit position), never the SMT root — a commentary entry advances
@@ -182,6 +189,16 @@ func NewCheckpointLoop(
 		interval:  interval,
 		logger:    logger,
 	}
+}
+
+// OnWitnessQuorumFailure registers a hook fired once per cycle the witness
+// K-of-N cosign is unavailable (the "witness_quorum_unavailable" hold). The
+// composition root binds it to the canonical SRE counter
+// (gossipnet.IncWitnessQuorumFailure) so this core loop never imports the
+// gossip/metrics layer. Pass nil to disable. Set before Run; not safe to
+// change concurrently with a running loop.
+func (l *CheckpointLoop) OnWitnessQuorumFailure(fn func(context.Context)) {
+	l.onWitnessQuorumFailure = fn
 }
 
 // CheckpointOnce performs one cycle. Exported for tests and for an explicit
@@ -318,6 +335,12 @@ func (l *CheckpointLoop) CheckpointOnce(ctx context.Context) error {
 	)
 	cosigned, cErr := l.witness.RequestCosignatures(ctx, head)
 	if cErr != nil {
+		// SRE signal (Backpressure Stall): a failed K-of-N cosign request IS a
+		// witness-quorum failure. Fire per cycle so a sustained stall shows a
+		// positive rate(); the hook no-ops until the composition root wires it.
+		if l.onWitnessQuorumFailure != nil {
+			l.onWitnessQuorumFailure(ctx)
+		}
 		return l.hold(ctx, "witness_quorum_unavailable", "tree_size", treeSize, "error", cErr)
 	}
 	if cosigned.TreeSize == 0 {
