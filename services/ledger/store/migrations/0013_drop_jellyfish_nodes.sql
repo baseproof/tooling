@@ -1,0 +1,32 @@
+-- FILE PATH: store/migrations/0013_drop_jellyfish_nodes.sql
+--
+-- De-pollution: drop the Jellyfish node DAG from Postgres.
+--
+-- WHY
+--
+--   smt_leaves is the irreducible SMT state: root = f(smt_leaves). The ~2N
+--   content-addressed node DAG that 0003 created in jellyfish_nodes was a
+--   second, derivable copy of that state living immortally in PG (the table
+--   was "structurally immortal" — no GC, ~2x the leaf-set row count growing
+--   forever). The node DAG now lives where it belongs: content-addressed tiles
+--   in the object store (store/smt_tiles*.go), fronted by an in-memory tail of
+--   un-tiled nodes (store/tailed_node_store.go) that the reconciler folds into
+--   durable tiles and prunes. The builder computes over that substrate; readers
+--   serve proofs from tiles. Nothing reads or writes jellyfish_nodes anymore:
+--   the builder loop, rebuild-projection, and rebuild-tiles were all migrated
+--   off PostgresNodeStore, which is deleted alongside this migration.
+--
+-- SAFETY
+--
+--   The table is a pure derivation of smt_leaves, so dropping it loses no
+--   irreducible state — the node DAG is regenerable from the leaf set at any
+--   time (smt.BuildTiles, or boot-time tail recovery via PostgresLeafStore
+--   .ListAll). The network is pre-launch with no production data. After this
+--   migration, booting the ledger re-derives the tail from smt_leaves and the
+--   reconciler re-emits tiles; no rebuild step is required.
+--
+--   No table has a foreign key referencing jellyfish_nodes (0003 created it with
+--   only a CHECK constraint on node_hash length), so a plain DROP suffices —
+--   no CASCADE needed. IF EXISTS keeps the migration idempotent and tolerant of
+--   environments where 0003 never ran.
+DROP TABLE IF EXISTS jellyfish_nodes;

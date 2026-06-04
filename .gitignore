@@ -1,0 +1,40 @@
+# --- Go ---
+*.exe
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+# Build outputs in any module (root bin/ + services/<svc>/bin/ from run-local.sh).
+bin/
+/vendor/
+
+# go.work is committed (the local-dev workspace); go.work.sum is a generated
+# local artifact — CI builds each module in isolation with GOWORK=off, so it is
+# never needed in the tree.
+go.work.sum
+
+# Stray Go binaries from `go build ./cmd/...` or `go build ./...`
+# without -o. Module-root binaries get the package's last path
+# element as their name.
+/standalone-witness
+/gen-fixtures
+
+# --- Local debug runs ---
+.run/
+
+# --- IDE / Editor ---
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# --- OS ---
+.DS_Store
+Thumbs.db
+
+# --- Secrets ---
+*.pem
+*.key
+.env
+.env.*

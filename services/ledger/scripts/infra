@@ -1,0 +1,244 @@
+#!/bin/bash
+# scripts/infra
+#
+# Unified local-infrastructure orchestrator. ONE script for
+# provisioning the ledger's test infra (Postgres + SeaweedFS) and
+# discovering the env vars every test suite needs.
+#
+# THE TOPOLOGY (every `up` brings up all of these):
+#
+#   postgres        — Ledger metadata + index store
+#   seaweedfs       — S3-compatible byte store (port 8333)
+#   seaweedfs-init  — bucket creator (exits 0 on success)
+#
+# NO WITNESSES HERE — BY DESIGN:
+#
+#   The witness daemon lives in github.com/baseproof/tooling
+#   (services/witness) with its OWN run tooling. The ledger does not
+#   describe, build, or run any witness container — it consumes the
+#   witness tier PURELY via env vars. To stand up a fleet:
+#
+#     cd ../tooling/services/witness
+#     ./scripts/run-local.sh --witnesses 3
+#       → prints LEDGER_WITNESS_ENDPOINTS / LEDGER_WITNESS_QUORUM_K
+#         / LEDGER_NETWORK_BOOTSTRAP_FILE
+#     export those, then run the ledger (./scripts/run-local.sh up).
+#
+#   This keeps the two repos' runtime config from intermingling:
+#   the only contract between them is those three env vars.
+#
+# THE WORKFLOW:
+#
+#   ./scripts/infra up                  # bring up postgres + seaweedfs
+#   eval "$(./scripts/infra env)"       # export DSN + S3 env vars
+#
+#   go test -short ./...                # unit tests (no env needed)
+#   go test -tags=p4 ./tests/p4/        # P4 (needs BASEPROOF_TEST_DSN)
+#   go test -tags=integration ./integration/   # integration (in-process cosign)
+#
+#   ./scripts/infra status              # see what's running
+#   ./scripts/infra logs seaweedfs      # tail container logs
+#   ./scripts/infra down                # tear everything down
+#
+# WHY THIS EXISTS:
+#
+#   Before: every test target had its own provisioning script
+#   (run-p4.sh, run-integration.sh, run-e2e.sh) that brought up
+#   postgres independently. Switching between test suites meant
+#   tearing down + bringing up the same postgres container.
+#
+#   Now: provision once via `infra up`, eval the env vars, run
+#   any test suite as many times as you want.
+
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+COMPOSE_FILE="${REPO_ROOT}/scripts/local/docker-compose.infra.yml"
+
+# ── Canonical bindings ─────────────────────────────────────────
+# Single source of truth for env-var emission. If a port changes
+# in the compose file, update here too.
+#
+# NOTE: NO witness bindings here. The witness tier is owned by the
+# tooling repo (services/witness); `./scripts/infra env` deliberately does
+# NOT emit LEDGER_WITNESS_* — those come from the witness repo's
+# own runner (cd ../tooling/services/witness && ./scripts/run-local.sh).
+PG_DSN="postgres://baseproof:baseproof@localhost:5544/baseproof_test?sslmode=disable"
+
+S3_ENDPOINT="http://localhost:8333"
+S3_BUCKET="baseproof-bytes"
+# SeaweedFS anonymous mode: any non-empty creds work (it ignores
+# them by default). Emitting non-empty values means clients that
+# REQUIRE creds (aws-sdk-go-v2) construct a valid signer.
+S3_ACCESS_KEY="any"
+S3_SECRET_KEY="any"
+
+# emit_env_lines prints `export VAR=value` lines for whichever
+# infra services are currently up. Silent on what's down. Emits
+# DSN + S3 only — witness env vars are the witness repo's job.
+emit_env_lines() {
+    if docker inspect baseproof_test_postgres >/dev/null 2>&1; then
+        echo "export BASEPROOF_TEST_DSN=\"${PG_DSN}\""
+    fi
+    if docker inspect baseproof_infra_seaweedfs >/dev/null 2>&1; then
+        # Production-shape Ledger env vars.
+        echo "export LEDGER_BYTE_STORE_BACKEND=\"s3\""
+        echo "export LEDGER_BYTE_STORE_S3_ENDPOINT=\"${S3_ENDPOINT}\""
+        echo "export LEDGER_BYTE_STORE_S3_BUCKET=\"${S3_BUCKET}\""
+        echo "export LEDGER_BYTE_STORE_S3_REGION=\"us-east-1\""
+        echo "export LEDGER_BYTE_STORE_S3_ACCESS_KEY=\"${S3_ACCESS_KEY}\""
+        echo "export LEDGER_BYTE_STORE_S3_SECRET_KEY=\"${S3_SECRET_KEY}\""
+        echo "export LEDGER_BYTE_STORE_S3_PATH_STYLE=\"true\""
+        # bytestore/s3_test.go reads the BASEPROOF_TEST_S3_* family.
+        echo "export BASEPROOF_TEST_S3_ENDPOINT=\"${S3_ENDPOINT}\""
+        echo "export BASEPROOF_TEST_S3_BUCKET=\"${S3_BUCKET}\""
+        echo "export BASEPROOF_TEST_S3_REGION=\"us-east-1\""
+        echo "export BASEPROOF_TEST_S3_ACCESS_KEY=\"${S3_ACCESS_KEY}\""
+        echo "export BASEPROOF_TEST_S3_SECRET_KEY=\"${S3_SECRET_KEY}\""
+        echo "export BASEPROOF_TEST_S3_PATH_STYLE=\"true\""
+        # Soak reads this to choose the bytestore backend (gcs|s3).
+        # Defaulting to s3 directs soak at the SeaweedFS we just
+        # provisioned; the gcs path needs ADC + a real bucket.
+        echo "export BASEPROOF_SOAK_BYTESTORE_BACKEND=\"s3\""
+    fi
+}
+
+usage() {
+    sed -n '1,/^set -euo pipefail/p' "$0" | sed 's/^# \{0,1\}//'
+}
+
+# ── Subcommand dispatch ─────────────────────────────────────────
+SUBCMD="${1:-help}"
+shift || true
+
+case "${SUBCMD}" in
+    up|down|env|status|logs|help|-h|--help) ;;
+    *)
+        echo "FATAL: unknown subcommand: ${SUBCMD}" >&2
+        echo "       try: ./scripts/infra help" >&2
+        exit 2
+        ;;
+esac
+
+if [ "${SUBCMD}" = "help" ] || [ "${SUBCMD}" = "-h" ] || [ "${SUBCMD}" = "--help" ]; then
+    usage
+    exit 0
+fi
+
+cd "${REPO_ROOT}"
+
+case "${SUBCMD}" in
+
+    up)
+        if ! command -v docker >/dev/null 2>&1; then
+            echo "FATAL: docker CLI not found on PATH" >&2
+            exit 1
+        fi
+
+        echo "== bringing up infra (postgres + seaweedfs) =="
+        docker compose -f "${COMPOSE_FILE}" up -d --build
+
+        # Wait for healthy. seaweedfs-init exits after creating the
+        # bucket — it's not a long-running service so we don't wait
+        # on a Health.Status field for it; instead we poll its
+        # State.ExitCode.
+        WANT_HEALTHY=("baseproof_test_postgres" "baseproof_infra_seaweedfs")
+        WANT_EXITED=("baseproof_infra_seaweedfs_init")
+
+        echo
+        echo "== waiting for readiness =="
+        for c in "${WANT_HEALTHY[@]}"; do
+            for i in $(seq 1 60); do
+                state=$(docker inspect --format='{{.State.Health.Status}}' "${c}" 2>/dev/null || echo "")
+                if [ "${state}" = "healthy" ]; then
+                    echo "  ${c}: healthy (attempt ${i})"
+                    break
+                fi
+                if [ "${i}" -eq 60 ]; then
+                    echo "FATAL: ${c} did not report healthy in 60s" >&2
+                    echo "       docker logs ${c}" >&2
+                    exit 1
+                fi
+                sleep 1
+            done
+        done
+
+        for c in "${WANT_EXITED[@]}"; do
+            for i in $(seq 1 30); do
+                status=$(docker inspect --format='{{.State.Status}}' "${c}" 2>/dev/null || echo "")
+                exitcode=$(docker inspect --format='{{.State.ExitCode}}' "${c}" 2>/dev/null || echo "-1")
+                if [ "${status}" = "exited" ] && [ "${exitcode}" = "0" ]; then
+                    echo "  ${c}: bucket created (attempt ${i})"
+                    break
+                fi
+                if [ "${i}" -eq 30 ]; then
+                    echo "FATAL: ${c} did not exit cleanly in 30s" >&2
+                    echo "       docker logs ${c}" >&2
+                    exit 1
+                fi
+                sleep 1
+            done
+        done
+
+        echo
+        echo "== infra ready =="
+        echo
+        echo "Set env vars for tests with:"
+        echo
+        echo "  eval \"\$(./scripts/infra env)\""
+        echo
+        echo "Or copy-paste:"
+        echo
+        emit_env_lines | sed 's/^/  /'
+        echo
+        echo "Then run any test suite, e.g.:"
+        echo "  go test -short ./...                              # unit (no env needed)"
+        echo "  go test -tags=p4 -count=1 ./tests/p4/             # P4 (DSN required)"
+        echo "  go test -tags=integration -count=1 ./integration/ # integration (in-process cosign)"
+        echo "  go test -count=1 -run TestS3_ ./bytestore/        # S3 adapter against SeaweedFS"
+        echo
+        echo "Need a witness fleet? It is NOT part of this infra. Run it from"
+        echo "the tooling repo (services/witness) and export the env vars it prints:"
+        echo "  cd ../tooling/services/witness && ./scripts/run-local.sh --witnesses 3"
+        echo "  # → export LEDGER_WITNESS_ENDPOINTS / _QUORUM_K / _NETWORK_BOOTSTRAP_FILE"
+        echo
+        echo "Full sweep with DSN exported — use 'make test' (NOT 'go test ./...'):"
+        echo "  make test                                         # -p 1 serializes packages against shared DB"
+        echo "  make test-chaos                                   # chaos suite (build-tag isolated)"
+        echo "  make test-soak                                    # soak SLO suite (build-tag isolated)"
+        echo
+        echo "Why 'make test' and not 'go test ./...': every integration-style"
+        echo "test (builder/cursor_reader, store/smt_state, etc.) shares this"
+        echo "single Postgres instance. Default 'go test ./...' runs packages in"
+        echo "parallel up to GOMAXPROCS, so concurrent TRUNCATE / INSERT on shared"
+        echo "tables produces 'got [], want [1..5]' / 'duplicate entry seq=0' /"
+        echo "'Count = 18, want 16' interference. 'make test' uses -p 1 to fix this."
+        echo
+        echo "Tear down: ./scripts/infra down"
+        ;;
+
+    env)
+        emit_env_lines
+        ;;
+
+    status)
+        echo "== infra containers =="
+        docker compose -f "${COMPOSE_FILE}" ps 2>/dev/null || \
+            echo "(none — run: ./scripts/infra up)"
+        ;;
+
+    logs)
+        if [ $# -lt 1 ]; then
+            echo "Usage: ./scripts/infra logs <service>" >&2
+            echo "Services: postgres | seaweedfs | seaweedfs-init" >&2
+            exit 2
+        fi
+        docker compose -f "${COMPOSE_FILE}" logs -f "$@"
+        ;;
+
+    down)
+        echo "== tearing down infra =="
+        docker compose -f "${COMPOSE_FILE}" down -v
+        ;;
+
+esac

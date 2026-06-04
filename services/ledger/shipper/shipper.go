@@ -1,0 +1,624 @@
+/*
+Package shipper migrates StateSequenced entries from the local WAL
+to the production byte store (GCS / S3). Watches the WAL for
+sequenced-but-unshipped entries, uploads them with bounded
+concurrency, marks them StateShipped, and advances the WAL's
+high-water mark through contiguous runs.
+
+PIPELINE STAGES:
+
+ 1. scan — every PollInterval, IterateSequenced(fromSeq=HWM)
+    yields candidate entries. Per-entry meta is
+    consulted to enforce exponential backoff on
+    retried uploads.
+ 2. dispatch — entries are pushed onto a bounded work channel.
+    Workers pull from the channel.
+ 3. ship — N concurrent workers Read wire bytes from the
+    WAL, WriteEntry to the bytestore, MarkShipped
+    in the WAL, then signal completion.
+ 4. advance HWM — single hwmAdvancer goroutine drains completion
+    signals and advances the WAL's HWM only through
+    contiguous runs. Out-of-order completions are
+    held in an in-memory above-HWM set until their
+    predecessor lands.
+
+OUT-OF-ORDER COMPLETION:
+
+	Workers can complete in any order (network jitter, retry timing,
+	per-entry size differences). HWM must only advance over a
+	contiguous run from HWM+1, otherwise read paths that promise
+	"HWM is the highest shipped seq" would lie. The hwmAdvancer
+	enforces this invariant with a single-goroutine state machine
+	and an in-memory completed-above-HWM set.
+
+BACKOFF + RETRY:
+
+	Upload failure → wal.MarkRetry (Attempts++, LastErrTs=now). The
+	scan loop's backoff filter checks LastErrTs + backoff(Attempts);
+	entries inside their backoff window are skipped on this scan
+	cycle and re-evaluated on the next.
+
+	After MaxAttempts, an entry is marked StateManual. Bytes stay in
+	the WAL (no DLQ — no separate storage tier); the ledger's
+	metrics surface the manual queue for human intervention.
+
+LIFECYCLE:
+
+	Run blocks until ctx is cancelled. The composition root listens
+	on a fatal channel so any unrecoverable Shipper error (none in
+	the current implementation — all Shipper errors are per-entry
+	and logged) propagates to panic.
+*/
+package shipper
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
+	"sync"
+	"time"
+
+	"github.com/baseproof/tooling/services/ledger/chaos"
+	"github.com/baseproof/tooling/services/ledger/lifecycle"
+	"github.com/baseproof/tooling/services/ledger/wal"
+)
+
+// WAL is the WAL surface the Shipper depends on. *wal.Committer
+// satisfies it structurally; tests inject fakes.
+type WAL interface {
+	HWM(ctx context.Context) (uint64, error)
+	AdvanceHWM(ctx context.Context, seq uint64) error
+	IterateSequenced(ctx context.Context, fromSeq uint64, fn func(wal.SequencedEntry) error) error
+	Read(ctx context.Context, hash [32]byte) ([]byte, error)
+	MetaState(ctx context.Context, hash [32]byte) (wal.Meta, error)
+	MarkShipped(ctx context.Context, hash [32]byte) error
+	MarkRetry(ctx context.Context, hash [32]byte) error
+	MarkManual(ctx context.Context, hash [32]byte) error
+}
+
+// Bytestore is the upload surface. bytestore.Writer satisfies it
+// (we deliberately narrow to Writer here — Shipper does not read
+// from the bytestore; that's the read-path's job).
+type Bytestore interface {
+	WriteEntry(ctx context.Context, seq uint64, hash [32]byte, wireBytes []byte) error
+}
+
+// Config configures NewShipper.
+type Config struct {
+	// PollInterval bounds how often the scanner checks for new
+	// work when the worker channel drains. Default 100ms. The
+	// scanner does an immediate first scan at startup and then
+	// runs on this cadence; tighter PollInterval keeps the work
+	// channel full but adds Badger pressure from frequent
+	// IterateSequenced calls. 100ms × MaxInFlight×2 channel cap
+	// = SLOThroughputEntriesPerSec under a 1ms bytestore — see
+	// shipper/slo.go and the throughput SLO test for the math.
+	PollInterval time.Duration
+
+	// MaxInFlight bounds concurrent uploads. Default 32. Sized so
+	// a real ~50ms-per-PUT S3 backend can sustain
+	// SLOThroughputEntriesPerSec via Little's Law (throughput =
+	// concurrency / latency ⇒ 500/0.05 = 10 concurrent, with
+	// headroom for tail latency and bytestore-side retries).
+	MaxInFlight int
+
+	// MaxAttempts caps per-entry retries. After this many failed
+	// upload attempts, the entry is marked StateManual and the
+	// shipper stops retrying it. Default 10.
+	MaxAttempts uint32
+
+	// BackoffBase is the initial retry delay. Doubles each attempt
+	// up to BackoffMax. Default 1s.
+	BackoffBase time.Duration
+
+	// BackoffMax caps the exponential backoff. Default 60s.
+	BackoffMax time.Duration
+
+	// Logger. Defaults to slog.Default if nil.
+	Logger *slog.Logger
+}
+
+// Shipper is the sequenced→shipped pipeline.
+type Shipper struct {
+	wal       WAL
+	bytestore Bytestore
+	cfg       Config
+	logger    *slog.Logger
+
+	completion chan uint64 // worker → hwmAdvancer
+	metrics    Metrics
+
+	// inflight tracks seqs currently between scan dispatch and
+	// shipOne return. Without this guard, scan ticks at PollInterval
+	// (default 1s) plus shipOne latency (hundreds of ms with real
+	// GCS) lets the same StateSequenced seq fan out to multiple
+	// workers. The state machine + bytestore are idempotent, so
+	// correctness survives, but the racing wastes GCS quota
+	// (per-object 429s when two workers WriteEntry the same key
+	// within 1s) and inflates SRE error counters (Badger MVCC
+	// conflicts on MarkShipped). Validation surface lives in
+	// metrics.skippedInflight.
+	//
+	// Process-local set is sufficient: the WAL builder advisory
+	// lock already enforces single-writer semantics on the WAL,
+	// so no other process can be running its own scanner against
+	// the same WAL.
+	inflight sync.Map // seq → struct{}{}
+}
+
+// NewShipper wires the pipeline. Both wal and bytestore are
+// required. cfg is normalized; zero-valued fields get sensible
+// defaults.
+func NewShipper(w WAL, bs Bytestore, cfg Config) *Shipper {
+	if cfg.PollInterval <= 0 {
+		cfg.PollInterval = 100 * time.Millisecond
+	}
+	if cfg.MaxInFlight <= 0 {
+		cfg.MaxInFlight = 32
+	}
+	if cfg.MaxAttempts == 0 {
+		cfg.MaxAttempts = 10
+	}
+	if cfg.BackoffBase <= 0 {
+		cfg.BackoffBase = 1 * time.Second
+	}
+	if cfg.BackoffMax <= 0 {
+		cfg.BackoffMax = 60 * time.Second
+	}
+	if cfg.Logger == nil {
+		cfg.Logger = slog.Default()
+	}
+	return &Shipper{
+		wal:        w,
+		bytestore:  bs,
+		cfg:        cfg,
+		logger:     cfg.Logger,
+		completion: make(chan uint64, cfg.MaxInFlight*4),
+	}
+}
+
+// Metrics returns a snapshot of the shipper's atomic counters.
+// Safe to call concurrently with Run.
+func (s *Shipper) Metrics() MetricsSnapshot {
+	return s.metrics.Snapshot()
+}
+
+// Run starts the pipeline and blocks until ctx is cancelled. All
+// goroutines (workers + hwmAdvancer + scanner) shut down cleanly
+// before Run returns.
+//
+// Returns ctx.Err() on graceful shutdown.
+func (s *Shipper) Run(ctx context.Context) error {
+	if s.wal == nil || s.bytestore == nil {
+		return errors.New("shipper: WAL and Bytestore both required")
+	}
+
+	// Boot reconciliation: a previous shipper may have transitioned
+	// entries to StateShipped on disk but crashed before the in-memory
+	// completion-advancer called AdvanceHWM. Without this catch-up,
+	// IterateSequenced (which filters to StateSequenced) silently skips
+	// those entries forever and HWM stays behind the actual shipped
+	// data. Bounded by the contiguous Shipped run above HWM+1.
+	if reconciler, ok := s.wal.(interface {
+		ReconcileHWM(context.Context) (uint64, error)
+	}); ok {
+		if newHWM, err := reconciler.ReconcileHWM(ctx); err != nil {
+			s.logger.Warn("shipper: HWM reconcile failed (continuing)", "err", err)
+		} else {
+			s.logger.Debug("shipper: HWM reconciled at boot", "hwm", newHWM)
+		}
+	}
+
+	workCh := make(chan wal.SequencedEntry, s.cfg.MaxInFlight*2)
+	var workersWG sync.WaitGroup
+	for i := 0; i < s.cfg.MaxInFlight; i++ {
+		workersWG.Add(1)
+		// Each worker wrapped in SafeRun so a panic in
+		// per-entry processing logs + exits cleanly without
+		// crashing the binary. wg.Done is called inside s.worker.
+		go func() {
+			_ = lifecycle.SafeRun(ctx, "shipper-worker", s.logger, nil, func() error {
+				s.worker(ctx, workCh, &workersWG)
+				return nil
+			})
+		}()
+	}
+
+	advancerDone := make(chan struct{})
+	go func() {
+		defer close(advancerDone)
+		_ = lifecycle.SafeRun(ctx, "shipper-hwm-advancer", s.logger, nil, func() error {
+			s.hwmAdvancer(ctx)
+			return nil
+		})
+	}()
+
+	ticker := time.NewTicker(s.cfg.PollInterval)
+	defer ticker.Stop()
+
+	// First scan immediately so the shipper picks up backlog at
+	// startup without waiting one PollInterval.
+	s.scanAndDispatch(ctx, workCh)
+
+scanLoop:
+	for {
+		select {
+		case <-ctx.Done():
+			break scanLoop
+		case <-ticker.C:
+			s.scanAndDispatch(ctx, workCh)
+		}
+	}
+
+	// Graceful shutdown: close work channel, wait for workers to
+	// drain in-flight items, then close completion channel and
+	// wait for the advancer.
+	close(workCh)
+	workersWG.Wait()
+	close(s.completion)
+	<-advancerDone
+	return ctx.Err()
+}
+
+// scanAndDispatch performs one cycle of the WAL → workCh pump.
+// Yields control as soon as the work channel is full — the next
+// tick will resume.
+func (s *Shipper) scanAndDispatch(ctx context.Context, workCh chan<- wal.SequencedEntry) {
+	hwm, err := s.wal.HWM(ctx)
+	if err != nil {
+		s.logger.Error("shipper: read HWM", "err", err)
+		return
+	}
+
+	now := time.Now()
+	dispatched := 0
+	skippedBackoff := 0
+
+	err = s.wal.IterateSequenced(ctx, hwm, func(e wal.SequencedEntry) error {
+		if cErr := ctx.Err(); cErr != nil {
+			return cErr
+		}
+		// Backoff filter: previously-failed entries wait for
+		// LastErrTs + backoff(Attempts) before retrying.
+		meta, mErr := s.wal.MetaState(ctx, e.Hash)
+		if mErr != nil {
+			s.logger.Error("shipper: read meta", "seq", e.Seq, "err", mErr)
+			return nil
+		}
+		if meta.Attempts > 0 {
+			retryAt := meta.LastErrTs.Add(s.backoffFor(meta.Attempts))
+			if now.Before(retryAt) {
+				skippedBackoff++
+				return nil
+			}
+		}
+
+		// In-flight dedupe: skip seqs that are already enqueued
+		// to a worker but not yet completed. Prevents the racing-
+		// scan-window pathology — without this guard, the same
+		// StateSequenced seq would be dispatched to multiple
+		// workers when shipOne latency exceeds the scan interval,
+		// causing per-object GCS 429s and Badger MVCC conflicts
+		// on MarkShipped.
+		if _, loaded := s.inflight.LoadOrStore(e.Seq, struct{}{}); loaded {
+			s.metrics.skippedInflight.Add(1)
+			return nil
+		}
+
+		select {
+		case workCh <- e:
+			dispatched++
+		case <-ctx.Done():
+			s.inflight.Delete(e.Seq)
+			return ctx.Err()
+		default:
+			// Worker channel full; release the in-flight slot so
+			// the next scan tick can re-dispatch (we never made
+			// it to a worker), then stop scanning. The next tick
+			// resumes from the same fromSeq.
+			s.inflight.Delete(e.Seq)
+			return iterStop
+		}
+		return nil
+	})
+	if err != nil && !errors.Is(err, iterStop) {
+		s.logger.Error("shipper: iterate sequenced", "err", err)
+	}
+	if dispatched > 0 || skippedBackoff > 0 {
+		s.logger.Debug("shipper: scan complete",
+			"dispatched", dispatched,
+			"skipped_backoff", skippedBackoff,
+			"hwm", hwm)
+	}
+}
+
+// iterStop is returned from the IterateSequenced callback to break
+// out of the iteration without surfacing as a real error. Caller
+// (scanAndDispatch) checks errors.Is(err, iterStop) and does not log.
+var iterStop = errors.New("shipper: iteration paused (workers full)")
+
+// worker pulls SequencedEntry values from workCh and ships each.
+// Exits when workCh is closed.
+func (s *Shipper) worker(ctx context.Context, workCh <-chan wal.SequencedEntry, wg *sync.WaitGroup) {
+	defer wg.Done()
+	for entry := range workCh {
+		s.shipOne(ctx, entry)
+	}
+}
+
+// shipOne performs the upload + state transition for a single
+// SequencedEntry. Failures fan into MarkRetry / MarkManual; success
+// fans into MarkShipped + completion-channel signal for the HWM
+// advancer.
+func (s *Shipper) shipOne(ctx context.Context, e wal.SequencedEntry) {
+	// Always release the in-flight reservation, regardless of
+	// outcome. On success: the next IterateSequenced won't yield
+	// this seq (state is now StateShipped), so re-dispatch is
+	// impossible. On failure: scanAndDispatch's existing backoff
+	// filter (meta.LastErrTs + backoffFor(Attempts)) gates re-
+	// dispatch timing; the in-flight set's only job was to keep
+	// concurrent scan ticks from racing the same in-flight worker.
+	defer s.inflight.Delete(e.Seq)
+
+	if err := ctx.Err(); err != nil {
+		return
+	}
+	start := time.Now()
+
+	wire, err := s.wal.Read(ctx, e.Hash)
+	if err != nil {
+		s.logger.Error("shipper: WAL read", "seq", e.Seq, "err", err)
+		s.recordFailure(ctx, e)
+		return
+	}
+
+	// Chaos injection point #3 — "pre_shipper_upload":
+	// WAL bytes have been read but bytestore.WriteEntry hasn't
+	// fired yet. A kill here tests the shipper restart path: on
+	// restart, the seq is still StateSequenced in WAL (not
+	// Shipped), the shipper re-fetches it via IterateSequenced,
+	// re-uploads to the bytestore (idempotent by seq+hash key),
+	// and advances WAL state to Shipped.
+	chaos.Trigger("pre_shipper_upload")
+
+	if err := s.bytestore.WriteEntry(ctx, e.Seq, e.Hash, wire); err != nil {
+		s.logger.Warn("shipper: bytestore upload failed",
+			"seq", e.Seq, "err", err)
+		s.recordFailure(ctx, e)
+		return
+	}
+
+	if err := s.wal.MarkShipped(ctx, e.Hash); err != nil {
+		// Bytes are already in the bytestore; failing to record
+		// shipped state is recoverable on next scan (the entry
+		// remains StateSequenced and we'll re-upload — bytestore
+		// is content-addressed so this is idempotent).
+		s.logger.Error("shipper: MarkShipped", "seq", e.Seq, "err", err)
+		s.metrics.markShippedFailures.Add(1)
+		return
+	}
+
+	s.metrics.shipped.Add(1)
+	// Distinct-seq tally. Concurrent scans + 16 workers race the
+	// MarkShipped commit window, so the same seq can fan out to
+	// multiple workers and increment `shipped` more than once
+	// (MarkShipped is idempotent on StateShipped → nil). The
+	// LoadOrStore here gates the per-seq counter so the snapshot
+	// surfaces both metrics, exposing the amplification factor
+	// without affecting the no-error fast path.
+	if _, loaded := s.metrics.shippedSeen.LoadOrStore(e.Seq, struct{}{}); !loaded {
+		s.metrics.uniqueShipped.Add(1)
+	} else {
+		s.logger.Debug("shipper: ship-complete (duplicate)",
+			"seq", e.Seq, "hash", fmt.Sprintf("%x", e.Hash[:8]))
+	}
+	s.metrics.shipLatencyNanos.Add(time.Since(start).Nanoseconds())
+	s.metrics.shipLatencySamples.Add(1)
+
+	// Signal the HWM advancer.
+	select {
+	case s.completion <- e.Seq:
+	case <-ctx.Done():
+	}
+}
+
+// recordFailure increments the retry counter or transitions the
+// entry to StateManual after MaxAttempts. When transitioning to
+// StateManual, signals the HWM advancer so it can advance past the
+// terminal entry — otherwise the entry would stall HWM forever and
+// the `above` set in hwmAdvancer would grow unbounded as subsequent
+// completions pile up. This redefines HWM as "highest contiguous
+// finished-processing seq" (StateShipped ∪ StateManual), not just
+// "highest contiguous shipped seq" — see HWM-semantics note above.
+func (s *Shipper) recordFailure(ctx context.Context, e wal.SequencedEntry) {
+	meta, err := s.wal.MetaState(ctx, e.Hash)
+	if err != nil {
+		s.logger.Error("shipper: read meta on failure", "seq", e.Seq, "err", err)
+		return
+	}
+	if meta.Attempts+1 >= s.cfg.MaxAttempts {
+		if err := s.wal.MarkManual(ctx, e.Hash); err != nil {
+			s.logger.Error("shipper: MarkManual", "seq", e.Seq, "err", err)
+			return
+		}
+		s.logger.Warn("shipper: entry exhausted retries — marked manual",
+			"seq", e.Seq,
+			"attempts", meta.Attempts+1)
+		s.metrics.manual.Add(1)
+
+		// Signal the HWM advancer that this seq is DONE (terminal
+		// state). Without this, HWM would stall at e.Seq-1 forever
+		// and the `above` set would grow unbounded as subsequent
+		// completions for seqs > e.Seq accumulate. At 12M entries/day
+		// a single permanent failure becomes a ~500MB/day memory
+		// leak that ends in OOMKill within days.
+		select {
+		case s.completion <- e.Seq:
+		case <-ctx.Done():
+		}
+		return
+	}
+	if err := s.wal.MarkRetry(ctx, e.Hash); err != nil {
+		s.logger.Error("shipper: MarkRetry", "seq", e.Seq, "err", err)
+		return
+	}
+	s.metrics.retries.Add(1)
+}
+
+// backoffFor returns the delay before the (attempt+1)-th try.
+// Exponential: base * 2^(attempt-1), capped at BackoffMax.
+func (s *Shipper) backoffFor(attempt uint32) time.Duration {
+	if attempt == 0 {
+		return 0
+	}
+	d := s.cfg.BackoffBase << (attempt - 1)
+	if d <= 0 || d > s.cfg.BackoffMax {
+		return s.cfg.BackoffMax
+	}
+	return d
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// HWM advancer (separate file for readability; defined here as
+// method on Shipper for unit-test access).
+// ─────────────────────────────────────────────────────────────────────
+
+// hwmAdvancer drains the completion channel and advances HWM only
+// through contiguous runs. Single goroutine — the only writer to
+// HWM in the whole system.
+func (s *Shipper) hwmAdvancer(ctx context.Context) {
+	above := make(map[uint64]struct{})
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case seq, ok := <-s.completion:
+			if !ok {
+				return // channel closed during shutdown
+			}
+			s.processCompletion(ctx, seq, above)
+		}
+	}
+}
+
+// aboveSetSizeFactor multiplies MaxInFlight to bound the
+// hwmAdvancer's out-of-order-completion holding set. Out-of-order
+// completion is normal up to roughly MaxInFlight×PollInterval/latency
+// items at any moment; 1024× provides ~10000× headroom over typical
+// jitter while still firing the circuit breaker WELL BEFORE the
+// process OOMs at production-scale entry throughput.
+//
+// At MaxInFlight=32 (default) the breaker trips at 32768 stranded
+// entries. At ~32 bytes per map entry that's ~1MB of process memory
+// — small enough to be a hard error rather than a slow degradation.
+const aboveSetSizeFactor = 1024
+
+// processCompletion handles a single completion signal: advances
+// HWM through the contiguous run starting at HWM+1, holding any
+// out-of-order completions in `above` until their predecessor lands.
+//
+// CIRCUIT BREAKER: if `above` exceeds aboveSetSizeFactor × MaxInFlight,
+// the pipeline has a structural stall (a permanently-failing entry
+// whose terminal-state signal was lost, a worker leak, or a Badger
+// AdvanceHWM that errored persistently). Panic to surface to the
+// process supervisor — silent unbounded growth is the alternative
+// and that ends in OOMKill with all observability lost. State is
+// recoverable on next process start because the WAL is durable and
+// ReconcileHWM bootstraps from disk.
+func (s *Shipper) processCompletion(ctx context.Context, seq uint64, above map[uint64]struct{}) {
+	hwm, err := s.wal.HWM(ctx)
+	if err != nil {
+		s.logger.Error("shipper/hwm: read HWM", "err", err)
+		// Stash the seq above so we don't drop it.
+		above[seq] = struct{}{}
+		s.checkAboveSetBounded(above, hwm)
+		return
+	}
+	if seq <= hwm {
+		// Idempotency guard AND the load-bearing rule that makes HWM
+		// a seq value (not a count). Under the migration-0004 contract
+		// seqs are 0-indexed, so the very first completion (seq=0)
+		// hits this branch with hwm=0 and is silently absorbed — HWM
+		// stays at 0 until seq=1 arrives, then advances 1→2→…→N-1 for
+		// N entries. Result: HWM caps at N-1, NOT N. wal/reader.go's
+		// HWM() docstring documents the consequence; any switch to
+		// HWM-as-count semantics has to change both sites in lockstep.
+		// Also covers the genuine re-ship case (e.g., test replays).
+		return
+	}
+	if seq > hwm+1 {
+		// Out-of-order: hold until predecessor lands.
+		above[seq] = struct{}{}
+		s.checkAboveSetBounded(above, hwm)
+		return
+	}
+	// seq == hwm+1: this is the next contiguous one. Advance through
+	// the run.
+	newHWM := seq
+	for {
+		next := newHWM + 1
+		if _, ok := above[next]; !ok {
+			break
+		}
+		delete(above, next)
+		newHWM = next
+	}
+	if err := s.wal.AdvanceHWM(ctx, newHWM); err != nil {
+		s.logger.Error("shipper/hwm: AdvanceHWM", "newHWM", newHWM, "err", err)
+		// Re-stash the unwritten contiguous seqs so the next
+		// completion cycle retries.
+		for q := seq; q <= newHWM; q++ {
+			above[q] = struct{}{}
+		}
+		return
+	}
+	s.metrics.hwm.Store(newHWM)
+	s.logger.Debug("shipper/hwm: advanced",
+		"hwm", newHWM,
+		"above_set_size", len(above))
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Helper: time formatting for tests
+// ─────────────────────────────────────────────────────────────────────
+
+// String returns a human-readable summary for diagnostic logging.
+func (s *Shipper) String() string {
+	snap := s.Metrics()
+	return fmt.Sprintf("shipper{shipped=%d retries=%d manual=%d hwm=%d}",
+		snap.Shipped, snap.Retries, snap.Manual, snap.HWM)
+}
+
+// checkAboveSetBounded enforces the circuit-breaker invariant on
+// the hwmAdvancer's out-of-order-completion holding set. See the
+// comment on aboveSetSizeFactor + processCompletion for why panic
+// is the chosen failure mode.
+func (s *Shipper) checkAboveSetBounded(above map[uint64]struct{}, currentHWM uint64) {
+	if s.cfg.MaxInFlight <= 0 {
+		return // shouldn't happen — defaults are applied in NewShipper
+	}
+	limit := s.cfg.MaxInFlight * aboveSetSizeFactor
+	if len(above) <= limit {
+		return
+	}
+	// Compute the min seq held above so the panic message tells ops
+	// exactly which seq is stalling the pipeline.
+	var minSeq, maxSeq uint64 = ^uint64(0), 0
+	for s := range above {
+		if s < minSeq {
+			minSeq = s
+		}
+		if s > maxSeq {
+			maxSeq = s
+		}
+	}
+	panic(fmt.Sprintf(
+		"shipper/hwm: catastrophic stall — out-of-order completion set has %d entries "+
+			"(limit=%d × MaxInFlight=%d), spans seq %d..%d above currentHWM=%d. "+
+			"Likely cause: a terminal-state transition (StateManual) failed to signal completion, "+
+			"OR a worker is permanently blocked, OR AdvanceHWM is persistently failing. "+
+			"Process integrity is unrecoverable in-flight; restarting to bootstrap from durable WAL state.",
+		len(above), limit, s.cfg.MaxInFlight, minSeq, maxSeq, currentHWM,
+	))
+}

@@ -1,0 +1,35 @@
+apiVersion: v2
+name: ledger
+description: Baseproof ledger transparency log — singleton-writer Kubernetes deployment.
+type: application
+
+# Chart version. Bump on every chart change.
+version: 0.2.0
+
+# Tracks the ledger image tag this chart's defaults target.
+# Override per-deploy via .Values.image.tag.
+appVersion: "1.0.0"
+
+kubeVersion: ">= 1.23.0"
+
+home: https://github.com/baseproof/tooling
+sources:
+  - https://github.com/baseproof/tooling
+
+maintainers:
+  - name: clearcompass-ai
+
+# bitnami/postgresql sub-chart, pulled from the OCI registry that
+# bitnami publishes to as of 2024 (see the chart README:
+# `helm install … oci://registry-1.docker.io/bitnamicharts/postgresql`).
+# Off by default — production deployments typically reach an
+# external managed Postgres (Cloud SQL, RDS) via externalDatabase.
+dependencies:
+  - name: postgresql
+    version: "16.x.x"
+    repository: "oci://registry-1.docker.io/bitnamicharts"
+    condition: postgresql.enabled
+
+annotations:
+  artifacthub.io/license: Apache-2.0
+  artifacthub.io/category: security
