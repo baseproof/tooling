@@ -9,23 +9,23 @@ DESCRIPTION:
 
 	Why these shapes are EIP-712-flavored, not arbitrary bytes:
 
-	  For judicial submissions the wallet UI MUST display the
-	  structured fields the signer is committing to (action, docket,
+	  For network submissions the wallet UI MUST display the
+	  structured fields the signer is committing to (action, reference,
 	  artifact CID, expires-at, etc.). EIP-191 (personal_sign) shows
 	  opaque hash bytes — fine for a login nonce, not fine for a
-	  court action. EIP-712-style typed data lets the wallet render
+	  exchange action. EIP-712-style typed data lets the wallet render
 	  the actual fields, and the domain separator binds the
-	  signature to a specific (court, schema_version) so a sig for
-	  davidson-tn cannot be replayed against shelby-tn.
+	  signature to a specific (exchange, schema_version) so a sig for
+	  exchange-a cannot be replayed against exchange-b.
 
-	  JN computes the digest itself: keccak256(\x19\x01 ||
+	  the network computes the digest itself: keccak256(\x19\x01 ||
 	  domain_separator_hash || typed_struct_hash). The provider does
 	  NOT hash again; it signs the bytes. The Display struct carries
 	  the same typed structure to the wallet for rendering.
 
 OVERVIEW:
 
-	SignRequest        — what JN passes to SignDigest.
+	SignRequest        — what the network passes to SignDigest.
 	SignResponse       — what the provider returns on approval.
 	TypedDataDisplay   — EIP-712 typed-data envelope for wallet UX.
 	EIP712Domain       — the domain-separator inputs.
@@ -46,18 +46,18 @@ type SignRequest struct {
 	// hold a wallet for this DID.
 	SignerDID string
 
-	// Digest is the 32-byte typed-data digest JN computed. The
+	// Digest is the 32-byte typed-data digest the network computed. The
 	// provider signs these bytes verbatim.
 	Digest [32]byte
 
 	// Display is the EIP-712-style typed structure the wallet UI
 	// will render to the user. Optional; if nil, the wallet shows
 	// only the digest hex (acceptable for system-internal flows
-	// like nonce-proof but NOT for court actions).
+	// like nonce-proof but NOT for exchange actions).
 	Display *TypedDataDisplay
 
 	// Reason is a short human-readable string the wallet UI shows
-	// alongside the typed data ("Publish filing 2027-CR-4471").
+	// alongside the typed data ("Publish entry 2026-XX-0001").
 	// 256 byte cap; longer reasons are truncated by the provider.
 	Reason string
 
@@ -83,7 +83,7 @@ func (r *SignRequest) Validate() error {
 		return fmt.Errorf("identity: sign request digest is all-zero (programming error?)")
 	}
 	if r.Display == nil {
-		return fmt.Errorf("identity: sign request display required for court actions; pass typed data so the wallet can render it to the signer")
+		return fmt.Errorf("identity: sign request display required for exchange actions; pass typed data so the wallet can render it to the signer")
 	}
 	if err := r.Display.Validate(); err != nil {
 		return fmt.Errorf("identity: sign request display: %w", err)
@@ -122,16 +122,16 @@ type SignResponse struct {
 
 // TypedDataDisplay is the EIP-712-style typed structure the wallet
 // renders to the user at sign time. Mirrors the standard EIP-712
-// shape but kept JN-internal (no Ethereum chain types) so we can
+// shape but kept protocol-internal (no Ethereum chain types) so we can
 // evolve it without locking onto the spec verbatim.
 type TypedDataDisplay struct {
-	// Domain pins the signature to a specific (court, schema_version)
+	// Domain pins the signature to a specific (exchange, schema_version)
 	// pair. Across domains the same payload bytes produce different
-	// digests, blocking cross-court replay.
+	// digests, blocking cross-exchange replay.
 	Domain EIP712Domain
 
 	// PrimaryType names the top-level typed structure ("Delegation",
-	// "Filing", "Revocation"). The wallet displays this prominently
+	// "Entry", "Revocation"). The wallet displays this prominently
 	// so the user sees what kind of action they are approving.
 	PrimaryType string
 
@@ -142,12 +142,12 @@ type TypedDataDisplay struct {
 
 // EIP712Domain is the domain-separator input. Maps to EIP-712's
 // EIP712Domain type. We intentionally OMIT chainId and
-// verifyingContract because JN is not on a public chain; instead we
+// verifyingContract because the network is not on a public chain; instead we
 // use Name + Version + Salt as the domain identity, where Salt is
-// the institutional did:key (e.g. did:web:state:tn:davidson) so each
-// court is its own domain.
+// the institutional did:key (e.g. did:web:example:exchange-a) so each
+// exchange is its own domain.
 type EIP712Domain struct {
-	// Name is the application identity ("Judicial Network").
+	// Name is the application identity ("Example Network").
 	Name string
 
 	// Version is the schema version ("v1"). Bumping this forces a

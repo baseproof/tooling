@@ -24,19 +24,19 @@ func TestMaterializeCustody_GroupsByContentDigestAndStampsPos(t *testing.T) {
 	cdB := storage.Compute([]byte("artifact-B"))
 
 	gA, err := storage.EncodeArtifactGenesisPayload(storage.ArtifactGenesis{
-		ArtifactCID: cdA, ContentDigest: cdA, Owner: "did:court:a",
+		ArtifactCID: cdA, ContentDigest: cdA, Owner: "did:exchange:a",
 	})
 	tA1, err1 := storage.EncodeArtifactCustodyTransferPayload(storage.ArtifactCustodyTransfer{
-		ContentDigest: cdA, FromOwner: "did:court:a", ToOwner: "did:court:b", ToCustodian: "did:cust:b",
+		ContentDigest: cdA, FromOwner: "did:exchange:a", ToOwner: "did:exchange:b", ToCustodian: "did:cust:b",
 	})
 	tA2, err2 := storage.EncodeArtifactCustodyTransferPayload(storage.ArtifactCustodyTransfer{
-		ContentDigest: cdA, FromOwner: "did:court:b", ToOwner: "did:court:c", ToCustodian: "did:cust:c",
+		ContentDigest: cdA, FromOwner: "did:exchange:b", ToOwner: "did:exchange:c", ToCustodian: "did:cust:c",
 	})
 	dA, err3 := storage.EncodeArtifactDestructionPayload(storage.ArtifactDestruction{
-		ContentDigest: cdA, AuthorizingPrincipal: "did:court:c",
+		ContentDigest: cdA, AuthorizingPrincipal: "did:exchange:c",
 	})
 	gB, err4 := storage.EncodeArtifactGenesisPayload(storage.ArtifactGenesis{
-		ArtifactCID: cdB, ContentDigest: cdB, Owner: "did:court:z",
+		ArtifactCID: cdB, ContentDigest: cdB, Owner: "did:exchange:z",
 	})
 
 	entries := []EntryAtPosition{
@@ -55,8 +55,8 @@ func TestMaterializeCustody_GroupsByContentDigestAndStampsPos(t *testing.T) {
 	if chA == nil {
 		t.Fatal("no chain for cdA")
 	}
-	if chA.Genesis.Owner != "did:court:a" {
-		t.Errorf("cdA genesis owner = %q, want did:court:a", chA.Genesis.Owner)
+	if chA.Genesis.Owner != "did:exchange:a" {
+		t.Errorf("cdA genesis owner = %q, want did:exchange:a", chA.Genesis.Owner)
 	}
 	if len(chA.Transfers) != 2 {
 		t.Fatalf("cdA transfers = %d, want 2", len(chA.Transfers))
@@ -69,7 +69,7 @@ func TestMaterializeCustody_GroupsByContentDigestAndStampsPos(t *testing.T) {
 	if chA.Destruction == nil || chA.Destruction.EffectivePos.Sequence != 12 {
 		t.Errorf("cdA destruction not stamped at seq 12: %+v", chA.Destruction)
 	}
-	if chB := mat.Chains[cdB.String()]; chB == nil || chB.Genesis.Owner != "did:court:z" {
+	if chB := mat.Chains[cdB.String()]; chB == nil || chB.Genesis.Owner != "did:exchange:z" {
 		t.Errorf("cdB chain missing or wrong owner: %+v", chB)
 	}
 
@@ -78,15 +78,15 @@ func TestMaterializeCustody_GroupsByContentDigestAndStampsPos(t *testing.T) {
 	if walkErr != nil {
 		t.Fatalf("projected chain must walk cleanly: %v", walkErr)
 	}
-	if owner != "did:court:c" || custodian != "did:cust:c" {
-		t.Errorf("resolved (%s,%s), want (did:court:c, did:cust:c)", owner, custodian)
+	if owner != "did:exchange:c" || custodian != "did:cust:c" {
+		t.Errorf("resolved (%s,%s), want (did:exchange:c, did:cust:c)", owner, custodian)
 	}
 }
 
 func TestMaterializeCustody_EarliestDestructionWins(t *testing.T) {
 	cdA := storage.Compute([]byte("artifact-A"))
-	d1, e1 := storage.EncodeArtifactDestructionPayload(storage.ArtifactDestruction{ContentDigest: cdA, AuthorizingPrincipal: "did:court:a"})
-	d2, e2 := storage.EncodeArtifactDestructionPayload(storage.ArtifactDestruction{ContentDigest: cdA, AuthorizingPrincipal: "did:court:a"})
+	d1, e1 := storage.EncodeArtifactDestructionPayload(storage.ArtifactDestruction{ContentDigest: cdA, AuthorizingPrincipal: "did:exchange:a"})
+	d2, e2 := storage.EncodeArtifactDestructionPayload(storage.ArtifactDestruction{ContentDigest: cdA, AuthorizingPrincipal: "did:exchange:a"})
 	mat := MaterializeCustody([]EntryAtPosition{
 		custodyEntry(t, 20, d2, e2), // later
 		custodyEntry(t, 10, d1, e1), // earlier
@@ -102,7 +102,7 @@ func TestMaterializeCustody_EarliestDestructionWins(t *testing.T) {
 
 func TestMaterializeCustody_SkipsUnknownAndMalformed(t *testing.T) {
 	cdA := storage.Compute([]byte("artifact-A"))
-	gA, err := storage.EncodeArtifactGenesisPayload(storage.ArtifactGenesis{ArtifactCID: cdA, ContentDigest: cdA, Owner: "did:court:a"})
+	gA, err := storage.EncodeArtifactGenesisPayload(storage.ArtifactGenesis{ArtifactCID: cdA, ContentDigest: cdA, Owner: "did:exchange:a"})
 	entries := []EntryAtPosition{
 		custodyEntry(t, 1, gA, err),
 		{Position: types.LogPosition{Sequence: 2}, Entry: &envelope.Entry{DomainPayload: []byte(`{"kind":"BP-ENTRY-SOMETHING-ELSE"}`)}}, // unknown → skip
@@ -131,7 +131,7 @@ func TestMaterializeCustody_RejectsKindMatchedButInvalid(t *testing.T) {
 
 func TestMaterializeCustody_NilLogger(t *testing.T) {
 	cdA := storage.Compute([]byte("artifact-A"))
-	gA, err := storage.EncodeArtifactGenesisPayload(storage.ArtifactGenesis{ArtifactCID: cdA, ContentDigest: cdA, Owner: "did:court:a"})
+	gA, err := storage.EncodeArtifactGenesisPayload(storage.ArtifactGenesis{ArtifactCID: cdA, ContentDigest: cdA, Owner: "did:exchange:a"})
 	mat := MaterializeCustody([]EntryAtPosition{custodyEntry(t, 1, gA, err)}, nil)
 	if len(mat.Chains) != 1 {
 		t.Fatalf("nil logger must still materialize, got %d", len(mat.Chains))

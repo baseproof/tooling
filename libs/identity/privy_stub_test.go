@@ -6,7 +6,7 @@ DESCRIPTION:
 	End-to-end contract tests against StubProvider. These tests
 	exercise the IdentityProvider interface as a black box; passing
 	them is the precondition for any provider (real Privy, alternate
-	IdP) to drop in without code changes elsewhere in JN.
+	IdP) to drop in without code changes elsewhere in the network.
 */
 package identity
 

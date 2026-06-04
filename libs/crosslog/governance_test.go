@@ -229,7 +229,7 @@ func TestMaterializeGovernance_RejectsMalformedAmendmentButKeepsValidOnes(t *tes
 
 // ─────────────────────────────────────────────────────────────────────
 // GenesisCosignSchemeTags — the canonical "cosign policy from bootstrap"
-// helper shared by the auditor + judicial-network.
+// helper shared by the auditor + network.
 // ─────────────────────────────────────────────────────────────────────
 
 func TestGenesisCosignSchemeTags_Declared(t *testing.T) {

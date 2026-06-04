@@ -67,9 +67,9 @@ func TestBLSWitnessesFromDeclarationsLatest_Empty(t *testing.T) {
 	}
 }
 
-// TestWitnessEndpointSpec_EndToEnd mirrors the flow JN / every network consumes:
+// TestWitnessEndpointSpec_EndToEnd mirrors the flow the network / every network consumes:
 // config rows → SDK records → project latest → BuildWitnessSetsForPolicy builds
-// the verifying keyset (the BLS PoP is checked at construction). No JN-local
+// the verifying keyset (the BLS PoP is checked at construction). No network-local
 // walker code — the whole pipeline is domain-agnostic crosslog.
 func TestWitnessEndpointSpec_EndToEnd(t *testing.T) {
 	spec, id := blsSpec(t, 5)

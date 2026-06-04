@@ -25,7 +25,7 @@ func makeValidClaims(now time.Time) *Claims {
 		IssuedAt:      now.Add(-time.Minute),
 		NotBefore:     now.Add(-time.Minute),
 		ExpiresAt:     now.Add(time.Hour),
-		Email:         "judge@example.org",
+		Email:         "member@example.org",
 		EmailVerified: true,
 	}
 }

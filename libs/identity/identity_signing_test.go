@@ -5,10 +5,10 @@ DESCRIPTION:
 
 	Tests for SignRequest, TypedDataDisplay, and EIP712Field
 	validation. Pins the contract that:
-	  - signing requests for court actions require typed-data
+	  - signing requests for exchange actions require typed-data
 	    display (so the wallet shows the user what they sign);
 	  - the typed-data display has a domain separator (Name +
-	    Version + Salt) — cross-court replay is structurally
+	    Version + Salt) — cross-exchange replay is structurally
 	    impossible.
 */
 package identity
@@ -23,15 +23,15 @@ import (
 func makeValidDisplay() *TypedDataDisplay {
 	return &TypedDataDisplay{
 		Domain: EIP712Domain{
-			Name:    "Judicial Network",
+			Name:    "Example Network",
 			Version: "v1",
-			Salt:    "did:web:state:tn:davidson",
+			Salt:    "did:web:example:exchange-a",
 		},
 		PrimaryType: "Delegation",
 		Fields: []EIP712Field{
 			{Name: "granter_did", Type: "string", Value: "did:key:zQ3shGRANTER"},
 			{Name: "grantee_did", Type: "string", Value: "did:key:zQ3shGRANTEE"},
-			{Name: "role", Type: "string", Value: "judge"},
+			{Name: "role", Type: "string", Value: "member"},
 			{Name: "expires_at", Type: "string", Value: "2030-01-01T00:00:00Z"},
 		},
 	}
@@ -156,13 +156,13 @@ func TestTypedDataDisplay_Validate_FieldsMissingNameOrType(t *testing.T) {
 }
 
 // Domain identity test: two displays with same fields but different
-// domain Salt produce distinct typed structures. Pins the cross-court
+// domain Salt produce distinct typed structures. Pins the cross-exchange
 // replay-protection invariant at the Display level — the actual digest
 // computation lives in identity_signing.go's caller path.
 func TestTypedDataDisplay_DistinctSaltsAreDistinctDomains(t *testing.T) {
 	a := makeValidDisplay()
 	b := makeValidDisplay()
-	b.Domain.Salt = "did:web:state:tn:shelby"
+	b.Domain.Salt = "did:web:example:exchange-b"
 
 	if a.Domain.Salt == b.Domain.Salt {
 		t.Fatal("test setup error: salts equal")
@@ -176,7 +176,7 @@ func TestTypedDataDisplay_DistinctSaltsAreDistinctDomains(t *testing.T) {
 		t.Errorf("b invalid: %v", err)
 	}
 
-	// Cross-court replay defense lives in the digest computation
+	// Cross-exchange replay defense lives in the digest computation
 	// (.5); this test pins that the Display structure
-	// distinguishes the two courts at the typed-data layer.
+	// distinguishes the two exchanges at the typed-data layer.
 }
