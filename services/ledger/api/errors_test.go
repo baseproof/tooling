@@ -26,6 +26,8 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	baseprooflog "github.com/baseproof/baseproof/log"
+
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
@@ -35,9 +37,7 @@ import (
 
 func newManualReader(t *testing.T) (*metric.MeterProvider, *metric.ManualReader) {
 	t.Helper()
-	reader := metric.NewManualReader()
-	mp := metric.NewMeterProvider(metric.WithReader(reader))
-	return mp, reader
+	return baseprooflog.NewInMemoryMeterProvider()
 }
 
 // collectErrorCounter returns the aggregated count of

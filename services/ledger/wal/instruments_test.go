@@ -23,6 +23,8 @@ import (
 	"testing"
 	"time"
 
+	baseprooflog "github.com/baseproof/baseproof/log"
+
 	"go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 )
@@ -37,8 +39,7 @@ import (
 // subsequent tests start fresh.
 func withManualReader(t *testing.T) (*metric.ManualReader, func()) {
 	t.Helper()
-	reader := metric.NewManualReader()
-	mp := metric.NewMeterProvider(metric.WithReader(reader))
+	mp, reader := baseprooflog.NewInMemoryMeterProvider()
 	meter := mp.Meter("test")
 	if !InstallSubmitDurationHistogram(meter) {
 		t.Fatal("InstallSubmitDurationHistogram returned false (already installed?)")

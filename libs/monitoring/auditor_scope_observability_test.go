@@ -36,6 +36,7 @@ import (
 	"testing"
 
 	"github.com/baseproof/baseproof/gossip"
+	baseprooflog "github.com/baseproof/baseproof/log"
 	"github.com/baseproof/baseproof/network"
 	"github.com/baseproof/baseproof/types"
 
@@ -51,8 +52,7 @@ import (
 func installManualReader(t *testing.T) (*metric.ManualReader, func()) {
 	t.Helper()
 	prev := otel.GetMeterProvider()
-	reader := metric.NewManualReader()
-	provider := metric.NewMeterProvider(metric.WithReader(reader))
+	provider, reader := baseprooflog.NewInMemoryMeterProvider()
 	otel.SetMeterProvider(provider)
 	// Reset the lazy-global counter so the next recordAuditorScopeReject
 	// call re-binds against this MeterProvider. Without this, an earlier
