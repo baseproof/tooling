@@ -28,8 +28,14 @@ import (
 	"github.com/baseproof/tooling/services/ledger/bytestore"
 )
 
-// cosignedCheckpointKey is the shared object key for the published horizon.
-// Mirrors the POSIX <TesseraStorageDir>/cosigned-checkpoint filename.
+// cosignedCheckpointKey is the LOGICAL object key for the published horizon.
+// Mirrors the POSIX <TesseraStorageDir>/cosigned-checkpoint filename. It is a
+// FIXED name, so when multiple logs share one bucket it would be a single global
+// key — the last writer clobbers every other log's horizon. The *bytestore.S3
+// adapter prepends the per-log Namespace to this (and every raw PutObject /
+// GetObject) key, so the actual object is <namespace>/cosigned-checkpoint and no
+// two logs ever collide. This file passes the logical name; the namespacing is
+// transparent here by design (one chokepoint in the adapter, impossible to skip).
 const cosignedCheckpointKey = "cosigned-checkpoint"
 
 // S3CheckpointPublisher publishes the cosigned-checkpoint horizon to a shared

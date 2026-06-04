@@ -62,8 +62,10 @@ package bytestore
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"strings"
 )
 
 // EntryRef pairs a sequence number with the entry's identity hash
@@ -138,6 +140,51 @@ type Backend interface {
 // statically verify the URL points at the promised hash).
 func layoutKey(prefix string, seq uint64, hash [32]byte) string {
 	return fmt.Sprintf("%s/%016x/%s", prefix, seq, hex.EncodeToString(hash[:]))
+}
+
+// namespacedKey prepends a per-log namespace segment to a RAW substrate key (an
+// SMT tile path, the fixed-name cosigned-checkpoint horizon) so MULTIPLE logs can
+// share one bucket without the fixed-name objects overlapping. The entry surface
+// does NOT route through here: entries are content-addressed (the key carries the
+// SHA-256 EntryIdentity), so two logs at the same sequence land on DIFFERENT keys
+// and never collide — and that surface is read by external tools (ledger-reader,
+// rebuild-projection) and monitors (the 302 PublicURL), so namespacing it would
+// break them for no isolation gain. The fixed-name cosigned-checkpoint is the one
+// object that IS a single global key — the last writer in a shared bucket clobbers
+// every other log's horizon — and the namespace is what makes that impossible on
+// ANY object-store backend.
+//
+// An empty namespace returns the key unchanged: the pre-namespace flat layout,
+// preserved for a single-log bucket that opts out.
+func namespacedKey(namespace, key string) string {
+	if namespace == "" {
+		return key
+	}
+	return namespace + "/" + key
+}
+
+// NamespaceForLog derives a deterministic, object-key-safe, collision-resistant
+// per-log namespace from a log DID — the SINGLE source of truth shared by the
+// ledger and every offline reader so they all resolve the SAME namespace for a
+// given log. It is a readable sanitized prefix (so `aws ls` / `weed shell` shows
+// which log owns a subtree) plus a SHA-256 suffix so two DISTINCT DIDs can never
+// alias to the same slug (e.g. one mapping ':' and another '/' to the same
+// separator). An empty DID yields an empty namespace (the flat legacy layout).
+func NamespaceForLog(logDID string) string {
+	if logDID == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(logDID))
+	var b strings.Builder
+	for _, r := range logDID {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '.':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('_')
+		}
+	}
+	return b.String() + "-" + hex.EncodeToString(sum[:6])
 }
 
 // ─────────────────────────────────────────────────────────────────────

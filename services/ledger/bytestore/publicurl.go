@@ -129,6 +129,11 @@ type publicURLMapper struct {
 // newPublicURLMapper validates and normalizes baseURL. Empty
 // baseURL is permitted — PublicURL will return
 // ErrPublicURLNotConfigured.
+//
+// PublicURL serves the content-addressed ENTRY surface, which is not
+// per-log namespaced (its keys carry the hash and never collide), so
+// the mapper takes no namespace — the 302 URL is the flat
+// entries/… layout, unchanged.
 func newPublicURLMapper(baseURL, objectPrefix string) *publicURLMapper {
 	return &publicURLMapper{
 		baseURL:      strings.TrimRight(baseURL, "/"),

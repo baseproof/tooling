@@ -345,6 +345,7 @@ type Config struct {
 	// Store-only impl call bytestore.NewMemory directly.
 	ByteStoreBackend   string
 	ByteStorePrefix    string // empty = "entries"
+	ByteStoreNamespace string // empty = derived from the log identity (NetworkID hex)
 	ByteStoreCacheSize int
 
 	// GCS-specific.
@@ -577,6 +578,7 @@ func loadConfig() (*Config, error) {
 		TesseraOrigin:         os.Getenv("LEDGER_TESSERA_ORIGIN"), // defaults to LogDID below
 		ByteStoreBackend:      os.Getenv("LEDGER_BYTE_STORE_BACKEND"),
 		ByteStorePrefix:       envOr("LEDGER_BYTE_STORE_PREFIX", "entries"),
+		ByteStoreNamespace:    os.Getenv("LEDGER_BYTE_STORE_NAMESPACE"), // empty → derived in toBytestoreConfig
 		ByteStoreCacheSize:    4096,
 		// GCS family.
 		ByteStoreGCSBucket:   os.Getenv("LEDGER_BYTE_STORE_GCS_BUCKET"),
@@ -1143,6 +1145,7 @@ func (cfg *Config) toBytestoreConfig() bytestore.Config {
 	bc := bytestore.Config{
 		Backend:       cfg.ByteStoreBackend,
 		Prefix:        cfg.ByteStorePrefix,
+		Namespace:     cfg.byteStoreNamespace(),
 		CacheSize:     cfg.ByteStoreCacheSize,
 		PublicBaseURL: cfg.ByteStorePublicBaseURL,
 	}
@@ -1160,4 +1163,20 @@ func (cfg *Config) toBytestoreConfig() bytestore.Config {
 		bc.S3PathStyle = cfg.ByteStoreS3PathStyle
 	}
 	return bc
+}
+
+// byteStoreNamespace resolves the per-log object-store namespace prepended to the
+// RAW substrate surface (SMT tiles + the fixed-name cosigned-checkpoint horizon).
+// An explicit LEDGER_BYTE_STORE_NAMESPACE wins; otherwise it is DERIVED from the
+// log identity via the SHARED bytestore.NamespaceForLog so per-log isolation is
+// the SAFE DEFAULT — two logs that share one bucket can never collide on the
+// fixed-name cosigned-checkpoint (the last-writer-clobbers class) — and so every
+// offline reader resolves the SAME namespace for a given log. Empty only when
+// LogDID is empty (impossible after boot validation), which preserves the flat
+// legacy layout.
+func (cfg *Config) byteStoreNamespace() string {
+	if cfg.ByteStoreNamespace != "" {
+		return cfg.ByteStoreNamespace
+	}
+	return bytestore.NamespaceForLog(cfg.LogDID)
 }
