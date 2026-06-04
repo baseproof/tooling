@@ -44,6 +44,17 @@ type Config struct {
 	// instances.
 	Prefix string
 
+	// Namespace is the per-log isolation segment prepended to the RAW substrate
+	// surface (SMT tiles + the fixed-name cosigned-checkpoint horizon) so
+	// multiple logs can share one bucket without the last writer clobbering
+	// another log's fixed-name objects. The content-addressed entry surface is
+	// NOT namespaced (its keys carry the hash and never collide). Only the S3
+	// backend exposes that raw surface today; GCS publishes the checkpoint via
+	// POSIX and tiles via GCSTiles, so it ignores this field. Optional; empty
+	// preserves the flat layout. The composition root derives it from the log
+	// identity (bytestore.NamespaceForLog).
+	Namespace string
+
 	// CacheSize is the LRU cache size for the read path. Optional.
 	// Default 4096.
 	CacheSize int
@@ -117,6 +128,7 @@ func NewFromConfig(ctx context.Context, cfg Config) (Backend, error) {
 			PathStyle:     cfg.S3PathStyle,
 			CacheSize:     cfg.CacheSize,
 			ObjectPrefix:  cfg.Prefix,
+			Namespace:     cfg.Namespace,
 			WriteTimeout:  cfg.WriteTimeout,
 			ReadTimeout:   cfg.ReadTimeout,
 			PublicBaseURL: cfg.PublicBaseURL,

@@ -92,9 +92,19 @@ type S3Config struct {
 	// CacheSize is the LRU cache size. Defaults to 4096.
 	CacheSize int
 
-	// ObjectPrefix is the first path segment under the bucket.
-	// Defaults to "entries".
+	// ObjectPrefix is the first path segment under the bucket (or under
+	// Namespace when set). Defaults to "entries".
 	ObjectPrefix string
+
+	// Namespace is the per-log isolation segment prepended to the RAW substrate
+	// surface — PutObject / GetObject / HeadObject, i.e. the SMT tiles and the
+	// fixed-name cosigned-checkpoint horizon. It is what lets multiple logs share
+	// one bucket without the last writer clobbering another log's fixed-name
+	// objects. The content-addressed entry surface (WriteEntry / ReadEntry /
+	// PublicURL) is NOT namespaced — its keys carry the hash, so they never
+	// collide, and they stay readable by offline tools and monitors without a
+	// namespace handshake. Empty (the default) preserves the flat layout.
+	Namespace string
 
 	// WriteTimeout caps a single WriteEntry call. Defaults to 30s.
 	WriteTimeout time.Duration
@@ -135,6 +145,7 @@ type S3Config struct {
 type S3 struct {
 	client       *s3.Client
 	bucket       string
+	namespace    string
 	objectPrefix string
 	writeTimeout time.Duration
 	readTimeout  time.Duration
@@ -264,18 +275,34 @@ func NewS3(ctx context.Context, cfg S3Config) (*S3, error) {
 	return &S3{
 		client:       client,
 		bucket:       cfg.Bucket,
+		namespace:    cfg.Namespace,
 		objectPrefix: cfg.ObjectPrefix,
 		writeTimeout: cfg.WriteTimeout,
 		readTimeout:  cfg.ReadTimeout,
 		cache:        make(map[string][]byte, cfg.CacheSize),
 		access:       make(map[string]int64, cfg.CacheSize),
 		maxSize:      cfg.CacheSize,
-		publicURL:    newPublicURLMapper(publicBase, cfg.ObjectPrefix),
+		// PublicURL serves the (content-addressed, un-namespaced) entry surface, so
+		// the mapper takes no namespace — a monitor's 302 resolves to entries/… as
+		// before.
+		publicURL: newPublicURLMapper(publicBase, cfg.ObjectPrefix),
 	}, nil
 }
 
+// keyOf is the entry path: <objectPrefix>/<seq:016x>/<hash>. Entries are
+// content-addressed (the key carries the hash), so they never collide across logs
+// and are NOT namespaced — that keeps the entry surface readable by the offline
+// tools and the 302 PublicURL without a namespace handshake.
 func (s *S3) keyOf(seq uint64, hash [32]byte) string {
 	return layoutKey(s.objectPrefix, seq, hash)
+}
+
+// nsKey namespaces a raw substrate key (an SMT tile path, the fixed-name
+// cosigned-checkpoint object) so the verbatim-key surface is isolated per log —
+// no fixed-name object is ever a single global key in a shared bucket (the proven
+// horizon-clobber class). Empty namespace ⇒ the flat legacy layout.
+func (s *S3) nsKey(key string) string {
+	return namespacedKey(s.namespace, key)
 }
 
 // PublicURL returns the credential-free URL for (seq, hash). The
@@ -333,14 +360,15 @@ func (s *S3) WriteEntry(ctx context.Context, seq uint64, hash [32]byte, wireByte
 func (s *S3) PutObject(ctx context.Context, key string, data []byte) error {
 	wctx, cancel := context.WithTimeout(ctx, s.writeTimeout)
 	defer cancel()
+	nsk := s.nsKey(key)
 	_, err := s.client.PutObject(wctx, &s3.PutObjectInput{
 		Bucket:      aws.String(s.bucket),
-		Key:         aws.String(key),
+		Key:         aws.String(nsk),
 		Body:        bytes.NewReader(data),
 		ContentType: aws.String("application/octet-stream"),
 	})
 	if err != nil {
-		return fmt.Errorf("bytestore/s3: PutObject key=%q: %w", key, err)
+		return fmt.Errorf("bytestore/s3: PutObject key=%q: %w", nsk, err)
 	}
 	return nil
 }
@@ -351,15 +379,16 @@ func (s *S3) PutObject(ctx context.Context, key string, data []byte) error {
 func (s *S3) GetObject(ctx context.Context, key string) ([]byte, error) {
 	rctx, cancel := context.WithTimeout(ctx, s.readTimeout)
 	defer cancel()
+	nsk := s.nsKey(key)
 	out, err := s.client.GetObject(rctx, &s3.GetObjectInput{
 		Bucket: aws.String(s.bucket),
-		Key:    aws.String(key),
+		Key:    aws.String(nsk),
 	})
 	if err != nil {
 		if isS3NotFound(err) {
-			return nil, fmt.Errorf("bytestore/s3: key=%q: %w", key, ErrNotFound)
+			return nil, fmt.Errorf("bytestore/s3: key=%q: %w", nsk, ErrNotFound)
 		}
-		return nil, fmt.Errorf("bytestore/s3: GetObject key=%q: %w", key, err)
+		return nil, fmt.Errorf("bytestore/s3: GetObject key=%q: %w", nsk, err)
 	}
 	defer func() { _ = out.Body.Close() }()
 	return io.ReadAll(out.Body)
@@ -371,15 +400,16 @@ func (s *S3) GetObject(ctx context.Context, key string) ([]byte, error) {
 func (s *S3) HeadObject(ctx context.Context, key string) (bool, error) {
 	rctx, cancel := context.WithTimeout(ctx, s.readTimeout)
 	defer cancel()
+	nsk := s.nsKey(key)
 	_, err := s.client.HeadObject(rctx, &s3.HeadObjectInput{
 		Bucket: aws.String(s.bucket),
-		Key:    aws.String(key),
+		Key:    aws.String(nsk),
 	})
 	if err != nil {
 		if isS3NotFound(err) {
 			return false, nil
 		}
-		return false, fmt.Errorf("bytestore/s3: HeadObject key=%q: %w", key, err)
+		return false, fmt.Errorf("bytestore/s3: HeadObject key=%q: %w", nsk, err)
 	}
 	return true, nil
 }

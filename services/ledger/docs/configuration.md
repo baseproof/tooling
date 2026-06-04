@@ -27,6 +27,12 @@ When `LEDGER_BYTE_STORE_BACKEND=s3`:
 |---|---|
 | `LEDGER_BYTE_STORE_S3_BUCKET` | `main.go:571` |
 
+### Per-log object-store namespace (shared-bucket isolation)
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `LEDGER_BYTE_STORE_NAMESPACE` | derived from `LEDGER_LOG_DID` (`bytestore.NamespaceForLog`) | First key segment prepended to the **raw** object surface — the SMT tiles and the fixed-name `cosigned-checkpoint` horizon. Lets multiple logs share one bucket without the last writer clobbering another log's horizon. The content-addressed **entry** surface is NOT namespaced (its keys carry the SHA-256 identity and never collide), so offline readers (`ledger-reader`, `rebuild-projection`) and the 302 public URL are unaffected. The resolved value is logged at boot (`byte store ready … namespace=…`). Empty only collapses to the flat legacy layout. |
+
 When witness mode is active — i.e., when EITHER
 `LEDGER_WITNESS_KEY_FILE` is set OR `LEDGER_WITNESS_ENDPOINTS` is
 non-empty:

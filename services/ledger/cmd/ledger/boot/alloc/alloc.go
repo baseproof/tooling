@@ -356,8 +356,15 @@ func allocateBytestore(ctx context.Context, cfg Config, d *deps.AppDeps) error {
 			return nil
 		},
 	})
+	// Log the resolved per-log namespace + bucket: this is the operator-visible
+	// proof that each log writes under an ISOLATED object-store namespace, so a
+	// fixed-name object (the cosigned-checkpoint horizon) can never be clobbered
+	// by another log sharing the bucket. Distinct namespaces across a multi-log
+	// deployment are verifiable directly from these lines.
 	d.Logger.Info("byte store ready",
 		"backend", cfg.BytestoreConfig.Backend,
+		"bucket", cfg.BytestoreConfig.Bucket,
+		"namespace", cfg.BytestoreConfig.Namespace,
 		"prefix", cfg.BytestoreConfig.Prefix,
 	)
 	return nil
