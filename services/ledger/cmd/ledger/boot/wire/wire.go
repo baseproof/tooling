@@ -1,0 +1,2132 @@
+// Package wire implements Phase B of the ledger binary's lifecycle:
+// compose the in-memory graph from the resources allocated in Phase A
+// (deps.AppDeps), install OTel instruments on the existing
+// MeterProvider, and start every long-running goroutine.
+//
+// FILE PATH:
+//
+//	cmd/ledger/boot/wire/wire.go
+//
+// DESCRIPTION:
+//
+//	Wire is the single entry point. It does NOT open new I/O
+//	resources — those are alloc.Allocate's job. Wire reads handles
+//	from *deps.AppDeps, constructs in-memory components (stores,
+//	fetchers, sequencer, shipper, builder loop, gossip bundle, HTTP
+//	server), and launches goroutines via lifecycle.SafeRunInWG that
+//	join on AppDeps.WG.
+//
+//	When Wire returns successfully every goroutine is running and
+//	the HTTP server is listening; the supervisor can immediately
+//	enter its select on ctx.Done() / fatal.
+//
+// KEY ARCHITECTURAL DECISIONS:
+//
+//   - Wire is split across several files inside this package so each
+//     file is small and cohesive (stores.go, instruments.go,
+//     gossip.go, handlers.go, runtime.go). The package boundary is
+//     wire/; the file boundaries are organizational.
+//
+//   - WireConfig is the alloc-relevant + wire-relevant projection of
+//     cmd/ledger.Config — passed by value so the boot package never
+//     imports the binary's full config struct.
+//
+//   - Every goroutine joins AppDeps.WG so teardown's
+//     "background-goroutines" step can wait once and have all
+//     workers drain before the I/O closers fire.
+//
+//   - Errors during wire abort cleanly: wire returns; main calls
+//     deps.UnwindReverse to release the resources alloc opened.
+package wire
+
+import (
+	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/base64"
+	"encoding/json"
+	"fmt"
+	"log/slog"
+	"net"
+	"net/http"
+	"net/http/pprof"
+	"os"
+	"runtime"
+	"strconv"
+	"strings"
+	"time"
+
+	"golang.org/x/net/netutil"
+
+	"github.com/baseproof/baseproof/authz"
+	sdkbuilder "github.com/baseproof/baseproof/builder"
+	"github.com/baseproof/baseproof/core/envelope"
+	"github.com/baseproof/baseproof/core/smt"
+	"github.com/baseproof/baseproof/crypto/artifact"
+	"github.com/baseproof/baseproof/crypto/cosign"
+	sdkdid "github.com/baseproof/baseproof/did"
+	"github.com/baseproof/baseproof/exchange/policy"
+	sdklog "github.com/baseproof/baseproof/log"
+	"github.com/baseproof/baseproof/log/discover"
+	"github.com/baseproof/baseproof/network"
+	"github.com/baseproof/baseproof/storage"
+	"github.com/baseproof/baseproof/types"
+	"github.com/baseproof/baseproof/witness"
+
+	"go.opentelemetry.io/otel"
+
+	"github.com/baseproof/tooling/services/ledger/admission"
+	"github.com/baseproof/tooling/services/ledger/anchor"
+	"github.com/baseproof/tooling/services/ledger/api"
+	"github.com/baseproof/tooling/services/ledger/api/middleware"
+	"github.com/baseproof/tooling/services/ledger/apitypes"
+	"github.com/baseproof/tooling/services/ledger/artifactstore"
+	"github.com/baseproof/tooling/services/ledger/builder"
+	"github.com/baseproof/tooling/services/ledger/bytestore"
+	"github.com/baseproof/tooling/services/ledger/cmd/ledger/boot/deps"
+	"github.com/baseproof/tooling/services/ledger/cmd/ledger/boot/schemareg"
+	"github.com/baseproof/tooling/services/ledger/contentvalidation"
+	"github.com/baseproof/tooling/services/ledger/gossipnet"
+	"github.com/baseproof/tooling/services/ledger/gossipstore"
+	"github.com/baseproof/tooling/services/ledger/integrity"
+	"github.com/baseproof/tooling/services/ledger/internal/auditorregistry"
+	"github.com/baseproof/tooling/services/ledger/internal/clienttls"
+	"github.com/baseproof/tooling/services/ledger/lifecycle"
+	"github.com/baseproof/tooling/services/ledger/reservation"
+	"github.com/baseproof/tooling/services/ledger/sequencer"
+	"github.com/baseproof/tooling/services/ledger/shipper"
+	"github.com/baseproof/tooling/services/ledger/store"
+	"github.com/baseproof/tooling/services/ledger/store/indexes"
+	"github.com/baseproof/tooling/services/ledger/tessera"
+	"github.com/baseproof/tooling/services/ledger/witnessclient"
+)
+
+// Config is the projection of cmd/ledger.Config relevant to Phase B
+// wiring. main.go converts its full Config to this struct before
+// calling Wire.
+type Config struct {
+	LogDID    string
+	LedgerDID string
+	NetworkID cosign.NetworkID
+
+	BatchSize            int
+	PollInterval         time.Duration
+	DeltaWindow          int
+	MMD                  time.Duration
+	SequencerInterval    time.Duration
+	SequencerMaxInFlight int
+	ShipperPollInterval  time.Duration
+	ShipperMaxInFlight   int
+	SMTNodeCacheSize     int
+
+	RecentEntryCacheSize     int
+	RecentEntryCacheMaxBytes int64
+
+	ArchiveShardIndexSource string
+
+	AnchorInterval time.Duration
+	AnchorSources  []anchor.AnchorSource
+
+	ParentLogDID         string
+	ParentAdmissionURL   string
+	ParentAnchorInterval time.Duration
+
+	EpochWindowSeconds    int
+	EpochAcceptanceWindow int
+	MaxEntrySize          int64
+
+	GossipPeerEndpoints []string
+	GossipPeerDIDs      []string
+	WitnessEndpoints    []string
+	WitnessQuorumK      int
+	GenesisWitnessSet   []string
+
+	GenesisAdmissionAuthorities [][20]byte
+	GenesisAdmissionPolicy      authz.AdmissionPolicy
+
+	GenesisBootstrapDocument network.BootstrapDocument
+
+	ServerAddr          string
+	TLSCertFile         string
+	TLSKeyFile          string
+	InboundClientCAFile string
+	MaxConcurrentConns  int
+	PprofAddr           string
+
+	PeerClientCertFile string
+	PeerClientKeyFile  string
+	PeerCAFile         string
+
+	TileServeDisable bool
+	TileBackend      string
+	TileBucketPrefix string
+	TileCacheSize    int
+
+	ByteStoreBackend       string
+	ByteStorePublicBaseURL string
+
+	MetricsEnable bool
+	Version       string
+	Commit        string
+	BuildTime     string
+	SDKVersion    string
+
+	LogInfo api.LogInfo
+
+	NetworkPeers   api.WireFederationGraph
+	NetworkMirrors api.WireMirrorManifest
+	NetworkAnchors api.WireAnchorChain
+}
+
+// Wire is the Phase B orchestrator.
+func Wire(ctx context.Context, cfg Config, d *deps.AppDeps) error {
+	// buildPeerHTTPClient ALWAYS returns a non-nil *http.Client (see
+	// its doc). Assign unconditionally so every downstream consumer
+	// (gossip, cosign, head-sync, anti-entropy, equivocation
+	// monitor) receives a live client — the v1.34 SDK contract is
+	// "no silent fallback to a plaintext default", and the ledger
+	// matches that posture in its own boot.
+	client, err := buildPeerHTTPClient(cfg)
+	if err != nil {
+		return fmt.Errorf("wire: peer mTLS config: %w", err)
+	}
+	d.OutboundHTTPClient = client
+	if cfg.PeerClientCertFile != "" {
+		d.Logger.Info("peer mTLS client configured",
+			"cert", cfg.PeerClientCertFile,
+			"ca", cfg.PeerCAFile)
+	} else {
+		d.Logger.Info("peer HTTP client configured (plaintext; no PeerClientCertFile)",
+			"ca", cfg.PeerCAFile)
+	}
+
+	tesseraAdapter := composeStores(ctx, cfg, d)
+
+	if cfg.RecentEntryCacheSize > 0 || cfg.RecentEntryCacheMaxBytes > 0 {
+		cache, cerr := store.NewBoundedRecentEntryCache(store.CacheConfig{
+			MaxEntries: cfg.RecentEntryCacheSize,
+			MaxBytes:   cfg.RecentEntryCacheMaxBytes,
+			LogDID:     cfg.LogDID,
+		})
+		if cerr != nil {
+			return fmt.Errorf("wire: recent-entry cache: %w", cerr)
+		}
+		d.RecentEntryCache = cache
+		d.Logger.Info("recent-entry cache enabled",
+			"max_entries", cfg.RecentEntryCacheSize,
+			"max_bytes", cfg.RecentEntryCacheMaxBytes,
+			"log_did", cfg.LogDID)
+	} else {
+		d.Logger.Info("recent-entry cache disabled (both LEDGER_RECENT_ENTRY_CACHE_SIZE and LEDGER_RECENT_ENTRY_CACHE_MAX_BYTES are 0)")
+	}
+
+	if cfg.ArchiveShardIndexSource != "" {
+		shards, lserr := lifecycle.LoadShardIndex(ctx, cfg.ArchiveShardIndexSource, d.OutboundHTTPClient)
+		if lserr != nil {
+			return fmt.Errorf("wire: archive shard index %q: %w", cfg.ArchiveShardIndexSource, lserr)
+		}
+		d.ArchiveReader = lifecycle.NewArchiveReader(shards, d.OutboundHTTPClient)
+		d.Logger.Info("archive reader enabled",
+			"source", cfg.ArchiveShardIndexSource,
+			"shards", len(shards))
+	}
+
+	d.DiffController = middleware.NewDifficultyController(
+		store.NewSequenceCursor(d.PgPool.DB),
+		middleware.DefaultDifficultyConfig(),
+		d.Logger,
+	)
+
+	installPrebuilderInstruments(d)
+
+	if err = wireWitnessQuorum(ctx, cfg, d); err != nil {
+		return fmt.Errorf("wire: %w", err)
+	}
+
+	if err = wireGossip(ctx, cfg, d); err != nil {
+		return fmt.Errorf("wire: gossip: %w", err)
+	}
+
+	cosigner, err := wireWitnessCosigner(cfg, d)
+	if err != nil {
+		return fmt.Errorf("wire: witness cosigner: %w", err)
+	}
+
+	escrowOverrideHandler := wireEscrowOverride(cfg, cosigner, d)
+
+	// Artifact content store — ONE content-addressed store shared by the
+	// derivation-commitment publisher (the #190 off-log mutation blobs) and the
+	// reservation manager (docket-artifact uploads). Built once here so the
+	// in-memory dev/test fallback doesn't diverge between the two paths.
+	d.ArtifactContentStore = commitmentContentStore(d.Logger)
+
+	// FINISH-gate content-type validator (verification code, not an on-log fact):
+	// the SDK crypto/artifact mechanism — reference validators for the deployment's
+	// accepted MIME types (LEDGER_ARTIFACT_ACCEPTED_MIME_TYPES), any custom
+	// validators a network registered via contentvalidation.Register, and a
+	// deny-unknown stance (LEDGER_ARTIFACT_DENY_UNKNOWN_MIME). nil => no validation.
+	contentValidator := buildContentValidator(d.Logger)
+
+	// Reservation manager (ledger#193): the RESERVE -> token -> UPLOAD -> FINISH
+	// lifecycle for docket artifacts, backed by Postgres with a CAS-safe FINISH.
+	// Constructed before composeHandlers (it serves the FINISH route) and before
+	// composeBuilderLoop (which reuses ArtifactContentStore). The REAP goroutine
+	// is launched in startGoroutines.
+	d.ReservationManager = reservation.NewManager(reservation.Config{
+		Store:     reservation.NewPostgresStore(d.PgPool.DB),
+		Content:   d.ArtifactContentStore,
+		Validator: contentValidator,
+		SignKey:   uploadTokenKey(d.Logger),
+		NetworkID: fmt.Sprintf("%x", cfg.NetworkID),
+		TTL:       reservationTTL(),
+	})
+
+	bl, anchorPub := composeBuilderLoop(ctx, cfg, d, tesseraAdapter)
+	d.BuilderLoop = bl
+	d.AnchorPublisher = anchorPub
+
+	// The CheckpointLoop is the single authoritative position of the log: it
+	// tiles the latest committed root durable, then cosigns + publishes THAT root
+	// as the horizon, lagging the commit cursor (builder/checkpoint_loop.go). It
+	// replaces both the legacy TileReconciler→HorizonPublisher seam AND the
+	// builder's pre-commit cosign. Enabled when SMT tile emission is configured
+	// (the substrate the horizon is served from) — the same boundary the legacy
+	// reconciler used.
+	var checkpointLoop *builder.CheckpointLoop
+	if tileDir := strings.TrimSpace(os.Getenv("LEDGER_SMT_TILE_EMIT_DIR")); tileDir != "" {
+		var checkpointPub builder.CheckpointPublisher = tesseraAdapter
+		if s3, ok := d.ByteStore.(*bytestore.S3); ok {
+			checkpointPub = store.NewS3CheckpointPublisher(s3)
+		}
+		checkpointLoop = builder.NewCheckpointLoop(
+			store.NewSMTCommitCursor(store.NewSMTRootStateStore(d.PgPool.DB)),
+			store.NewPgTileFrontier(d.PgPool.DB),
+			store.NewBuildTilesEmitter(d.NodeStore, smtTileStore(d.ByteStore, tileDir)),
+			tesseraAdapter, // CheckpointRooter — RootAtSize from durable Merkle tiles
+			checkpointPub,  // CheckpointPublisher — POSIX (tessera) or shared S3
+			cosigner,       // WitnessCosigner — K-of-N over the durable head
+			// ReceiptRoot from entry_index metadata only — never the Badger WAL
+			// bytes, so a shipped+pruned delta entry can't stall the horizon.
+			store.NewEntryIndexReceiptRanger(d.PgPool.DB, cfg.LogDID),
+			0, // interval → 1s default
+			d.Logger,
+		)
+		d.Logger.Info("checkpoint loop enabled", "tile_dir", tileDir, "quorum_k", cfg.WitnessQuorumK)
+	}
+
+	reg, err := schemareg.BuildLedgerSchemaRegistry()
+	if err != nil {
+		return fmt.Errorf("wire: schemareg.BuildLedgerSchemaRegistry: %w", err)
+	}
+	d.SchemaRegistry = reg
+
+	handlers, err := composeHandlers(ctx, cfg, d, tesseraAdapter, escrowOverrideHandler, bl.Tree())
+	if err != nil {
+		return fmt.Errorf("wire: handlers: %w", err)
+	}
+
+	seq := composeSequencer(cfg, d)
+	d.Sequencer = seq
+	ship := composeShipper(cfg, d)
+	d.Shipper = ship
+	detector := composeIntegrityDetector(d)
+	smtDetector := composeSMTDetector(d)
+
+	installLateBoundGauges(cfg, d, seq, ship)
+
+	if err := composeServers(cfg, d, handlers); err != nil {
+		return fmt.Errorf("wire: servers: %w", err)
+	}
+
+	if err := recoverTailOnBoot(ctx, d); err != nil {
+		return fmt.Errorf("wire: tail recovery: %w", err)
+	}
+
+	startGoroutines(ctx, d, bl, checkpointLoop, seq, ship, detector, smtDetector)
+
+	return nil
+}
+
+// buildPeerHTTPClient always returns a non-nil *http.Client. When
+// the deployment configures peer mTLS material (PeerClientCertFile +
+// PeerClientKeyFile, optionally PeerCAFile), the returned client
+// presents that material on every outbound peer connection. When no
+// mTLS material is configured, it returns a plaintext client with
+// the same RetryAfterRoundTripper posture — appropriate for
+// dev/test and for deployments that terminate mTLS at an upstream
+// proxy.
+//
+// As of the v1.34 SDK contract, downstream constructors (gossip,
+// cosign, head-sync, anti-entropy, equivocation monitor) reject a
+// nil *http.Client at construction time — see baseproof CHANGELOG
+// 1.34.0. This function consequently never returns nil; callers can
+// always assign the result to d.OutboundHTTPClient unconditionally.
+func buildPeerHTTPClient(cfg Config) (*http.Client, error) {
+	tlsCfg, err := (&clienttls.Flags{
+		CertFile: cfg.PeerClientCertFile,
+		KeyFile:  cfg.PeerClientKeyFile,
+		CAFile:   cfg.PeerCAFile,
+	}).TLSConfig()
+	if err != nil {
+		return nil, err
+	}
+	// sdklog.DefaultClient accepts a nil *tls.Config and produces a
+	// plaintext transport; the resulting client still carries the
+	// RetryAfterRoundTripper for 503 backpressure handling, which
+	// matters as much for plaintext fan-out as it does for mTLS.
+	return sdklog.DefaultClient(30*time.Second, tlsCfg), nil
+}
+
+func recoverTailOnBoot(ctx context.Context, d *deps.AppDeps) error {
+	committed, err := d.SMTRootState.Read(ctx)
+	if err != nil {
+		return fmt.Errorf("read committed root: %w", err)
+	}
+	_, fRoot, err := store.NewPgTileFrontier(d.PgPool.DB).ReadFrontier(ctx)
+	if err != nil {
+		return fmt.Errorf("read tile frontier: %w", err)
+	}
+	if committed.CurrentRoot == fRoot {
+		return nil
+	}
+	leaves, err := d.LeafStore.ListAll(ctx)
+	if err != nil {
+		return fmt.Errorf("list leaves: %w", err)
+	}
+	d.Logger.Warn("tail recovery: tile frontier behind committed root; replaying smt_leaves to rebuild the node tail",
+		"committed_seq", committed.CommittedThroughSeq, "leaves", len(leaves))
+	if err := store.RecoverTail(ctx, leaves, d.NodeStore, committed.CurrentRoot); err != nil {
+		return err
+	}
+	d.Logger.Info("tail recovery complete",
+		"leaves_replayed", len(leaves),
+		"committed_root", fmt.Sprintf("%x", committed.CurrentRoot[:8]))
+	return nil
+}
+
+func composeStores(ctx context.Context, cfg Config, d *deps.AppDeps) *tessera.TesseraAdapter {
+	pool := d.PgPool.DB
+	d.EntryStore = store.NewEntryStore(pool)
+	d.CreditStore = store.NewCreditStore(pool)
+	d.CommitStore = store.NewCommitmentStore(pool)
+	d.LeafStore = store.NewPostgresLeafStore(pool)
+	cacheSize := cfg.SMTNodeCacheSize
+	if cacheSize <= 0 {
+		cacheSize = 4096
+	}
+	tileDir := strings.TrimSpace(os.Getenv("LEDGER_SMT_TILE_EMIT_DIR"))
+	if tileDir == "" {
+		tileDir = "/var/lib/ledger/tiles"
+	}
+	d.NodeStore = store.NewTailedNodeStore(
+		smt.NewTiledNodeStore(ctx, smtTileStore(d.ByteStore, tileDir), smt.NewTileCache(cacheSize)),
+	)
+	d.TreeHeadStore = store.NewTreeHeadStore(pool)
+	d.SMTRootState = store.NewSMTRootStateStore(pool)
+	return tessera.NewTesseraAdapter(ctx, d.TesseraEmbedded, d.TileReader, d.Logger)
+}
+
+func smtTileStore(bs bytestore.Backend, tileDir string) store.SMTTileStore {
+	if s3, ok := bs.(*bytestore.S3); ok {
+		return store.NewS3SMTTileStore(s3)
+	}
+	return store.NewPosixSMTTileStore(tileDir)
+}
+
+func smtMaxTileLag() uint64 {
+	if v := strings.TrimSpace(os.Getenv("LEDGER_SMT_MAX_TILE_LAG")); v != "" {
+		if n, err := strconv.ParseUint(v, 10, 64); err == nil && n > 0 {
+			return n
+		}
+	}
+	return 100000
+}
+
+// commitmentContentStore builds the off-log store for derivation-commitment
+// mutation blobs (the #190 path). The commitment sidecar is PUBLIC content
+// fetched by CID, so a posix-backed artifact store at LEDGER_ARTIFACT_STORE_DIR
+// is the simple in-process backing. With the dir unset it falls back to an
+// in-memory store (dev / tests) — durable enough for a single process, with a
+// warning that the blobs won't survive restart.
+func commitmentContentStore(logger *slog.Logger) storage.ContentStore {
+	// Service mode: when LEDGER_ARTIFACT_STORE_URL is set, talk to a standalone
+	// artifact-store (cmd/artifact-store) over the SDK HTTPContentStore client —
+	// the in-process<->service flip is this config choice, not a code change.
+	if url := strings.TrimSpace(os.Getenv("LEDGER_ARTIFACT_STORE_URL")); url != "" {
+		cs, err := storage.NewHTTPContentStore(storage.HTTPContentStoreConfig{
+			BaseURL: url,
+			Client:  &http.Client{Timeout: 30 * time.Second},
+		})
+		if err != nil {
+			logger.Error("artifact store: http mode init failed; falling back to local", "url", url, "error", err)
+		} else {
+			logger.Info("artifact store: http (service) mode", "url", url)
+			return cs
+		}
+	}
+	dir := strings.TrimSpace(os.Getenv("LEDGER_ARTIFACT_STORE_DIR"))
+	if dir == "" {
+		logger.Warn("artifact store: LEDGER_ARTIFACT_STORE_DIR unset; using in-memory store " +
+			"(commitment mutation blobs are not durable across restart)")
+		return artifactstore.NewStore(artifactstore.NewMemoryBackend())
+	}
+	b, err := artifactstore.NewPosixBackend(dir)
+	if err != nil {
+		logger.Error("artifact store: posix backend init failed; falling back to in-memory",
+			"dir", dir, "error", err)
+		return artifactstore.NewStore(artifactstore.NewMemoryBackend())
+	}
+	logger.Info("artifact store: posix backend wired", "dir", dir)
+	return artifactstore.NewStore(b)
+}
+
+// uploadTokenKey returns the ed25519 signing key for artifact upload tokens
+// (the relay-defense seal on RESERVE -> UPLOAD). It loads a base64 std-encoded
+// 32-byte seed from LEDGER_UPLOAD_TOKEN_KEY when set; otherwise it generates an
+// ephemeral key and warns. An ephemeral key is safe within a single process
+// lifetime — tokens are short-lived (reservation TTL) — but tokens minted
+// before a restart won't verify after it, and in a multi-replica deployment
+// every replica must share the SAME seed or a token minted by one replica
+// won't verify at another. Set LEDGER_UPLOAD_TOKEN_KEY in production.
+func uploadTokenKey(logger *slog.Logger) ed25519.PrivateKey {
+	if raw := strings.TrimSpace(os.Getenv("LEDGER_UPLOAD_TOKEN_KEY")); raw != "" {
+		seed, err := base64.StdEncoding.DecodeString(raw)
+		if err != nil {
+			logger.Error("LEDGER_UPLOAD_TOKEN_KEY is not valid base64; generating an ephemeral key", "error", err)
+		} else if len(seed) != ed25519.SeedSize {
+			logger.Error("LEDGER_UPLOAD_TOKEN_KEY wrong length; generating an ephemeral key",
+				"want_bytes", ed25519.SeedSize, "got_bytes", len(seed))
+		} else {
+			logger.Info("artifact upload token key loaded from LEDGER_UPLOAD_TOKEN_KEY")
+			return ed25519.NewKeyFromSeed(seed)
+		}
+	}
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		// crypto/rand failure is fatal-class; the manager would be unusable.
+		panic(fmt.Sprintf("wire: ed25519 upload-token key generation failed: %v", err))
+	}
+	logger.Warn("artifact upload token key is EPHEMERAL (LEDGER_UPLOAD_TOKEN_KEY unset); " +
+		"upload tokens won't survive a restart and won't verify across replicas")
+	return priv
+}
+
+// reservationTTL is the window between RESERVE and FINISH before the reaper
+// expires an un-finished reservation. Overridable via LEDGER_RESERVATION_TTL
+// (any time.ParseDuration string); defaults to 15m.
+func reservationTTL() time.Duration {
+	if v := strings.TrimSpace(os.Getenv("LEDGER_RESERVATION_TTL")); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			return d
+		}
+	}
+	return 15 * time.Minute
+}
+
+// reservationFinishHandler returns the POST /v1/artifacts/{cid}/finish handler,
+// or nil when the reservation manager is unwired (the route is then simply not
+// mounted by api.NewServer).
+func reservationFinishHandler(d *deps.AppDeps) http.HandlerFunc {
+	if d.ReservationManager == nil {
+		return nil
+	}
+	return reservation.NewFinishHandler(d.ReservationManager)
+}
+
+// artifactReserveHandler builds the POST /v1/artifacts/reserve handler over the
+// shared submission deps + the reservation Manager, or nil when the manager is
+// unwired (the route is then simply not mounted).
+func artifactReserveHandler(deps *api.SubmissionDeps, mgr *reservation.Manager) http.HandlerFunc {
+	if mgr == nil {
+		return nil
+	}
+	return api.NewArtifactReserveHandler(deps, mgr)
+}
+
+// buildContentValidator builds the FINISH-gate content-type validator from
+// deployment config — verification code, not an on-log policy. The accepted MIME
+// set is a gating knob (LEDGER_ARTIFACT_ACCEPTED_MIME_TYPES, comma-separated) and
+// the unknown-type stance is LEDGER_ARTIFACT_DENY_UNKNOWN_MIME. Custom validators
+// registered by a network via contentvalidation.Register (an init() hook) are
+// folded in automatically. Returns nil — no validation — when nothing is to be
+// enforced.
+func buildContentValidator(logger *slog.Logger) artifact.ContentValidator {
+	accepted := splitAndTrim(os.Getenv("LEDGER_ARTIFACT_ACCEPTED_MIME_TYPES"))
+	denyUnknown := strings.EqualFold(strings.TrimSpace(os.Getenv("LEDGER_ARTIFACT_DENY_UNKNOWN_MIME")), "true")
+	v := contentvalidation.BuildValidator(accepted, denyUnknown)
+	if v == nil {
+		logger.Info("artifact content-type validation disabled (no accepted MIME types, no custom validators, not deny-unknown)")
+		return nil
+	}
+	logger.Info("artifact content-type validation enabled",
+		"accepted_mime_types", accepted, "deny_unknown", denyUnknown, "custom_validators", contentvalidation.Registered())
+	return v
+}
+
+// splitAndTrim splits a comma-separated env value into a trimmed, empty-free slice.
+func splitAndTrim(csv string) []string {
+	if strings.TrimSpace(csv) == "" {
+		return nil
+	}
+	parts := strings.Split(csv, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if t := strings.TrimSpace(p); t != "" {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+func composeBuilderLoop(
+	ctx context.Context,
+	cfg Config,
+	d *deps.AppDeps,
+	tesseraAdapter *tessera.TesseraAdapter,
+) (*builder.BuilderLoop, *anchor.Publisher) {
+	pool := d.PgPool.DB
+
+	compositeReader := store.NewCompositeByteReader(d.WALCommitter, d.ByteStore, d.Logger)
+
+	fetcher := store.NewPostgresEntryFetcher(pool, compositeReader, cfg.LogDID).
+		WithCache(d.RecentEntryCache)
+	bufferStore := builder.NewDeltaBufferStore(pool, cfg.DeltaWindow, d.Logger)
+	sequenceCursor := store.NewSequenceCursor(pool)
+	reader := builder.NewCursorReader(sequenceCursor)
+	tree := smt.NewTree(d.LeafStore, d.NodeStore)
+	if rs, rsErr := store.NewSMTRootStateStore(pool).Read(ctx); rsErr == nil {
+		tree.SetRoot(rs.CurrentRoot)
+	} else {
+		d.Logger.Warn("smt tree boot-seed: smt_root_state read failed; starting at EmptyHash", "error", rsErr)
+	}
+
+	buffer, loadErr := bufferStore.Load(ctx)
+	if loadErr != nil {
+		d.Logger.Warn("delta buffer load — starting cold", "error", loadErr)
+		buffer = sdkbuilder.NewDeltaWindowBuffer(cfg.DeltaWindow)
+	}
+
+	signedSelfSubmit := anchor.SignAndSubmit(
+		d.LedgerSignerPriv,
+		d.LedgerDID,
+		anchor.SubmitInProcess(func() http.Handler { return d.SubmitHandler }),
+	)
+
+	commitPub := builder.NewCommitmentPublisher(
+		cfg.LedgerDID,
+		cfg.LogDID,
+		builder.CommitmentPublisherConfig{
+			IntervalEntries: 1000,
+			IntervalTime:    1 * time.Hour,
+		},
+		signedSelfSubmit,
+		d.Logger,
+	).WithCommitmentStore(d.CommitStore).
+		WithContentStore(d.ArtifactContentStore)
+
+	loopCfg := builder.DefaultLoopConfig(cfg.LogDID)
+	loopCfg.BatchSize = cfg.BatchSize
+	loopCfg.PollInterval = cfg.PollInterval
+	loopCfg.DeltaWindow = cfg.DeltaWindow
+
+	bl := builder.NewBuilderLoop(
+		loopCfg, pool, tree, d.LeafStore, d.NodeStore,
+		reader, fetcher,
+		nil,
+		buffer, bufferStore,
+		commitPub,
+		tesseraAdapter,
+		d.Logger,
+	).WithRootStore(store.NewSMTRootStateStore(pool)).
+		WithTileFrontierGate(store.NewPgTileFrontier(pool), smtMaxTileLag())
+
+	// Part II.9 parent-target submit composition.
+	//
+	// v1.32.0 L5 backdoor closure: the parent admission URL is
+	// resolved through the on-log FederationGraph via
+	// d.PeerAdmissionURLResolver (a thin closure over
+	// *discover.DefaultAuthoritativeResolver.ResolvePeer) when the
+	// resolver is wired. cfg.ParentAdmissionURL remains as the
+	// CANARY FALLBACK for the bootstrap window before a
+	// FederationGraph entry has been admitted.
+	var parentSubmitFn func(entry *envelope.Entry) error
+	resolverAvailable := d.PeerAdmissionURLResolver != nil
+	if cfg.ParentLogDID != "" && (resolverAvailable || cfg.ParentAdmissionURL != "") {
+		parentSubmitFn = anchor.SignAndSubmit(
+			d.LedgerSignerPriv,
+			d.LedgerDID,
+			anchor.SubmitToResolvedHTTPEndpoint(
+				d.OutboundHTTPClient,
+				d.PeerAdmissionURLResolver,
+				cfg.ParentLogDID,
+				cfg.ParentAdmissionURL, // canary fallback
+				d.Logger,
+			),
+		)
+	}
+
+	anchorPub := anchor.NewPublisher(
+		anchor.PublisherConfig{
+			LedgerDID:     cfg.LedgerDID,
+			LogDID:        cfg.LogDID,
+			NetworkID:     cfg.NetworkID,
+			Interval:      cfg.AnchorInterval,
+			AnchorSources: cfg.AnchorSources,
+			HTTPClient:    d.OutboundHTTPClient,
+
+			ParentLogDID:         cfg.ParentLogDID,
+			ParentAdmissionURL:   cfg.ParentAdmissionURL,
+			ParentAnchorInterval: cfg.ParentAnchorInterval,
+			ParentSubmitFn:       parentSubmitFn,
+		},
+		tesseraAdapter,
+		treeHeadStoreCosignedAdapter{store: d.TreeHeadStore},
+		signedSelfSubmit,
+		d.Logger,
+	)
+
+	return bl, anchorPub
+}
+
+type treeHeadStoreCosignedAdapter struct {
+	store *store.TreeHeadStore
+}
+
+func (a treeHeadStoreCosignedAdapter) LatestCosigned(ctx context.Context) (*types.CosignedTreeHead, error) {
+	head, err := a.store.Latest(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if head == nil {
+		return nil, nil
+	}
+	sigs := make([]types.WitnessSignature, 0, len(head.Signatures))
+	for _, s := range head.Signatures {
+		var ws types.WitnessSignature
+		if err := json.Unmarshal(s.Signature, &ws); err != nil {
+			continue
+		}
+		sigs = append(sigs, ws)
+	}
+	out := &types.CosignedTreeHead{
+		TreeHead: types.TreeHead{
+			RootHash:    head.RootHash,
+			SMTRoot:     head.SMTRoot,
+			ReceiptRoot: head.ReceiptRoot,
+			TreeSize:    head.TreeSize,
+		},
+		Signatures: sigs,
+	}
+	return out, nil
+}
+
+func composeHandlers(
+	ctx context.Context,
+	cfg Config,
+	d *deps.AppDeps,
+	tesseraAdapter *tessera.TesseraAdapter,
+	escrowOverrideHandler http.HandlerFunc,
+	smtTree *smt.Tree,
+) (api.Handlers, error) {
+	pool := d.PgPool.DB
+	witnessHistoryFetcher := witnessclient.NewHistoryFetcher(pool)
+	compositeReader := store.NewCompositeByteReader(d.WALCommitter, d.ByteStore, d.Logger)
+	fetcher := store.NewPostgresEntryFetcher(pool, compositeReader, cfg.LogDID).
+		WithCache(d.RecentEntryCache)
+	queryAPI := indexes.NewPostgresQueryAPI(ctx, pool, compositeReader, cfg.LogDID)
+
+	// v1.32.0 SDK adoption — Tier B: construct
+	// *discover.DefaultAuthoritativeResolver from on-log walker sources
+	// and populate the four resolver-backed AppDeps fields.
+	treeSizer := treeSizeProviderFunc(func(ctx context.Context) (uint64, error) {
+		head, err := d.TreeHeadStore.Latest(ctx)
+		if err != nil || head == nil {
+			return 0, err
+		}
+		return head.TreeSize, nil
+	})
+	if err := wireV1_32Resolver(ctx, queryAPI, cfg.GenesisBootstrapDocument, cfg.LogDID, treeSizer, d); err != nil {
+		d.Logger.Warn("v1.32.0: AuthoritativeResolver wire-up failed; legacy canary-fallback paths remain active",
+			"error", err,
+		)
+	}
+
+	var blsQuorumVerifier *admission.BLSQuorumVerifier
+	if d.QuorumManager != nil {
+		blsQuorumVerifier = admission.NewBLSQuorumVerifier(d.QuorumManager)
+		if set := d.QuorumManager.Current(); set != nil {
+			d.Logger.Info("admission: embedded-tree-head BLS verifier enabled",
+				"witness_set_size", set.Size(),
+				"quorum_k", set.Quorum(),
+			)
+		}
+	}
+
+	submissionDeps := &api.SubmissionDeps{
+		Storage: api.StorageDeps{
+			EntryStore: d.EntryStore,
+			WAL:        d.WALCommitter,
+			Tessera:    d.TesseraEmbedded,
+		},
+		Admission: api.AdmissionConfig{
+			DiffController:        d.DiffController,
+			EpochWindowSeconds:    cfg.EpochWindowSeconds,
+			EpochAcceptanceWindow: cfg.EpochAcceptanceWindow,
+		},
+		Identity:           buildIdentityDeps(d),
+		LedgerDID:          cfg.LedgerDID,
+		LogDID:             cfg.LogDID,
+		LedgerSignerPriv:   d.LedgerSignerPriv,
+		MaxEntrySize:       cfg.MaxEntrySize,
+		Logger:             d.Logger,
+		FreshnessTolerance: policy.FreshnessInteractive,
+		BLSQuorumVerifier:  blsQuorumVerifier,
+		SchemaRegistry:     d.SchemaRegistry,
+		Gates:              admission.LoadGatesFromEnv(),
+		AdmissionAuthorities: admission.NewOnLogAdmissionKeyset(
+			buildAdmissionAuthoritySource(queryAPI), cfg.GenesisAdmissionAuthorities, 30*time.Second),
+		AdmissionPolicy: admission.NewOnLogAdmissionPolicy(
+			buildAdmissionPolicySource(queryAPI), cfg.GenesisAdmissionPolicy, 30*time.Second),
+		EvidenceChainFetcher: fetcher,
+		SignaturePolicyResolver: buildSignaturePolicyResolver(
+			cfg.GenesisBootstrapDocument, queryAPI, d.TreeHeadStore,
+			cfg.LogDID, cfg.NetworkID, d.Logger),
+		AlgorithmPolicyResolver: buildAlgorithmPolicyResolver(
+			cfg.GenesisBootstrapDocument, queryAPI, d.TreeHeadStore,
+			cfg.LogDID, cfg.NetworkID, d.Logger),
+		ProtocolVersionResolver: buildProtocolVersionResolver(
+			queryAPI, d.TreeHeadStore, cfg.LogDID, cfg.NetworkID, d.Logger),
+		DifficultyResolver: buildDifficultyResolver(d.DiffController, d.Logger),
+	}
+
+	queryDeps := &api.QueryDeps{
+		EntryStore:     d.EntryStore,
+		QueryAPI:       queryAPI,
+		DiffController: d.DiffController,
+		Logger:         d.Logger,
+		WAL:            d.WALCommitter,
+	}
+	treeDeps := &api.TreeDeps{
+		TreeHeadStore: d.TreeHeadStore,
+		Inclusion:     tesseraAdapter,
+		Consistency:   tesseraAdapter,
+		Logger:        d.Logger,
+	}
+	smtDeps := &api.SMTDeps{
+		Tree:      smtTree,
+		LeafStore: d.LeafStore,
+		RootState: store.NewSMTRootStateStore(pool),
+		Logger:    d.Logger,
+	}
+	smtDeps.ProofSource = store.ParseSMTProofSource(os.Getenv("LEDGER_SMT_PROOF_SOURCE"))
+	if tileDir := strings.TrimSpace(os.Getenv("LEDGER_SMT_TILE_EMIT_DIR")); tileDir != "" {
+		smtDeps.Tiles = smtTileStore(d.ByteStore, tileDir)
+		smtDeps.TileCache = smt.NewTileCache(1 << 16)
+	}
+	var horizonHandler http.HandlerFunc
+	var horizonReader api.HorizonReader
+	if s3, ok := d.ByteStore.(*bytestore.S3); ok {
+		horizonReader = store.NewS3HorizonReader(s3)
+	} else if d.TileBackend != nil {
+		horizonReader = api.NewTileBackendHorizon(d.TileBackend)
+	}
+	if horizonReader != nil {
+		smtDeps.Horizon = horizonReader
+		horizonHandler = api.NewCosignedCheckpointHandler(horizonReader, d.Logger)
+	}
+	entryReadDeps := &api.EntryReadDeps{
+		Fetcher:     fetcher,
+		QueryAPI:    queryAPI,
+		EntryStore:  d.EntryStore,
+		WAL:         d.WALCommitter,
+		PublicURLer: d.ByteStore.(api.PublicURLer),
+		LogDID:      cfg.LogDID,
+		Logger:      d.Logger,
+	}
+	commitDeps := &api.DerivationCommitmentDeps{CommitmentStore: d.CommitStore, Logger: d.Logger}
+
+	d.Logger.Info("bytestore: routing configured",
+		"backend", cfg.ByteStoreBackend,
+		"public_base_url", cfg.ByteStorePublicBaseURL,
+	)
+
+	var commitmentLookupHandler http.HandlerFunc
+	if d.GossipStore != nil {
+		commitmentLookupHandler = api.NewCommitmentLookupHandler(
+			&api.CryptographicCommitmentDeps{
+				Fetcher: gossipstore.NewBadgerCommitmentFetcher(d.GossipStore),
+				Logger:  d.Logger,
+			})
+	}
+
+	checkpointHandler, tileHandler, err := composeTileHandlers(cfg, d)
+	if err != nil {
+		return api.Handlers{}, err
+	}
+
+	mmdHandler := api.NewMMDHandler(cfg.MMD)
+	submitHandler := api.NewSubmissionHandler(submissionDeps)
+	batchSubmitHandler := api.NewBatchSubmissionHandler(submissionDeps)
+
+	d.SubmitHandler = submitHandler
+
+	gossipPostH, gossipFeedH := http.Handler(nil), http.Handler(nil)
+	if d.GossipBundle != nil {
+		gossipPostH = d.GossipBundle.PostHandler
+		gossipFeedH = d.GossipBundle.FeedHandler
+	}
+
+	return api.Handlers{
+		Submission:        submitHandler,
+		BatchSubmission:   batchSubmitHandler,
+		TreeHead:          api.NewTreeHeadHandler(treeDeps),
+		TreeInclusion:     api.NewTreeInclusionHandler(treeDeps),
+		TreeConsistency:   api.NewTreeConsistencyHandler(treeDeps),
+		SMTProof:          api.NewSMTProofHandler(smtDeps),
+		SMTBatchProof:     api.NewSMTBatchProofHandler(smtDeps),
+		SMTRoot:           api.NewSMTRootHandler(smtDeps),
+		CosignatureOf:     api.NewQueryCosignatureOfHandler(queryDeps),
+		TargetRoot:        api.NewQueryTargetRootHandler(queryDeps),
+		SignerDID:         api.NewQuerySignerDIDHandler(queryDeps),
+		SchemaRef:         api.NewQuerySchemaRefHandler(queryDeps),
+		DelegateDID:       api.NewQueryDelegateDIDHandler(queryDeps),
+		Scan:              api.NewQueryScanHandler(queryDeps),
+		Difficulty:        api.NewDifficultyHandler(queryDeps),
+		AdmissionPolicy:   api.NewAdmissionPolicyHandler(submissionDeps.AdmissionPolicy),
+		MMD:               mmdHandler,
+		EntryByHash:       api.NewHashLookupHandler(queryDeps),
+		EntryHashBatch:    api.NewBatchHashLookupHandler(queryDeps),
+		GossipPost:        gossipPostH,
+		GossipFeed:        gossipFeedH,
+		EscrowOverride:    escrowOverrideHandler,
+		Metrics:           d.MetricsHandler,
+		EntryBySequence:   api.NewEntryBySequenceHandler(entryReadDeps),
+		EntryBatch:        api.NewEntryBatchHandler(entryReadDeps),
+		EntryRaw:          api.NewRawEntryHandler(entryReadDeps),
+		SMTLeaf:           api.NewSMTLeafHandler(smtDeps),
+		SMTLeafBatch:      api.NewSMTLeafBatchHandler(smtDeps),
+		CommitmentQuery:   api.NewDerivationCommitmentQueryHandler(commitDeps),
+		CommitmentLookup:  commitmentLookupHandler,
+		ArtifactReserve:   artifactReserveHandler(submissionDeps, d.ReservationManager),
+		ReservationFinish: reservationFinishHandler(d),
+		Checkpoint:        checkpointHandler,
+		Tile:              tileHandler,
+		Horizon:           horizonHandler,
+		LogInfo:           api.NewLogInfoHandler(cfg.LogInfo),
+		Version: api.NewVersionHandler(api.VersionInfo{
+			Version:    cfg.Version,
+			Commit:     cfg.Commit,
+			BuildTime:  cfg.BuildTime,
+			SDKVersion: cfg.SDKVersion,
+		}),
+		NetworkPeers:       api.NewNetworkPeersHandler(cfg.NetworkPeers),
+		NetworkBootstrap:   buildNetworkBootstrapHandler(cfg.GenesisBootstrapDocument, d.Logger),
+		NetworkIdentity:    buildNetworkIdentityHandler(cfg.GenesisBootstrapDocument, d.Logger),
+		NetworkMirrors:     api.NewNetworkMirrorsHandler(cfg.NetworkMirrors),
+		WitnessesCurrent:   api.NewWitnessesCurrentHandler(witnessHistoryFetcher),
+		WitnessesBySetHash: api.NewWitnessesBySetHashHandler(witnessHistoryFetcher),
+		WitnessesAtSeq:     api.NewWitnessesAtSeqHandler(witnessHistoryFetcher),
+		NetworkAnchors:     api.NewNetworkAnchorsHandler(cfg.NetworkAnchors),
+
+		// v1.32.0 L3 — materialized walker-projection endpoints.
+		NetworkLabels:           api.NewNetworkLabelsHandler(d.WitnessLabelsFetcher),
+		NetworkAuditors:         api.NewNetworkAuditorsHandler(d.AuditorRegistryFetcher),
+		NetworkWitnessEndpoints: api.NewNetworkWitnessEndpointsHandler(d.WitnessEndpointsFetcher),
+
+		Bundle: api.NewBundleHandler(buildBundleDeps(
+			cfg.GenesisBootstrapDocument,
+			fetcher,
+			treeHeadStoreCosignedAdapter{store: d.TreeHeadStore},
+			tesseraAdapter,
+			smtTree,
+			witnessHistoryFetcher,
+			cfg.LogDID,
+		)),
+	}, nil
+}
+
+func buildNetworkBootstrapHandler(doc network.BootstrapDocument, logger *slog.Logger) http.HandlerFunc {
+	if doc.NetworkName == "" {
+		return api.NewNetworkBootstrapHandler(nil)
+	}
+	canonical, err := doc.CanonicalBytes()
+	if err != nil {
+		logger.Error("Part II.1: BootstrapDocument.CanonicalBytes failed; "+
+			"/v1/network/bootstrap will 404", "error", err)
+		return api.NewNetworkBootstrapHandler(nil)
+	}
+	return api.NewNetworkBootstrapHandler(canonical)
+}
+
+func buildNetworkIdentityHandler(doc network.BootstrapDocument, logger *slog.Logger) http.HandlerFunc {
+	id, err := api.BuildNetworkIdentity(doc)
+	if err != nil {
+		logger.Error("Part II.1: BuildNetworkIdentity failed; "+
+			"/v1/network/identity will 404", "error", err)
+		return api.NewNetworkIdentityHandler(api.NetworkIdentity{})
+	}
+	return api.NewNetworkIdentityHandler(id)
+}
+
+func buildAdmissionAuthoritySource(q *indexes.PostgresQueryAPI) admission.KeysetSource {
+	empty := func(context.Context) ([]authz.EOAKeysetRecord, error) { return nil, nil }
+	schemaPos, ok := parseSchemaEnv("LEDGER_ADMISSION_AUTHORITY_SCHEMA")
+	if !ok {
+		return empty
+	}
+	return func(ctx context.Context) ([]authz.EOAKeysetRecord, error) {
+		entries, err := q.QueryBySchemaRef(schemaPos)
+		if err != nil {
+			return nil, err
+		}
+		recs := make([]authz.EOAKeysetRecord, 0, len(entries))
+		for i := range entries {
+			e, err := envelope.Deserialize(entries[i].CanonicalBytes)
+			if err != nil {
+				continue
+			}
+			p, err := authz.DecodeAdmissionAuthorityPayload(e.DomainPayload)
+			if err != nil {
+				continue
+			}
+			id, err := envelope.EntryIdentity(e)
+			if err != nil {
+				continue
+			}
+			recs = append(recs, p.ToRecord(entries[i].Position, id))
+		}
+		return recs, nil
+	}
+}
+
+func buildAdmissionPolicySource(q *indexes.PostgresQueryAPI) admission.PolicySource {
+	empty := func(context.Context) ([]authz.AdmissionPolicyRecord, error) { return nil, nil }
+	schemaPos, ok := parseSchemaEnv("LEDGER_ADMISSION_POLICY_SCHEMA")
+	if !ok {
+		return empty
+	}
+	return func(ctx context.Context) ([]authz.AdmissionPolicyRecord, error) {
+		entries, err := q.QueryBySchemaRef(schemaPos)
+		if err != nil {
+			return nil, err
+		}
+		recs := make([]authz.AdmissionPolicyRecord, 0, len(entries))
+		for i := range entries {
+			e, err := envelope.Deserialize(entries[i].CanonicalBytes)
+			if err != nil {
+				continue
+			}
+			p, err := authz.DecodeAdmissionPolicyPayload(e.DomainPayload)
+			if err != nil {
+				continue
+			}
+			id, err := envelope.EntryIdentity(e)
+			if err != nil {
+				continue
+			}
+			recs = append(recs, p.ToRecord(entries[i].Position, id))
+		}
+		return recs, nil
+	}
+}
+
+func buildDifficultyResolver(
+	dc *middleware.DifficultyController,
+	logger *slog.Logger,
+) admission.DifficultyResolver {
+	if dc == nil {
+		logger.Warn("Post-II #3: DiffController not wired; Mode-B PoW gate inert")
+		return nil
+	}
+	r, err := admission.NewStaticDifficultyResolver(dc)
+	if err != nil {
+		logger.Error("Post-II #3: NewStaticDifficultyResolver failed; "+
+			"Mode-B PoW gate inert", "error", err)
+		return nil
+	}
+	logger.Info("Post-II #3: Mode-B PoW gate resolver wired (StaticDifficultyResolver)")
+	return r
+}
+
+func buildSignaturePolicyResolver(
+	doc network.BootstrapDocument,
+	queryAPI *indexes.PostgresQueryAPI,
+	heads *store.TreeHeadStore,
+	logDID string,
+	networkID cosign.NetworkID,
+	logger *slog.Logger,
+) admission.SignaturePolicyResolver {
+	if len(doc.GenesisSignaturePolicy.AllowedEntrySigSchemes) == 0 {
+		return nil
+	}
+
+	if schemaPos, ok := parseSchemaEnv("LEDGER_SIGNATURE_POLICY_SCHEMA"); ok {
+		source := buildSignaturePolicyAmendmentSource(queryAPI, schemaPos)
+		sizes := treeSizeProviderFunc(func(ctx context.Context) (uint64, error) {
+			head, err := heads.Latest(ctx)
+			if err != nil {
+				return 0, err
+			}
+			if head == nil {
+				return 0, nil
+			}
+			return head.TreeSize, nil
+		})
+		resolver, err := admission.NewOnLogSignaturePolicyResolver(
+			source, sizes, doc, logDID, [32]byte(networkID), 30*time.Second)
+		if err != nil {
+			logger.Error("Part II.6 part 2: OnLogSignaturePolicyResolver invalid; "+
+				"SignaturePolicy gate stays disabled",
+				"error", err)
+			return nil
+		}
+		logger.Info("Part II.6 part 2: amendment-aware SignaturePolicy gate resolver wired",
+			"schema_ref", schemaPos.LogDID+"@"+strconv.FormatUint(schemaPos.Sequence, 10),
+			"min_valid_sigs", doc.GenesisSignaturePolicy.MinSignaturesPerEntry,
+			"allowed_algos", len(doc.GenesisSignaturePolicy.AllowedEntrySigSchemes))
+		return resolver
+	}
+
+	resolver, err := admission.NewGenesisSignaturePolicyResolver(doc)
+	if err != nil {
+		logger.Error("Part II.6: GenesisSignaturePolicy invalid; "+
+			"SignaturePolicy gate stays disabled",
+			"error", err)
+		return nil
+	}
+	logger.Info("Part II.6: SignaturePolicy gate resolver wired (genesis-only)",
+		"min_valid_sigs", doc.GenesisSignaturePolicy.MinSignaturesPerEntry,
+		"allowed_algos", len(doc.GenesisSignaturePolicy.AllowedEntrySigSchemes))
+	return resolver
+}
+
+func buildSignaturePolicyAmendmentSource(
+	q *indexes.PostgresQueryAPI,
+	schemaPos types.LogPosition,
+) admission.SignaturePolicyAmendmentSource {
+	return func(ctx context.Context) ([]network.SignaturePolicyRecord, error) {
+		entries, err := q.QueryBySchemaRef(schemaPos)
+		if err != nil {
+			return nil, err
+		}
+		recs := make([]network.SignaturePolicyRecord, 0, len(entries))
+		for i := range entries {
+			e, err := envelope.Deserialize(entries[i].CanonicalBytes)
+			if err != nil {
+				continue
+			}
+			p, err := network.DecodeSignaturePolicyAmendmentPayload(e.DomainPayload)
+			if err != nil {
+				continue
+			}
+			id, err := envelope.EntryIdentity(e)
+			if err != nil {
+				continue
+			}
+			recs = append(recs, network.ToSignaturePolicyRecord(p, entries[i].Position, id))
+		}
+		return recs, nil
+	}
+}
+
+// ── issue #201: on-log algorithm-policy + protocol-version resolvers ──
+// Crypto-agility: govern signature-algorithm lifecycle + admitted protocol
+// versions post-genesis on-log. Both mirror buildSignaturePolicyResolver —
+// amendment-aware when the schema env is set, genesis-only baseline otherwise.
+// The genesis baselines are SYNTHESIZED (no bootstrap-doc field): algorithm =
+// the genesis allow-list, all active; protocol-version = CurrentProtocolVersion,
+// read_write. The gates stay disabled (default-OFF flags) unless the operator
+// opts in; a nil resolver also disables them.
+
+func buildAlgorithmPolicyResolver(
+	doc network.BootstrapDocument,
+	queryAPI *indexes.PostgresQueryAPI,
+	heads *store.TreeHeadStore,
+	logDID string,
+	networkID cosign.NetworkID,
+	logger *slog.Logger,
+) admission.AlgorithmPolicyResolver {
+	if len(doc.GenesisSignaturePolicy.AllowedEntrySigSchemes) == 0 {
+		return nil
+	}
+	if schemaPos, ok := parseSchemaEnv("LEDGER_ALGORITHM_POLICY_SCHEMA"); ok {
+		source := buildAlgorithmPolicyAmendmentSource(queryAPI, schemaPos)
+		sizes := treeSizeProviderFunc(func(ctx context.Context) (uint64, error) {
+			head, err := heads.Latest(ctx)
+			if err != nil {
+				return 0, err
+			}
+			if head == nil {
+				return 0, nil
+			}
+			return head.TreeSize, nil
+		})
+		resolver, err := admission.NewOnLogAlgorithmPolicyResolver(
+			source, sizes, doc, logDID, [32]byte(networkID), 30*time.Second)
+		if err != nil {
+			logger.Error("issue #201: OnLogAlgorithmPolicyResolver invalid; "+
+				"algorithm-policy gate stays disabled", "error", err)
+			return nil
+		}
+		logger.Info("issue #201: amendment-aware algorithm-policy gate resolver wired",
+			"schema_ref", schemaPos.LogDID+"@"+strconv.FormatUint(schemaPos.Sequence, 10))
+		return resolver
+	}
+	resolver, err := admission.NewGenesisAlgorithmPolicyResolver(doc)
+	if err != nil {
+		logger.Error("issue #201: genesis algorithm policy invalid; "+
+			"algorithm-policy gate stays disabled", "error", err)
+		return nil
+	}
+	logger.Info("issue #201: algorithm-policy gate resolver wired (genesis-only)")
+	return resolver
+}
+
+func buildAlgorithmPolicyAmendmentSource(
+	q *indexes.PostgresQueryAPI,
+	schemaPos types.LogPosition,
+) admission.AlgorithmPolicyAmendmentSource {
+	return func(ctx context.Context) ([]authz.AlgorithmPolicyRecord, error) {
+		entries, err := q.QueryBySchemaRef(schemaPos)
+		if err != nil {
+			return nil, err
+		}
+		recs := make([]authz.AlgorithmPolicyRecord, 0, len(entries))
+		for i := range entries {
+			e, err := envelope.Deserialize(entries[i].CanonicalBytes)
+			if err != nil {
+				continue
+			}
+			p, err := authz.DecodeAlgorithmPolicyPayload(e.DomainPayload)
+			if err != nil {
+				continue
+			}
+			id, err := envelope.EntryIdentity(e)
+			if err != nil {
+				continue
+			}
+			recs = append(recs, p.ToRecord(entries[i].Position, id))
+		}
+		return recs, nil
+	}
+}
+
+func buildProtocolVersionResolver(
+	queryAPI *indexes.PostgresQueryAPI,
+	heads *store.TreeHeadStore,
+	logDID string,
+	networkID cosign.NetworkID,
+	logger *slog.Logger,
+) admission.ProtocolVersionResolver {
+	if schemaPos, ok := parseSchemaEnv("LEDGER_PROTOCOL_VERSION_SCHEMA"); ok {
+		source := buildProtocolVersionAmendmentSource(queryAPI, schemaPos)
+		sizes := treeSizeProviderFunc(func(ctx context.Context) (uint64, error) {
+			head, err := heads.Latest(ctx)
+			if err != nil {
+				return 0, err
+			}
+			if head == nil {
+				return 0, nil
+			}
+			return head.TreeSize, nil
+		})
+		resolver, err := admission.NewOnLogProtocolVersionResolver(
+			source, sizes, logDID, [32]byte(networkID), 30*time.Second)
+		if err != nil {
+			logger.Error("issue #201: OnLogProtocolVersionResolver invalid; "+
+				"protocol-version gate stays disabled", "error", err)
+			return nil
+		}
+		logger.Info("issue #201: amendment-aware protocol-version gate resolver wired",
+			"schema_ref", schemaPos.LogDID+"@"+strconv.FormatUint(schemaPos.Sequence, 10))
+		return resolver
+	}
+	resolver, err := admission.NewGenesisProtocolVersionResolver()
+	if err != nil {
+		logger.Error("issue #201: genesis protocol-version policy invalid; "+
+			"protocol-version gate stays disabled", "error", err)
+		return nil
+	}
+	logger.Info("issue #201: protocol-version gate resolver wired (genesis-only)")
+	return resolver
+}
+
+func buildProtocolVersionAmendmentSource(
+	q *indexes.PostgresQueryAPI,
+	schemaPos types.LogPosition,
+) admission.ProtocolVersionAmendmentSource {
+	return func(ctx context.Context) ([]authz.ProtocolVersionAdmissionRecord, error) {
+		entries, err := q.QueryBySchemaRef(schemaPos)
+		if err != nil {
+			return nil, err
+		}
+		recs := make([]authz.ProtocolVersionAdmissionRecord, 0, len(entries))
+		for i := range entries {
+			e, err := envelope.Deserialize(entries[i].CanonicalBytes)
+			if err != nil {
+				continue
+			}
+			p, err := authz.DecodeProtocolVersionAdmissionPayload(e.DomainPayload)
+			if err != nil {
+				continue
+			}
+			id, err := envelope.EntryIdentity(e)
+			if err != nil {
+				continue
+			}
+			recs = append(recs, p.ToRecord(entries[i].Position, id))
+		}
+		return recs, nil
+	}
+}
+
+// ────────────────────────────────────────────────────────────────
+// v1.32.0 SDK adoption — Tier B: walker sources, resolver constructor,
+// L3 fetcher adapters.
+// ────────────────────────────────────────────────────────────────
+
+func buildWitnessEndpointDeclarationSource(
+	q *indexes.PostgresQueryAPI,
+	schemaPos types.LogPosition,
+) func(ctx context.Context) (network.WitnessEndpointDeclarationByPosition, error) {
+	return func(ctx context.Context) (network.WitnessEndpointDeclarationByPosition, error) {
+		entries, err := q.QueryBySchemaRef(schemaPos)
+		if err != nil {
+			return nil, err
+		}
+		recs := make(network.WitnessEndpointDeclarationByPosition, 0, len(entries))
+		for i := range entries {
+			e, err := envelope.Deserialize(entries[i].CanonicalBytes)
+			if err != nil {
+				continue
+			}
+			p, err := network.DecodeWitnessEndpointDeclarationPayload(e.DomainPayload)
+			if err != nil {
+				continue
+			}
+			recs = append(recs, network.WitnessEndpointDeclarationRecord{
+				EffectivePos: entries[i].Position,
+				Payload:      p,
+			})
+		}
+		return recs, nil
+	}
+}
+
+func buildWitnessIdentityLabelSource(
+	q *indexes.PostgresQueryAPI,
+	schemaPos types.LogPosition,
+) func(ctx context.Context) (network.WitnessIdentityLabelByPosition, error) {
+	return func(ctx context.Context) (network.WitnessIdentityLabelByPosition, error) {
+		entries, err := q.QueryBySchemaRef(schemaPos)
+		if err != nil {
+			return nil, err
+		}
+		recs := make(network.WitnessIdentityLabelByPosition, 0, len(entries))
+		for i := range entries {
+			e, err := envelope.Deserialize(entries[i].CanonicalBytes)
+			if err != nil {
+				continue
+			}
+			p, err := network.DecodeWitnessIdentityLabelPayload(e.DomainPayload)
+			if err != nil {
+				continue
+			}
+			recs = append(recs, network.WitnessIdentityLabelRecord{
+				EffectivePos: entries[i].Position,
+				Payload:      p,
+			})
+		}
+		return recs, nil
+	}
+}
+
+func buildAuditorRegistrationSource(
+	q *indexes.PostgresQueryAPI,
+	schemaPos types.LogPosition,
+) func(ctx context.Context) ([]network.AuditorRegistrationRecord, error) {
+	return func(ctx context.Context) ([]network.AuditorRegistrationRecord, error) {
+		entries, err := q.QueryBySchemaRef(schemaPos)
+		if err != nil {
+			return nil, err
+		}
+		recs := make([]network.AuditorRegistrationRecord, 0, len(entries))
+		for i := range entries {
+			e, err := envelope.Deserialize(entries[i].CanonicalBytes)
+			if err != nil {
+				continue
+			}
+			p, err := network.DecodeAuditorRegistrationPayload(e.DomainPayload)
+			if err != nil {
+				continue
+			}
+			recs = append(recs, network.AuditorRegistrationRecord{
+				EffectivePos: entries[i].Position,
+				Payload:      p,
+			})
+		}
+		return recs, nil
+	}
+}
+
+// buildAuditorScopeAmendmentSource walks the on-log stream of
+// AuditorScopeAmendmentV1 entries (v1.33.0 Gap 2). Schema position is
+// supplied via LEDGER_AUDITOR_SCOPE_AMENDMENT_SCHEMA; nil schemaPos
+// means "no amendment schema bound" — the walker still runs but
+// returns an empty slice (the network has not yet published any
+// amendments).
+func buildAuditorScopeAmendmentSource(
+	q *indexes.PostgresQueryAPI,
+	schemaPos types.LogPosition,
+) func(ctx context.Context) ([]network.AuditorScopeAmendmentRecord, error) {
+	return func(ctx context.Context) ([]network.AuditorScopeAmendmentRecord, error) {
+		entries, err := q.QueryBySchemaRef(schemaPos)
+		if err != nil {
+			return nil, err
+		}
+		recs := make([]network.AuditorScopeAmendmentRecord, 0, len(entries))
+		for i := range entries {
+			e, err := envelope.Deserialize(entries[i].CanonicalBytes)
+			if err != nil {
+				continue
+			}
+			p, err := network.DecodeAuditorScopeAmendmentPayload(e.DomainPayload)
+			if err != nil {
+				continue
+			}
+			recs = append(recs, network.AuditorScopeAmendmentRecord{
+				EffectivePos: entries[i].Position,
+				Payload:      p,
+			})
+		}
+		return recs, nil
+	}
+}
+
+func buildAuthoritativeResolver(
+	ctx context.Context,
+	q *indexes.PostgresQueryAPI,
+	doc network.BootstrapDocument,
+	ourLogDID string,
+	logger *slog.Logger,
+) (*discover.DefaultAuthoritativeResolver, error) {
+	witnessEPPos, hasWitnessEPSchema := parseSchemaEnv("LEDGER_WITNESS_ENDPOINT_SCHEMA")
+	labelPos, hasLabelSchema := parseSchemaEnv("LEDGER_WITNESS_LABEL_SCHEMA")
+	auditorPos, hasAuditorSchema := parseSchemaEnv("LEDGER_AUDITOR_REGISTRATION_SCHEMA")
+	amendPos, hasAmendmentSchema := parseSchemaEnv("LEDGER_AUDITOR_SCOPE_AMENDMENT_SCHEMA")
+
+	if !hasWitnessEPSchema && !hasLabelSchema && !hasAuditorSchema && !hasAmendmentSchema {
+		logger.Info("v1.33.0: AuthoritativeResolver disabled (no schema env vars set); resolver wire-up skipped")
+		return nil, nil
+	}
+
+	resolver := &discover.DefaultAuthoritativeResolver{
+		LogWitnessSets:    map[string][][32]byte{},
+		DIDFallbackPolicy: discover.FallbackDisabled,
+		Logger:            logger,
+	}
+
+	if len(doc.GenesisWitnessSet) > 0 && ourLogDID != "" {
+		keys, err := witness.KeysFromDIDs(doc.GenesisWitnessSet)
+		if err != nil {
+			logger.Warn("v1.32.0: KeysFromDIDs on GenesisWitnessSet",
+				"error", err)
+		} else {
+			pubKeyIDs := make([][32]byte, 0, len(keys))
+			for _, k := range keys {
+				pubKeyIDs = append(pubKeyIDs, k.ID)
+			}
+			resolver.LogWitnessSets[ourLogDID] = pubKeyIDs
+		}
+	}
+
+	if hasWitnessEPSchema {
+		src := buildWitnessEndpointDeclarationSource(q, witnessEPPos)
+		recs, err := src(ctx)
+		if err != nil {
+			logger.Warn("v1.32.0: WitnessEndpointDeclaration source initial fetch failed",
+				"error", err)
+		} else {
+			resolver.WitnessEndpointRecords = recs
+			logger.Info("v1.32.0: WitnessEndpointDeclaration records loaded",
+				"count", len(recs))
+		}
+	}
+	if hasLabelSchema {
+		src := buildWitnessIdentityLabelSource(q, labelPos)
+		recs, err := src(ctx)
+		if err != nil {
+			logger.Warn("v1.32.0: WitnessIdentityLabel source initial fetch failed",
+				"error", err)
+		} else {
+			resolver.WitnessLabelRecords = recs
+			logger.Info("v1.32.0: WitnessIdentityLabel records loaded",
+				"count", len(recs))
+		}
+	}
+	if hasAuditorSchema {
+		src := buildAuditorRegistrationSource(q, auditorPos)
+		recs, err := src(ctx)
+		if err != nil {
+			logger.Warn("v1.32.0: AuditorRegistration source initial fetch failed",
+				"error", err)
+		} else {
+			resolver.AuditorRegistryRecords = recs
+			logger.Info("v1.32.0: AuditorRegistration records loaded",
+				"count", len(recs))
+		}
+	}
+	if hasAmendmentSchema {
+		src := buildAuditorScopeAmendmentSource(q, amendPos)
+		recs, err := src(ctx)
+		if err != nil {
+			logger.Warn("v1.33.0: AuditorScopeAmendment source initial fetch failed",
+				"error", err)
+		} else {
+			resolver.AuditorScopeAmendmentRecords = recs
+			logger.Info("v1.33.0: AuditorScopeAmendment records loaded",
+				"count", len(recs))
+		}
+	}
+
+	return resolver, nil
+}
+
+// witnessLabelFetcher implements api.WitnessLabelFetcher.
+type witnessLabelFetcher struct {
+	source    func(ctx context.Context) (network.WitnessIdentityLabelByPosition, error)
+	treeSizer admission.TreeSizeProvider
+}
+
+func (f *witnessLabelFetcher) LoadCurrentLabels(ctx context.Context) (*api.WitnessLabelsView, error) {
+	recs, err := f.source(ctx)
+	if err != nil {
+		return nil, err
+	}
+	asOf, _ := f.treeSizer.LatestTreeSize(ctx)
+	current := map[[32]byte]network.WitnessIdentityLabel{}
+	for _, r := range recs {
+		current[r.Payload.PubKeyID] = r.Payload
+	}
+	out := make([]api.WitnessLabelEntry, 0, len(current))
+	for pk, p := range current {
+		if p.Label == "" {
+			continue
+		}
+		out = append(out, api.WitnessLabelEntry{
+			PubKeyID: fmt.Sprintf("%x", pk),
+			Label:    p.Label,
+			DIDHint:  p.DIDHint,
+		})
+	}
+	return &api.WitnessLabelsView{AsOfSeq: asOf, Labels: out}, nil
+}
+
+// auditorRegistryFetcher is now implemented by the
+// internal/auditorregistry package — amendment-aware. wireV1_32Resolver
+// constructs it via auditorregistry.New(registry, amendments, treeSizer)
+// and assigns to d.AuditorRegistryFetcher. The previous inline
+// implementation ignored amendments, producing silent disagreement
+// between the enforced gate scope and the materialized projection.
+
+type witnessEndpointsFetcher struct {
+	source    func(ctx context.Context) (network.WitnessEndpointDeclarationByPosition, error)
+	treeSizer admission.TreeSizeProvider
+}
+
+func (f *witnessEndpointsFetcher) LoadCurrentWitnessEndpoints(ctx context.Context) (*api.WitnessEndpointsView, error) {
+	recs, err := f.source(ctx)
+	if err != nil {
+		return nil, err
+	}
+	asOf, _ := f.treeSizer.LatestTreeSize(ctx)
+	current := map[[32]byte]network.WitnessEndpointDeclaration{}
+	for _, r := range recs {
+		current[r.Payload.PubKeyID] = r.Payload
+	}
+	out := make([]api.WitnessEndpointEntry, 0, len(current))
+	for pk, p := range current {
+		if p.RetiredAt != nil {
+			continue
+		}
+		out = append(out, api.WitnessEndpointEntry{
+			PubKeyID:  fmt.Sprintf("%x", pk),
+			Endpoints: p.Endpoints,
+		})
+	}
+	return &api.WitnessEndpointsView{AsOfSeq: asOf, Witnesses: out}, nil
+}
+
+func wireV1_32Resolver(
+	ctx context.Context,
+	q *indexes.PostgresQueryAPI,
+	doc network.BootstrapDocument,
+	ourLogDID string,
+	treeSizer admission.TreeSizeProvider,
+	d *deps.AppDeps,
+) error {
+	resolver, err := buildAuthoritativeResolver(ctx, q, doc, ourLogDID, d.Logger)
+	if err != nil {
+		return fmt.Errorf("wireV1_32Resolver: %w", err)
+	}
+	if resolver == nil {
+		return nil
+	}
+
+	d.WitnessEndpointResolver = resolver
+
+	d.AuditorRegistrySource = func(_ context.Context) ([]network.AuditorRegistrationRecord, error) {
+		return resolver.AuditorRegistryRecords, nil
+	}
+
+	d.AuditorAmendmentSource = func(_ context.Context) ([]network.AuditorScopeAmendmentRecord, error) {
+		return resolver.AuditorScopeAmendmentRecords, nil
+	}
+
+	d.PeerAdmissionURLResolver = func(ctx context.Context, peerLogDID string) (string, error) {
+		res, resErr := resolver.ResolvePeer(ctx, peerLogDID, types.LogPosition{})
+		if resErr != nil {
+			return "", resErr
+		}
+		return res.URL, nil
+	}
+
+	d.WitnessLabelsFetcher = &witnessLabelFetcher{
+		source: func(ctx context.Context) (network.WitnessIdentityLabelByPosition, error) {
+			return resolver.WitnessLabelRecords, nil
+		},
+		treeSizer: treeSizer,
+	}
+	auditorFetcher, err := auditorregistry.New(
+		func(ctx context.Context) ([]network.AuditorRegistrationRecord, error) {
+			return resolver.AuditorRegistryRecords, nil
+		},
+		func(ctx context.Context) ([]network.AuditorScopeAmendmentRecord, error) {
+			return resolver.AuditorScopeAmendmentRecords, nil
+		},
+		treeSizer,
+	)
+	if err != nil {
+		return fmt.Errorf("wireV1_32Resolver: auditor registry fetcher: %w", err)
+	}
+	d.AuditorRegistryFetcher = auditorFetcher
+	d.WitnessEndpointsFetcher = &witnessEndpointsFetcher{
+		source: func(ctx context.Context) (network.WitnessEndpointDeclarationByPosition, error) {
+			return resolver.WitnessEndpointRecords, nil
+		},
+		treeSizer: treeSizer,
+	}
+
+	d.Logger.Info("v1.32.0: AuthoritativeResolver wired",
+		"witness_endpoint_records", len(resolver.WitnessEndpointRecords),
+		"witness_label_records", len(resolver.WitnessLabelRecords),
+		"auditor_registry_records", len(resolver.AuditorRegistryRecords),
+		"log_witness_sets", len(resolver.LogWitnessSets),
+	)
+	return nil
+}
+
+type treeSizeProviderFunc func(ctx context.Context) (uint64, error)
+
+func (f treeSizeProviderFunc) LatestTreeSize(ctx context.Context) (uint64, error) {
+	return f(ctx)
+}
+
+func parseSchemaEnv(name string) (types.LogPosition, bool) {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return types.LogPosition{}, false
+	}
+	at := strings.LastIndex(raw, "@")
+	if at <= 0 || at == len(raw)-1 {
+		return types.LogPosition{}, false
+	}
+	seq, err := strconv.ParseUint(raw[at+1:], 10, 64)
+	if err != nil {
+		return types.LogPosition{}, false
+	}
+	return types.LogPosition{LogDID: raw[:at], Sequence: seq}, true
+}
+
+func composeTileHandlers(cfg Config, d *deps.AppDeps) (http.HandlerFunc, http.HandlerFunc, error) {
+	if cfg.TileServeDisable {
+		d.Logger.Info("static-ct tile serving disabled (LEDGER_TILE_SERVE_DISABLE=true)")
+		return nil, nil, nil
+	}
+	var serving bytestore.TileBackend
+	switch cfg.TileBackend {
+	case "", "posix":
+		serving = d.TileBackend
+	case "gcs":
+		gcsBackend, ok := d.ByteStore.(*bytestore.GCS)
+		if !ok {
+			return nil, nil, fmt.Errorf(
+				"LEDGER_TILE_BACKEND=gcs requires LEDGER_BYTE_STORE_BACKEND=gcs (have %q)",
+				cfg.ByteStoreBackend)
+		}
+		serving = bytestore.NewGCSTiles(gcsBackend, cfg.TileBucketPrefix, 30*time.Second)
+	default:
+		return nil, nil, fmt.Errorf("LEDGER_TILE_BACKEND must be one of posix|gcs (got %q)", cfg.TileBackend)
+	}
+	d.Logger.Info("static-ct tile serving enabled",
+		"backend", cfg.TileBackend,
+		"prefix", cfg.TileBucketPrefix,
+	)
+	return api.NewCheckpointHandler(serving, d.Logger), api.NewTileHandler(serving, d.Logger), nil
+}
+
+func composeSequencer(cfg Config, d *deps.AppDeps) *sequencer.Sequencer {
+	pool := d.PgPool.DB
+	seq := sequencer.NewSequencer(d.WALCommitter, d.TesseraEmbedded, pool, d.EntryStore, sequencer.Config{
+		PollInterval: cfg.SequencerInterval,
+		MaxInFlight:  cfg.SequencerMaxInFlight,
+		Logger:       d.Logger,
+	})
+	seq = seq.WithLagReader(store.NewSequenceCursor(pool))
+
+	if d.RecentEntryCache != nil {
+		seq = seq.WithRecentEntryCache(d.RecentEntryCache)
+	}
+
+	if d.Fatal != nil {
+		seq = seq.WithFatalChannel(d.Fatal)
+	}
+
+	if d.GossipStore != nil && d.GossipBundle != nil {
+		emitter, ferr := gossipnet.NewSDKGossipGhostLeafEmitter(
+			gossipnet.SDKGossipGhostLeafEmitterConfig{
+				GossipStore: d.GossipStore,
+				Sink:        d.GossipBundle.Sink,
+				Signer:      cosign.NewECDSAWitnessSigner(d.LedgerSignerPriv),
+				NetworkID:   cfg.NetworkID,
+				Originator:  cfg.LedgerDID,
+				Logger:      d.Logger,
+			})
+		if ferr != nil {
+			d.Logger.Error("ghost-leaf SDK emitter construction; falling back to logging-only",
+				"error", ferr)
+			seq = seq.WithGhostLeafEmitter(gossipnet.NewLoggingGhostLeafEmitter(d.Logger))
+		} else {
+			seq = seq.WithGhostLeafEmitter(emitter)
+			d.Logger.Info("ghost-leaf emitter: SDK gossip path wired (KindGhostLeaf publication enabled)")
+		}
+	} else {
+		seq = seq.WithGhostLeafEmitter(gossipnet.NewLoggingGhostLeafEmitter(d.Logger))
+		d.Logger.Info("ghost-leaf emitter: logging-only (gossip disabled — ghost rows recorded in PG, not broadcast)")
+	}
+
+	if d.SchemaRegistry != nil {
+		seq = seq.WithSchemaRegistry(d.SchemaRegistry)
+	}
+	if d.GossipStore != nil {
+		seq = seq.WithSplitIDIndex(
+			gossipnet.NewSequencerSplitIDAdapter(d.GossipStore))
+		seq = seq.WithEntryLookup(
+			gossipnet.NewSequencerEntryLookupAdapter(d.GossipStore),
+			cfg.LogDID)
+		replayer, rerr := sequencer.NewReplayer(sequencer.ReplayConfig{
+			DB:           pool,
+			Reader:       d.ByteStore,
+			SplitIDIndex: gossipnet.NewSequencerSplitIDAdapter(d.GossipStore),
+			EntryLookup:  gossipnet.NewSequencerEntryLookupAdapter(d.GossipStore),
+			Cursor:       gossipnet.NewSequencerReplayCursorAdapter(d.GossipStore),
+			LogDID:       cfg.LogDID,
+			Logger:       d.Logger,
+		})
+		if rerr == nil {
+			seq = seq.WithReplayer(replayer)
+		} else {
+			d.Logger.Warn("sequencer replayer construct failed; continuing without", "error", rerr)
+		}
+	}
+	d.Logger.Info("sequencer ready",
+		"poll_interval", cfg.SequencerInterval,
+		"max_in_flight", cfg.SequencerMaxInFlight,
+		"mmd", cfg.MMD,
+		"splitid_index", d.GossipStore != nil,
+		"entry_lookup_projection", d.GossipStore != nil,
+		"boot_replayer", d.GossipStore != nil,
+	)
+	return seq
+}
+
+func composeShipper(cfg Config, d *deps.AppDeps) *shipper.Shipper {
+	ship := shipper.NewShipper(d.WALCommitter, d.ByteStore, shipper.Config{
+		PollInterval: cfg.ShipperPollInterval,
+		MaxInFlight:  cfg.ShipperMaxInFlight,
+		Logger:       d.Logger,
+	})
+	d.Logger.Info("shipper: configured",
+		"max_in_flight", cfg.ShipperMaxInFlight,
+		"poll_interval", cfg.ShipperPollInterval)
+	return ship
+}
+
+func composeIntegrityDetector(d *deps.AppDeps) *integrity.Detector {
+	return integrity.NewDetector(
+		d.WALCommitter,
+		integrity.NewVerifier(d.TileReader.Fetch),
+		integrity.DetectorConfig{Logger: d.Logger},
+	)
+}
+
+func composeSMTDetector(d *deps.AppDeps) *integrity.SMTDetector {
+	return integrity.NewSMTDetector(
+		smtRootStateAdapter{store: d.SMTRootState},
+		treeHeadStoreAdapter{store: d.TreeHeadStore},
+		integrity.SMTDetectorConfig{Logger: d.Logger},
+	)
+}
+
+type smtRootStateAdapter struct {
+	store *store.SMTRootStateStore
+}
+
+func (a smtRootStateAdapter) Read(ctx context.Context) (integrity.SMTRootSnapshot, error) {
+	st, err := a.store.Read(ctx)
+	if err != nil {
+		return integrity.SMTRootSnapshot{}, err
+	}
+	return integrity.SMTRootSnapshot{
+		CurrentRoot:         st.CurrentRoot,
+		CommittedThroughSeq: st.CommittedThroughSeq,
+	}, nil
+}
+
+type treeHeadStoreAdapter struct {
+	store *store.TreeHeadStore
+}
+
+func (a treeHeadStoreAdapter) GetBySize(ctx context.Context, size uint64) (*apitypes.CosignedTreeHead, error) {
+	return a.store.GetBySize(ctx, size)
+}
+
+func composeServers(cfg Config, d *deps.AppDeps, handlers api.Handlers) error {
+	serverCfg := api.DefaultServerConfig()
+	serverCfg.Addr = cfg.ServerAddr
+	serverCfg.MaxEntrySize = cfg.MaxEntrySize
+	serverCfg.TLSCertFile = cfg.TLSCertFile
+	serverCfg.TLSKeyFile = cfg.TLSKeyFile
+	serverCfg.ClientCAFile = cfg.InboundClientCAFile
+	server := api.NewServer(serverCfg, store.NewPostgresSessionLookup(d.PgPool.DB), handlers, d.Logger)
+
+	server.SetReadinessProbe(func() error {
+		probeCtx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+		defer cancel()
+		conn, err := d.DBBreaker.Acquire(probeCtx)
+		if err != nil {
+			return fmt.Errorf("database unavailable: %w", err)
+		}
+		conn.Release()
+		return nil
+	})
+
+	connCap := cfg.MaxConcurrentConns
+	if connCap <= 0 {
+		connCap = 8 * runtime.NumCPU()
+	}
+	rawListener, err := net.Listen("tcp", serverCfg.Addr)
+	if err != nil {
+		return fmt.Errorf("http listen %q: %w", serverCfg.Addr, err)
+	}
+	d.HTTPListener = netutil.LimitListener(rawListener, connCap)
+	d.HTTPServer = server
+	d.HTTPTLSEnabled = serverCfg.TLSCertFile != "" && serverCfg.TLSKeyFile != ""
+	d.Logger.Info("http listener ready",
+		"addr", serverCfg.Addr,
+		"max_concurrent_conns", connCap,
+		"tls", serverCfg.TLSCertFile != "" && serverCfg.TLSKeyFile != "",
+	)
+
+	if cfg.PprofAddr != "" {
+		pprofMux := http.NewServeMux()
+		pprofMux.HandleFunc("/debug/pprof/", pprof.Index)
+		pprofMux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+		pprofMux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+		pprofMux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+		pprofMux.HandleFunc("/debug/pprof/trace", pprof.Trace)
+		d.PprofServer = &http.Server{
+			Addr:              cfg.PprofAddr,
+			Handler:           pprofMux,
+			ReadHeaderTimeout: 5 * time.Second,
+			ReadTimeout:       30 * time.Second,
+			WriteTimeout:      120 * time.Second,
+			IdleTimeout:       60 * time.Second,
+		}
+		d.Logger.Info("pprof listener ready", "addr", cfg.PprofAddr)
+	}
+	return nil
+}
+
+func startGoroutines(
+	ctx context.Context,
+	d *deps.AppDeps,
+	bl *builder.BuilderLoop,
+	checkpointLoop *builder.CheckpointLoop,
+	seq *sequencer.Sequencer,
+	ship *shipper.Shipper,
+	detector *integrity.Detector,
+	smtDetector *integrity.SMTDetector,
+) {
+	lifecycle.SafeRunInWG(ctx, &d.WG, "http-server", d.Logger, d.Fatal, func() error {
+		if d.HTTPServer == nil || d.HTTPListener == nil {
+			return nil
+		}
+		if d.HTTPTLSEnabled {
+			if err := d.HTTPServer.ServeTLSWithListener(d.HTTPListener); err != nil && err != http.ErrServerClosed {
+				d.Logger.Error("http server (tls)", "error", err)
+			}
+			return nil
+		}
+		if err := d.HTTPServer.Serve(d.HTTPListener); err != nil && err != http.ErrServerClosed {
+			d.Logger.Error("http server", "error", err)
+		}
+		return nil
+	})
+
+	if d.PprofServer != nil {
+		lifecycle.SafeRunInWG(ctx, &d.WG, "pprof-server", d.Logger, nil, func() error {
+			if err := d.PprofServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				d.Logger.Warn("pprof server", "error", err)
+			}
+			return nil
+		})
+	}
+
+	lifecycle.SafeRunInWG(ctx, &d.WG, "builder-loop", d.Logger, d.Fatal, func() error {
+		if err := bl.Run(ctx); err != nil {
+			d.Logger.Error("builder loop exited with error", "error", err)
+			return err
+		}
+		return nil
+	})
+
+	if checkpointLoop != nil {
+		lifecycle.SafeRunInWG(ctx, &d.WG, "checkpoint-loop", d.Logger, d.Fatal, func() error {
+			checkpointLoop.Run(ctx)
+			return nil
+		})
+	}
+
+	lifecycle.SafeRunInWG(ctx, &d.WG, "difficulty-controller", d.Logger, d.Fatal, func() error {
+		d.DiffController.Run(ctx, 30*time.Second)
+		return nil
+	})
+
+	lifecycle.SafeRunInWG(ctx, &d.WG, "anchor-publisher", d.Logger, d.Fatal, func() error {
+		d.AnchorPublisher.Run(ctx)
+		return nil
+	})
+
+	lifecycle.SafeRunInWG(ctx, &d.WG, "shipper", d.Logger, d.Fatal, func() error {
+		if err := ship.Run(ctx); err != nil && !ctxCanceledOrDeadline(err) {
+			d.Fatal <- fmt.Errorf("shipper: %w", err)
+			return err
+		}
+		return nil
+	})
+
+	lifecycle.SafeRunInWG(ctx, &d.WG, "sequencer", d.Logger, d.Fatal, func() error {
+		if err := seq.Run(ctx); err != nil && !ctxCanceledOrDeadline(err) {
+			d.Fatal <- fmt.Errorf("sequencer: %w", err)
+			return err
+		}
+		return nil
+	})
+
+	lifecycle.SafeRunInWG(ctx, &d.WG, "integrity-detector", d.Logger, d.Fatal, func() error {
+		if err := detector.Loop(ctx); err != nil && !ctxCanceledOrDeadline(err) {
+			d.Fatal <- fmt.Errorf("integrity detector: %w", err)
+			return err
+		}
+		return nil
+	})
+
+	lifecycle.SafeRunInWG(ctx, &d.WG, "smt-detector", d.Logger, d.Fatal, func() error {
+		if err := smtDetector.Loop(ctx); err != nil && !ctxCanceledOrDeadline(err) {
+			d.Fatal <- fmt.Errorf("smt detector: %w", err)
+			return err
+		}
+		return nil
+	})
+
+	// Reservation reaper (ledger#193): expires un-finished artifact reservations
+	// past their TTL so abandoned RESERVEs don't pin slots forever. Reaping is a
+	// non-fatal background sweep, so failures log and retry rather than crash boot.
+	if d.ReservationManager != nil {
+		lifecycle.SafeRunInWG(ctx, &d.WG, "reservation-reaper", d.Logger, nil, func() error {
+			reservation.NewReaper(d.ReservationManager, time.Minute, 256, d.Logger).Run(ctx)
+			return nil
+		})
+	}
+
+	startAuditTelemetry(ctx, d, detector, smtDetector)
+}
+
+func startAuditTelemetry(ctx context.Context, d *deps.AppDeps, detector *integrity.Detector, smtDetector *integrity.SMTDetector) {
+	lifecycle.SafeRunInWG(ctx, &d.WG, "audit-telemetry", d.Logger, nil, func() error {
+		ticker := time.NewTicker(5 * time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return nil
+			case <-ticker.C:
+				d.Logger.Info("integrity audit",
+					"invariant_failures_total", detector.InvariantFailures(),
+					"verify_errors_total", detector.VerifyErrors(),
+					"samples_verified_total", detector.SamplesVerified(),
+					"samples_skipped_total", detector.SamplesSkipped(),
+					"smt_invariant_failures_total", smtDetector.InvariantFailures(),
+					"smt_verify_errors_total", smtDetector.VerifyErrors(),
+					"smt_samples_verified_total", smtDetector.SamplesVerified(),
+					"smt_samples_skipped_total", smtDetector.SamplesSkipped(),
+				)
+				if d.GossipPublisher != nil {
+					age := d.GossipPublisher.CosignAgeSeconds()
+					if age >= 0 {
+						d.Logger.Info("checkpoint cosig age", "age_seconds", age)
+					}
+				}
+				if d.GossipStore != nil {
+					statsCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+					stats, err := d.GossipStore.Stats(statsCtx)
+					cancel()
+					if err == nil {
+						d.Logger.Info("gossip store growth",
+							"event_count", stats.EventCount,
+							"originator_count", stats.OriginatorCount,
+						)
+					}
+				}
+			}
+		}
+	})
+}
+
+func installLateBoundGauges(
+	cfg Config,
+	d *deps.AppDeps,
+	seq *sequencer.Sequencer,
+	ship *shipper.Shipper,
+) {
+	if !cfg.MetricsEnable || d.MeterProvider == nil {
+		return
+	}
+	mp := otel.GetMeterProvider()
+	seqMeter := mp.Meter("github.com/baseproof/tooling/services/ledger/sequencer")
+	if installed := sequencer.InstallDrainLagGauge(seqMeter, seq.CurrentLag); installed {
+		d.Logger.Info("metrics: sequencer drain lag gauge installed",
+			"metric", "baseproof_sequencer_drain_lag_seconds")
+	}
+	shipMeter := mp.Meter("github.com/baseproof/tooling/services/ledger/shipper")
+	if installed := shipper.InstallPendingGauge(shipMeter, ship.PendingCount); installed {
+		d.Logger.Info("metrics: shipper pending gauge installed",
+			"metric", "baseproof_shipper_pending_total")
+	}
+	if installed := shipper.InstallCounters(shipMeter, ship); installed {
+		d.Logger.Info("metrics: shipper counters installed")
+	}
+}
+
+func ctxCanceledOrDeadline(err error) bool {
+	return err == context.Canceled || err == context.DeadlineExceeded
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// v1.37.0 SDK adoption — polymorphic admission via VerifierRegistry
+// ─────────────────────────────────────────────────────────────────────
+//
+// buildIdentityDeps composes the identity-verification surface for
+// the submission handler. v1.37.0 swaps the pre-existing hardcoded
+// did:key ECDSA-only resolver for the SDK's polymorphic verifier
+// registry, which dispatches on DID method (did:key, did:web,
+// did:pkh) and algorithm (ECDSA secp256k1, Ed25519, EIP-191,
+// EIP-712, EIP-1271, ML-DSA-65, ML-DSA-87, SLH-DSA-128s).
+//
+// The legacy DIDResolver field on IdentityDeps is retained for
+// backward compatibility (tests pass it directly). Production sets
+// Verifier; api/submission.go prefers Verifier when both are set.
+//
+// EIP-1271 (smart-contract wallets) is enabled only when
+// LEDGER_EIP1271_ENABLED=true AND the operator supplied >=2 executor
+// endpoints. At the default zero-valued PKHVerifierOptions, did:pkh
+// runs in EOA-only mode (no chain RPC).
+//
+// did:web HTTPS fetches use d.OutboundHTTPClient (always non-nil
+// since PR #181 / v1.34.0 contract honesty). A 5-minute CachingResolver
+// wraps the method router to amortize repeated court-actor
+// resolutions; the cache TTL matches the recommended floor from the
+// court-system workload audit.
+func buildIdentityDeps(d *deps.AppDeps) api.IdentityDeps {
+	// Backward-compat: keep the existing did:key ECDSA resolver wired
+	// on the DIDResolver field. The legacy single-sig admission path
+	// and any tests that pass deps.Identity.DIDResolver still work
+	// against ECDSA-only entries.
+	legacyResolver := sdkdid.NewECDSAKeyResolver()
+
+	// v1.37.0 polymorphic path. Method router dispatches on DID method;
+	// each registered resolver is constructed lazily once at boot.
+	router := sdkdid.NewMethodRouter()
+	if err := router.Register("key", sdkdid.NewKeyResolver()); err != nil {
+		d.Logger.Error("buildIdentityDeps: register did:key resolver", "error", err)
+	}
+	if d.OutboundHTTPClient != nil {
+		webResolver, err := sdkdid.NewWebDIDResolver(sdkdid.WebDIDResolverConfig{
+			Client: d.OutboundHTTPClient,
+		})
+		if err != nil {
+			d.Logger.Error("buildIdentityDeps: NewWebDIDResolver", "error", err)
+		} else {
+			if rerr := router.Register("web", webResolver); rerr != nil {
+				d.Logger.Error("buildIdentityDeps: register did:web", "error", rerr)
+			}
+		}
+	}
+	// did:pkh is registered but its public-key resolution is a no-op
+	// at the resolver layer (the verifier dispatches address-based
+	// ecrecover internally via PKHVerifier in DefaultVerifierRegistry).
+
+	cached := sdkdid.NewCachingResolver(router, 5*time.Minute)
+
+	// DefaultVerifierRegistry registers did:pkh + did:key + did:web
+	// verifiers. PKHVerifierOptions controls EIP-1271; zero value =
+	// EOA-only (the production default). Destination binding pins
+	// signature verification to this ledger's DID — cross-network
+	// replay attempts fail at the cryptographic boundary.
+	registry, err := sdkdid.DefaultVerifierRegistry(
+		d.LedgerDID, cached, d.PKHVerifierOptions)
+	if err != nil {
+		// Construction error is fatal at boot: a misconfigured
+		// PKHVerifierOptions (e.g., K-of-N with invalid executor
+		// set) MUST surface here, never as a silent fallback to
+		// EOA-only at runtime. main.go has already validated
+		// LEDGER_EIP1271_* env vars at LoadEIP1271Config; this is
+		// the SDK-side validation gate.
+		d.Logger.Error("buildIdentityDeps: DefaultVerifierRegistry",
+			"error", err,
+			"ledger_did", d.LedgerDID,
+			"eip1271_enabled", len(d.PKHVerifierOptions.Executors) > 0,
+		)
+		// Fall through with Verifier=nil; admission falls back to
+		// the legacy DIDResolver path (ECDSA-only via the adapter).
+		// Boot does not exit because the legacy path remains
+		// functional for ECDSA-only deployments.
+		return api.IdentityDeps{
+			Credits:     d.CreditStore,
+			DIDResolver: legacyResolver,
+		}
+	}
+
+	d.Logger.Info("v1.37.0: polymorphic verifier registry wired",
+		"methods", []string{"did:key", "did:web", "did:pkh"},
+		"eip1271_enabled", len(d.PKHVerifierOptions.Executors) > 0,
+		"cache_ttl", "5m",
+	)
+
+	return api.IdentityDeps{
+		Credits:     d.CreditStore,
+		DIDResolver: legacyResolver,
+		Verifier:    registry,
+	}
+}

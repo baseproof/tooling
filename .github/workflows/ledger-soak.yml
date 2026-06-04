@@ -1,0 +1,57 @@
+# Soak SLO suite for the ledger service (services/ledger). Provisions Docker
+# SeaweedFS + Postgres and runs a 5k-entry production-shape pipeline with hard
+# SLO assertions. Nightly + manual + opt-in on hot-path PRs. NOT a per-PR merge
+# gate by default. Relocated from the standalone ledger repo; paths re-rooted.
+name: ledger-soak
+
+on:
+  schedule:
+    - cron: "47 6 * * *"    # daily 06:47 UTC
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "services/ledger/admission/**"
+      - "services/ledger/sequencer/**"
+      - "services/ledger/shipper/**"
+      - "services/ledger/builder/**"
+      - "services/ledger/wal/**"
+      - "services/ledger/store/migrations/**"
+      - "services/ledger/tests/soak_test.go"
+      - "services/ledger/scripts/run-soak.sh"
+      - ".github/workflows/ledger-soak.yml"
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    working-directory: services/ledger
+
+jobs:
+  soak:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11  # v4.1.1
+        with:
+          persist-credentials: false
+          submodules: recursive
+
+      - name: Set up Go
+        uses: actions/setup-go@cdcb36043654635271a94b9a6d1392de5bb323a7  # v5.0.1
+        with:
+          go-version-file: services/ledger/go.mod
+
+      - name: Soak SLO suite
+        env:
+          BASEPROOF_SOAK_ENTRIES: "5000"
+          BASEPROOF_SOAK_CONCURRENCY: "8"
+          BASEPROOF_SOAK_BYTESTORE_BACKEND: "seaweedfs"
+          BASEPROOF_SOAK_ADMISSION_TPS_FLOOR: "100"
+          BASEPROOF_SOAK_DRAIN_TPS_FLOOR: "50"
+          BASEPROOF_SOAK_MAX_FAILURE_RATE: "0.001"
+          BASEPROOF_SOAK_P99_BOUND_MS: "100"
+          BASEPROOF_SOAK_DRAIN_TIMEOUT: "5m"
+          BASEPROOF_SOAK_TEST_TIMEOUT: "8m"
+        run: make test-soak

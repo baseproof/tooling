@@ -1,0 +1,715 @@
+/*
+FILE PATH: api/queries.go
+
+DESCRIPTION:
+
+	Read-side query handlers for the ledger's HTTP API. Fetches entries
+	by sequence range, by hash, and by signer DID. Returns EntryResponse
+	structures with canonical hash + metadata + payload byte-size.
+
+	Also hosts the thin query handlers the read-write and read-only
+	ledger both serve (CosignatureOf, TargetRoot, SignerDID, SchemaRef,
+	Scan) plus the difficulty endpoint. These delegate to PostgresQueryAPI
+	or to DiffController — zero business logic, just HTTP → internal-API
+	adapters.
+
+CANONICAL HASH:
+  - toEntryResponses computes the canonical hash via envelope.EntryIdentity(entry)
+    when deserialization succeeds. Byte-identical to sha256.Sum256(ewm.CanonicalBytes)
+    but the vocabulary is explicit: the returned hash IS the Tessera
+    dedup key / Entry.Identity().
+  - Fallback to crypto.HashBytes(ewm.CanonicalBytes) when deserialize
+    fails (shouldn't happen post-admission, but belt-and-braces).
+
+DEPENDENCY SHAPE:
+
+	Consumes PostgresQueryAPI (store/indexes/query_api.go). That type
+	does Postgres metadata lookup + EntryReader byte hydration and
+	returns []types.EntryWithMetadata. We do NOT talk to the byte store
+	directly.
+*/
+package api
+
+import (
+	"context"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log/slog"
+	"net/http"
+	"strconv"
+	"time"
+
+	"github.com/baseproof/baseproof/core/envelope"
+	"github.com/baseproof/baseproof/crypto"
+	"github.com/baseproof/baseproof/types"
+
+	"github.com/baseproof/tooling/services/ledger/api/middleware"
+	"github.com/baseproof/tooling/services/ledger/apitypes"
+	"github.com/baseproof/tooling/services/ledger/wal"
+)
+
+// defaultScanCount mirrors store/indexes.DefaultScanCount;
+// duplicated here so api/ holds zero pgx imports.
+const defaultScanCount = 100
+
+// ─────────────────────────────────────────────────────────────────────
+// Dependencies
+// ─────────────────────────────────────────────────────────────────────
+
+// QueryDeps is the dependency surface for the query + difficulty handlers.
+//
+//	EntryStore — hash → sequence lookup (FetchByHash).
+//	QueryAPI — joined metadata + byte view. Hydrates bytes via
+//	                 bytestore.Reader internally.
+//	DiffController — live difficulty source for /v1/admission/difficulty.
+//	                 Nil-safe: the handler responds 503 when absent, which
+//	                 is what the read-only ledger wants.
+//	Logger — slog handle.
+type QueryDeps struct {
+	EntryStore     EntryStore
+	QueryAPI       QueryAPI
+	DiffController *middleware.DifficultyController
+	Logger         *slog.Logger
+
+	// WAL is the optional WAL probe surface used by
+	// NewHashLookupHandler to detect entries that have been
+	// admitted (durable in WAL) but not yet sequenced
+	// (entry_index INSERT happens in the background sequencer).
+	// Nil-safe: when WAL is nil the handler skips the probe and
+	// the v1 hash lookup behaves as it always did. The read-only
+	// ledger-reader binary leaves this nil — it has no WAL.
+	WAL EntryWALReader
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Response shape
+// ─────────────────────────────────────────────────────────────────────
+
+// EntryResponse is the JSON shape returned by query handlers.
+//
+// sig_algorithm_id is intentionally absent: surfacing it here forces a
+// per-row Deserialize (or, post-shipper, a per-row bytestore Get) on
+// list endpoints, which turns metadata queries into payload-fetching
+// storms. Auditors who need the algorithm dereference the entry via
+// GET /v1/entries/{seq} and inspect the envelope locally.
+type EntryResponse struct {
+	SequenceNumber uint64 `json:"sequence_number"`
+	CanonicalHash  string `json:"canonical_hash"`
+	LogTime        string `json:"log_time"`
+	SignerDID      string `json:"signer_did,omitempty"`
+	ProtocolVer    uint16 `json:"protocol_version"`
+	PayloadSize    int    `json:"payload_size"`
+	CanonicalSize  int    `json:"canonical_size"`
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// toEntryResponses — central hash-computation site
+// ─────────────────────────────────────────────────────────────────────
+
+// toEntryResponses converts []types.EntryWithMetadata into API responses.
+// Single site where canonical hashes are computed for the read path.
+//
+// SignerDID lives inside CanonicalBytes (v6 multi-sig section) and
+// surfaces via envelope.Deserialize; we deserialize once per entry
+// to extract it alongside protocol version and payload size.
+func toEntryResponses(metas []types.EntryWithMetadata) []EntryResponse {
+	out := make([]EntryResponse, 0, len(metas))
+	for _, ewm := range metas {
+		resp := EntryResponse{
+			SequenceNumber: ewm.Position.Sequence,
+			LogTime:        ewm.LogTime.Format(time.RFC3339Nano),
+			CanonicalSize:  len(ewm.CanonicalBytes),
+		}
+
+		entry, err := envelope.Deserialize(ewm.CanonicalBytes)
+		if err != nil {
+			// Malformed bytes in the byte store — degrade gracefully.
+			h := crypto.HashBytes(ewm.CanonicalBytes)
+			resp.CanonicalHash = hex.EncodeToString(h[:])
+		} else {
+			id, idErr := envelope.EntryIdentity(entry)
+			if idErr != nil {
+				// EntryIdentity failure on a deserialized-OK entry
+				// is exceedingly rare; fall back to the raw byte
+				// hash rather than failing the read.
+				h := crypto.HashBytes(ewm.CanonicalBytes)
+				resp.CanonicalHash = hex.EncodeToString(h[:])
+			} else {
+				resp.CanonicalHash = hex.EncodeToString(id[:])
+			}
+			resp.ProtocolVer = entry.Header.ProtocolVersion
+			resp.PayloadSize = len(entry.DomainPayload)
+			resp.SignerDID = entry.Header.SignerDID
+		}
+
+		out = append(out, resp)
+	}
+	return out
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// GET /v1/entries?from=N&to=M — range query
+// ─────────────────────────────────────────────────────────────────────
+
+// NewRangeQueryHandler returns entries in [from, to] by sequence number.
+func NewRangeQueryHandler(deps *QueryDeps) http.HandlerFunc {
+	const maxRange = 1000
+	return func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
+		fromStr := r.URL.Query().Get("from")
+		toStr := r.URL.Query().Get("to")
+		from, err := strconv.ParseUint(fromStr, 10, 64)
+		if err != nil {
+			writeTypedError(ctx, w, apitypes.ErrorClassInvalidQueryParam,
+				http.StatusBadRequest, "invalid 'from' parameter")
+			return
+		}
+		to, err := strconv.ParseUint(toStr, 10, 64)
+		if err != nil {
+			writeTypedError(ctx, w, apitypes.ErrorClassInvalidQueryParam,
+				http.StatusBadRequest, "invalid 'to' parameter")
+			return
+		}
+		if to < from {
+			writeTypedError(ctx, w, apitypes.ErrorClassInvalidQueryParam,
+				http.StatusBadRequest, "'to' must be >= 'from'")
+			return
+		}
+		span := to - from + 1
+		if span > maxRange {
+			writeTypedError(ctx, w, apitypes.ErrorClassBatchTooLarge,
+				http.StatusBadRequest,
+				fmt.Sprintf("range %d exceeds max %d", span, maxRange))
+			return
+		}
+
+		entries, err := deps.QueryAPI.ScanFromPosition(from, int(span))
+		if err != nil {
+			deps.Logger.Error("range query failed", "error", err)
+			writeTypedError(ctx, w, apitypes.ErrorClassDBQueryFailed,
+				http.StatusInternalServerError, "query failed")
+			return
+		}
+
+		// ScanFromPosition returns seqs >= from; filter any > to defensively.
+		filtered := entries[:0:len(entries)]
+		for _, e := range entries {
+			if e.Position.Sequence > to {
+				break
+			}
+			filtered = append(filtered, e)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"entries": toEntryResponses(filtered),
+			"from":    from,
+			"to":      to,
+		})
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// GET /v1/entries-hash/{hash_hex} — hash lookup
+// ─────────────────────────────────────────────────────────────────────
+
+// NewHashLookupHandler returns a single entry by its canonical hash.
+//
+// Routing decision matrix:
+//
+//	WAL.MetaState (when configured)   entry_index Outcome
+//	───────────────────────────────   ──────────     ──────────────────
+//	StatePending —              200 {state:pending}
+//	StateManual —              200 {state:manual}
+//	StateSequenced / StateShipped row exists 200 + full metadata
+//	StateSequenced / StateShipped no row 500 (state machine
+//	                                                    desync; sequencer
+//	                                                    will catch up)
+//	wal.ErrNotFound row exists 200 + full metadata
+//	                                                    (post-GC-retention
+//	                                                    case; sequencer
+//	                                                    processed long ago)
+//	wal.ErrNotFound no row 404
+//	WAL transport error —              500
+//
+// When deps.WAL is nil (read-only ledger), the WAL probe is
+// skipped and the handler falls through to entry_index directly.
+func NewHashLookupHandler(deps *QueryDeps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
+
+		hashHex := r.URL.Path[len("/v1/entries-hash/"):]
+		hashBytes, err := hex.DecodeString(hashHex)
+		if err != nil || len(hashBytes) != 32 {
+			writeTypedError(ctx, w, apitypes.ErrorClassBadHexLength,
+				http.StatusBadRequest, "invalid canonical hash")
+			return
+		}
+		var hash [32]byte
+		copy(hash[:], hashBytes)
+
+		// Step 1: probe WAL (when configured) — catches entries
+		// that are durable in WAL but not yet in entry_index. The
+		// background sequencer eventually transitions them to
+		// StateSequenced and INSERTs the entry_index row; until
+		// then the truthful response is "pending", not 404.
+		if deps.WAL != nil {
+			meta, walErr := deps.WAL.MetaState(ctx, hash)
+			switch {
+			case walErr == nil:
+				// State machine determines whether to short-circuit
+				// or fall through to entry_index.
+				switch meta.State {
+				case wal.StatePending:
+					w.Header().Set("Content-Type", "application/json")
+					_ = json.NewEncoder(w).Encode(map[string]any{
+						"state":          "pending",
+						"canonical_hash": hashHex,
+					})
+					return
+				case wal.StateManual:
+					// Sequencer gave up after MaxAttempts. Bytes
+					// are durable in WAL but never reached
+					// entry_index; consumer needs ledger
+					// intervention.
+					w.Header().Set("Content-Type", "application/json")
+					_ = json.NewEncoder(w).Encode(map[string]any{
+						"state":          "manual",
+						"canonical_hash": hashHex,
+					})
+					return
+				case wal.StateSequenced, wal.StateShipped:
+					// Fall through — the row should be in entry_index.
+				}
+			case errors.Is(walErr, wal.ErrNotFound):
+				// Either never admitted, or admitted-and-GC'd. If
+				// entry_index has the row we'll find it below; if
+				// not, 404.
+			default:
+				deps.Logger.Error("hash lookup: WAL probe", "error", walErr)
+				writeTypedError(ctx, w, apitypes.ErrorClassReadProjectionFailed,
+					http.StatusInternalServerError, "WAL probe failed")
+				return
+			}
+		}
+
+		// Step 2: entry_index lookup (the original v1 code path).
+		seq, found, err := deps.EntryStore.FetchByHash(ctx, hash)
+		if err != nil {
+			deps.Logger.Error("hash lookup failed", "error", err)
+			writeTypedError(ctx, w, apitypes.ErrorClassDBQueryFailed,
+				http.StatusInternalServerError, "query failed")
+			return
+		}
+		if !found {
+			writeTypedError(ctx, w, apitypes.ErrorClassNotFound,
+				http.StatusNotFound, "entry not found")
+			return
+		}
+
+		entries, err := deps.QueryAPI.ScanFromPosition(seq, 1)
+		if err != nil || len(entries) == 0 || entries[0].Position.Sequence != seq {
+			deps.Logger.Error("hash lookup hydrate", "seq", seq, "got", len(entries), "err", err)
+			writeTypedError(ctx, w, apitypes.ErrorClassDBQueryFailed,
+				http.StatusInternalServerError, "fetch failed")
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(toEntryResponses(entries)[0])
+	}
+}
+
+// The raw-bytes endpoint (GET /v1/entries/{seq}/raw) lives in
+// api/entries_read.go (NewRawEntryHandler). It does WAL-aware
+// routing: 200 OK + inline body for un-shipped entries, 302
+// Found + presigned URL for shipped entries past WAL retention.
+// See entries_read.go's docblock for the full state machine.
+
+// ─────────────────────────────────────────────────────────────────────
+// POST /v1/entries-hash/batch — batch hash lookup (Part II.3)
+// ─────────────────────────────────────────────────────────────────────
+
+// MaxBatchHashLookup caps the number of hashes accepted in a single
+// POST /v1/entries-hash/batch request. Defensive — prevents an
+// adversarial client from binding the ledger to an O(N) DB lookup
+// with an arbitrarily-large N. 1000 is the same cap the plan §II.3
+// specifies; sized for "the auditor wants to check 1000 hashes at
+// once" without enabling abuse.
+const MaxBatchHashLookup = 1000
+
+// hashBatchRequest is the wire shape POSTed by the caller.
+//
+//	{"hashes": ["<64-char hex>", "<64-char hex>", ...]}
+type hashBatchRequest struct {
+	Hashes []string `json:"hashes"`
+}
+
+// hashBatchResult is the per-hash outcome in the response array.
+// Mirrors NewHashLookupHandler's single-result shapes for the
+// pending/manual/sequenced/shipped cases, with an additional
+// "not_found" terminal state — so the consumer parses ONE response
+// shape regardless of the per-hash outcome.
+type hashBatchResult struct {
+	CanonicalHash string `json:"canonical_hash"`
+	State         string `json:"state"` // pending|manual|sequenced|shipped|not_found
+	// Sequence is populated for sequenced + shipped only. The JSON
+	// field is suppressed (omitempty) for pending/manual/not_found
+	// so the response stays compact.
+	Sequence uint64 `json:"sequence,omitempty"`
+}
+
+// NewBatchHashLookupHandler returns the POST /v1/entries-hash/batch
+// handler — the bulk variant of NewHashLookupHandler.
+//
+// Decision matrix per hash: identical to the singular endpoint
+// (api/queries.go:NewHashLookupHandler), but condensed into the
+// hashBatchResult shape so the response is a flat array. The
+// per-hash WAL probe + entry_index lookup runs SEQUENTIALLY (not
+// in parallel) because:
+//
+//   - Postgres pgx connections are pool-limited; spraying 1000
+//     concurrent goroutines at the pool exhausts the same budget
+//     the rest of the ledger needs.
+//   - Sequential scan-through is dominated by network/DB I/O, not
+//     CPU; for 1000 hashes at ~1ms-per-lookup that's ~1s in the
+//     worst case — acceptable for a batch endpoint.
+//
+// Callers needing sub-second batches at higher concurrency can
+// shard the batch client-side.
+func NewBatchHashLookupHandler(deps *QueryDeps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
+
+		// Method enforcement is delegated to the mux: server.go
+		// registers this handler under `POST /v1/entries-hash/batch`.
+		// A GET / PUT / etc. lands on a 405 emitted by the
+		// http.ServeMux before this handler runs.
+
+		var req hashBatchRequest
+		dec := json.NewDecoder(r.Body)
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&req); err != nil {
+			writeTypedError(ctx, w, apitypes.ErrorClassInvalidQueryParam,
+				http.StatusBadRequest, "malformed JSON body")
+			return
+		}
+		if len(req.Hashes) == 0 {
+			writeTypedError(ctx, w, apitypes.ErrorClassInvalidQueryParam,
+				http.StatusBadRequest, "hashes array empty")
+			return
+		}
+		if len(req.Hashes) > MaxBatchHashLookup {
+			writeTypedError(ctx, w, apitypes.ErrorClassBatchTooLarge,
+				http.StatusRequestEntityTooLarge,
+				fmt.Sprintf("batch exceeds %d hash cap", MaxBatchHashLookup))
+			return
+		}
+
+		// Parse + validate all hashes BEFORE running any DB lookup —
+		// a single malformed hash should fail the whole request
+		// with a 400, not return partial results. The cap-check
+		// above ensures len(req.Hashes) is bounded.
+		parsed := make([][32]byte, len(req.Hashes))
+		for i, h := range req.Hashes {
+			bytes, err := hex.DecodeString(h)
+			if err != nil || len(bytes) != 32 {
+				writeTypedError(ctx, w, apitypes.ErrorClassBadHexLength,
+					http.StatusBadRequest,
+					fmt.Sprintf("hashes[%d] is not a 64-character hex string", i))
+				return
+			}
+			copy(parsed[i][:], bytes)
+		}
+
+		results := make([]hashBatchResult, len(parsed))
+		for i, hash := range parsed {
+			results[i] = lookupOneHash(ctx, deps, hash, req.Hashes[i])
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"results": results,
+		})
+	}
+}
+
+// lookupOneHash factors out the single-hash WAL+entry_index probe
+// shared by the singular and batch endpoints. Returns a
+// hashBatchResult with the appropriate state. On infrastructure
+// errors (WAL transport failure, DB query failure) the result
+// carries state="not_found" — the BATCH endpoint cannot per-hash-
+// surface a 500, so infrastructure errors degrade to "not_found"
+// for that hash and are logged at Error. A client wanting strict
+// error semantics should use the singular endpoint.
+func lookupOneHash(ctx context.Context, deps *QueryDeps, hash [32]byte, hashHex string) hashBatchResult {
+	out := hashBatchResult{CanonicalHash: hashHex, State: "not_found"}
+
+	// WAL probe (when configured).
+	if deps.WAL != nil {
+		meta, walErr := deps.WAL.MetaState(ctx, hash)
+		switch {
+		case walErr == nil:
+			switch meta.State {
+			case wal.StatePending:
+				out.State = "pending"
+				return out
+			case wal.StateManual:
+				out.State = "manual"
+				return out
+			case wal.StateSequenced, wal.StateShipped:
+				// Fall through to entry_index for the seq.
+			}
+		case errors.Is(walErr, wal.ErrNotFound):
+			// Either never admitted, or admitted-and-GC'd. The
+			// entry_index lookup below handles both cases.
+		default:
+			deps.Logger.ErrorContext(ctx, "batch hash lookup: WAL probe",
+				"hash", hashHex, "error", walErr)
+			return out // state="not_found" — see contract above.
+		}
+	}
+
+	seq, found, err := deps.EntryStore.FetchByHash(ctx, hash)
+	if err != nil {
+		deps.Logger.ErrorContext(ctx, "batch hash lookup: entry_index",
+			"hash", hashHex, "error", err)
+		return out
+	}
+	if !found {
+		return out
+	}
+	out.State = "sequenced"
+	out.Sequence = seq
+	return out
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Index-backed query handlers (ControlHeader field lookups)
+// ─────────────────────────────────────────────────────────────────────
+//
+// These five handlers expose the PostgresQueryAPI's "query by control
+// header field" methods. Referenced by api/server.go as
+// Handlers.CosignatureOf / .TargetRoot / .SignerDID / .SchemaRef / .Scan
+// and wired by both the read-write ledger (cmd/ledger) and the
+// read-only ledger (cmd/ledger-reader).
+//
+// Uniform HTTP surface on purpose: one parsing rule, one response shape.
+
+// NewQueryCosignatureOfHandler — GET /v1/query/cosignature_of/{pos}.
+// {pos} encodes a LogPosition as "did:sequence".
+func NewQueryCosignatureOfHandler(deps *QueryDeps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
+		pos, err := parseLogPosition(r.PathValue("pos"))
+		if err != nil {
+			writeTypedError(ctx, w, apitypes.ErrorClassInvalidQueryParam,
+				http.StatusBadRequest, err.Error())
+			return
+		}
+		entries, err := deps.QueryAPI.QueryByCosignatureOf(pos)
+		if err != nil {
+			deps.Logger.Error("query cosignature_of", "error", err)
+			writeTypedError(ctx, w, apitypes.ErrorClassDBQueryFailed,
+				http.StatusInternalServerError, "query failed")
+			return
+		}
+		writeEntriesJSON(w, entries)
+	}
+}
+
+// NewQueryTargetRootHandler — GET /v1/query/target_root/{pos}.
+func NewQueryTargetRootHandler(deps *QueryDeps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
+		pos, err := parseLogPosition(r.PathValue("pos"))
+		if err != nil {
+			writeTypedError(ctx, w, apitypes.ErrorClassInvalidQueryParam,
+				http.StatusBadRequest, err.Error())
+			return
+		}
+		entries, err := deps.QueryAPI.QueryByTargetRoot(pos)
+		if err != nil {
+			deps.Logger.Error("query target_root", "error", err)
+			writeTypedError(ctx, w, apitypes.ErrorClassDBQueryFailed,
+				http.StatusInternalServerError, "query failed")
+			return
+		}
+		writeEntriesJSON(w, entries)
+	}
+}
+
+// NewQuerySignerDIDHandler — GET /v1/query/signer_did/{did}.
+// {did} is the URL-encoded signer DID string.
+func NewQuerySignerDIDHandler(deps *QueryDeps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
+		did := r.PathValue("did")
+		if did == "" {
+			writeTypedError(ctx, w, apitypes.ErrorClassMissingPathParam,
+				http.StatusBadRequest, "signer DID required")
+			return
+		}
+		entries, err := deps.QueryAPI.QueryBySignerDID(did)
+		if err != nil {
+			deps.Logger.Error("query signer_did", "error", err)
+			writeTypedError(ctx, w, apitypes.ErrorClassDBQueryFailed,
+				http.StatusInternalServerError, "query failed")
+			return
+		}
+		writeEntriesJSON(w, entries)
+	}
+}
+
+// NewQueryDelegateDIDHandler — GET /v1/query/delegate_did/{did}.
+// Returns the live entries whose Header.DelegateDID matches the
+// supplied DID, ordered by sequence_number DESC (newest first).
+//
+// Consumed by:
+//   - judicial-network for read-time policy verification (the
+//     constraint walker fetches the latest delegation for each
+//     attestor and applies DelegationOriginDID / RequiredScopes).
+//   - Multi-network shims for cross-recognition projections.
+//
+// Each consumer applies its own cache strategy per the matrix-of-
+// consumers design (#75 follow-up); the ledger is the
+// authoritative source. {did} is the URL-encoded delegate DID.
+func NewQueryDelegateDIDHandler(deps *QueryDeps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
+		did := r.PathValue("did")
+		if did == "" {
+			writeTypedError(ctx, w, apitypes.ErrorClassMissingPathParam,
+				http.StatusBadRequest, "delegate DID required")
+			return
+		}
+		entries, err := deps.QueryAPI.QueryByDelegateDID(did)
+		if err != nil {
+			deps.Logger.Error("query delegate_did", "error", err)
+			writeTypedError(ctx, w, apitypes.ErrorClassDBQueryFailed,
+				http.StatusInternalServerError, "query failed")
+			return
+		}
+		writeEntriesJSON(w, entries)
+	}
+}
+
+// NewQuerySchemaRefHandler — GET /v1/query/schema_ref/{pos}.
+func NewQuerySchemaRefHandler(deps *QueryDeps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
+		pos, err := parseLogPosition(r.PathValue("pos"))
+		if err != nil {
+			writeTypedError(ctx, w, apitypes.ErrorClassInvalidQueryParam,
+				http.StatusBadRequest, err.Error())
+			return
+		}
+		entries, err := deps.QueryAPI.QueryBySchemaRef(pos)
+		if err != nil {
+			deps.Logger.Error("query schema_ref", "error", err)
+			writeTypedError(ctx, w, apitypes.ErrorClassDBQueryFailed,
+				http.StatusInternalServerError, "query failed")
+			return
+		}
+		writeEntriesJSON(w, entries)
+	}
+}
+
+// NewQueryScanHandler — GET /v1/query/scan?start=N&count=M.
+// Flat scan from sequence N returning up to M entries (capped at MaxScanCount).
+func NewQueryScanHandler(deps *QueryDeps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
+		startStr := r.URL.Query().Get("start")
+		countStr := r.URL.Query().Get("count")
+		start, err := strconv.ParseUint(startStr, 10, 64)
+		if err != nil {
+			writeTypedError(ctx, w, apitypes.ErrorClassInvalidQueryParam,
+				http.StatusBadRequest, "invalid start parameter")
+			return
+		}
+		count := defaultScanCount
+		if countStr != "" {
+			parsed, pErr := strconv.Atoi(countStr)
+			if pErr != nil || parsed <= 0 {
+				writeTypedError(ctx, w, apitypes.ErrorClassInvalidQueryParam,
+					http.StatusBadRequest, "invalid count parameter")
+				return
+			}
+			count = parsed
+		}
+		entries, err := deps.QueryAPI.ScanFromPosition(start, count)
+		if err != nil {
+			deps.Logger.Error("query scan", "error", err)
+			writeTypedError(ctx, w, apitypes.ErrorClassDBQueryFailed,
+				http.StatusInternalServerError, "query failed")
+			return
+		}
+		writeEntriesJSON(w, entries)
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// GET /v1/admission/difficulty
+// ─────────────────────────────────────────────────────────────────────
+
+// NewDifficultyHandler returns the live Mode B stamp difficulty + hash
+// function. Nil-safe: responds 503 when DiffController is absent (the
+// read-only reader's case).
+func NewDifficultyHandler(deps *QueryDeps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if deps.DiffController == nil {
+			writeTypedError(r.Context(), w, apitypes.ErrorClassDBQueryFailed,
+				http.StatusServiceUnavailable,
+				"difficulty controller not configured")
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "public, max-age=5")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"difficulty":    deps.DiffController.CurrentDifficulty(),
+			"hash_function": deps.DiffController.HashFunction(),
+			"timestamp":     time.Now().UTC().Format(time.RFC3339Nano),
+		})
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Helpers
+// ─────────────────────────────────────────────────────────────────────
+
+// parseLogPosition splits "did:sequence" into a typed LogPosition. The
+// DID itself may contain colons (did:web:x, did:baseproof:a:b:c) so we
+// split on the LAST colon to isolate the sequence.
+func parseLogPosition(s string) (types.LogPosition, error) {
+	if s == "" {
+		return types.LogPosition{}, fmt.Errorf("log position required")
+	}
+	idx := -1
+	for i := len(s) - 1; i >= 0; i-- {
+		if s[i] == ':' {
+			idx = i
+			break
+		}
+	}
+	if idx <= 0 || idx == len(s)-1 {
+		return types.LogPosition{}, fmt.Errorf("log position must be 'did:sequence'")
+	}
+	seq, err := strconv.ParseUint(s[idx+1:], 10, 64)
+	if err != nil {
+		return types.LogPosition{}, fmt.Errorf("invalid sequence in log position: %w", err)
+	}
+	return types.LogPosition{LogDID: s[:idx], Sequence: seq}, nil
+}
+
+// writeEntriesJSON is the shared success envelope for the five header-field
+// query handlers.
+func writeEntriesJSON(w http.ResponseWriter, entries []types.EntryWithMetadata) {
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"entries": toEntryResponses(entries),
+		"count":   len(entries),
+	})
+}

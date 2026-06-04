@@ -1,0 +1,216 @@
+# =============================================================================
+# values.yaml — Baseproof ledger Helm chart defaults.
+#
+# Production overlay example: values-production.example.yaml.
+# Postgres parameter reference: bitnami/postgresql README.
+# =============================================================================
+
+image:
+  repository: ghcr.io/baseproof/tooling/ledger
+  # Empty tag falls back to .Chart.AppVersion.
+  tag: ""
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+
+nameOverride: ""
+fullnameOverride: ""
+
+# Helm convention is `helm install -n <ns> --create-namespace`. Flip
+# create=true for GitOps loops where the chart owns the namespace.
+namespace:
+  create: false
+  name: ledger
+
+serviceAccount:
+  create: true
+  name: ""
+  # Workload-identity bindings (GKE: iam.gke.io/gcp-service-account,
+  # EKS: eks.amazonaws.com/role-arn).
+  annotations: {}
+
+# Singleton-writer enforced at the DB level via Postgres advisory
+# lock (BuilderLockID = 0x4F5254484F4C4F47). Do not raise replicas;
+# do not switch strategy to RollingUpdate — the second pod would
+# crash on lock contention.
+replicas: 1
+strategy:
+  type: Recreate
+
+# 60s headroom for LEDGER_PREDRAIN_GRACE (5s) + Server.Shutdown
+# (30s) + per-component close (15-30s).
+terminationGracePeriodSeconds: 60
+
+podAnnotations:
+  prometheus.io/scrape: "true"
+  prometheus.io/port: "8080"
+  prometheus.io/path: "/metrics"
+podLabels: {}
+podSecurityContext: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+container:
+  ports:
+    http: 8080
+    pprof: 6060
+  resources:
+    requests: {cpu: 500m, memory: 512Mi}
+    limits:   {cpu: "2",  memory: 2Gi}
+  securityContext: {}
+  livenessProbe:
+    httpGet: {path: /healthz, port: http}
+    initialDelaySeconds: 5
+    periodSeconds: 10
+    timeoutSeconds: 2
+  readinessProbe:
+    httpGet: {path: /readyz, port: http}
+    initialDelaySeconds: 5
+    periodSeconds: 5
+    timeoutSeconds: 2
+    failureThreshold: 3
+
+service:
+  type: ClusterIP
+  ports:
+    - {name: http,    port: 80,   targetPort: http}
+    - {name: metrics, port: 8080, targetPort: http}
+  annotations: {}
+
+pdb:
+  enabled: true
+  minAvailable: 0  # singleton writer; eviction is fine.
+
+# Three distinct PVCs so corruption in one (e.g., antispam) does
+# not force discarding the others. Each independently disable-able.
+persistence:
+  storageClassName: ""
+  wal:      {enabled: true, size: 50Gi,  accessModes: [ReadWriteOnce]}
+  tessera:  {enabled: true, size: 200Gi, accessModes: [ReadWriteOnce]}
+  antispam: {enabled: true, size: 20Gi,  accessModes: [ReadWriteOnce]}
+
+# LEDGER_* env vars rendered into a ConfigMap. Each key here maps
+# 1:1 to the matching env var the binary reads at startup.
+config:
+  addr: ":8080"
+  pprofAddr: "127.0.0.1:6060"
+
+  # Required in production. Witnesses, auditors, gossip peers all
+  # anchor on this DID.
+  logDID: ""
+  ledgerDID: ""
+
+  tesseraStorageDir: "/var/lib/baseproof/tessera"
+  tesseraAntispamPath: "/var/lib/baseproof/antispam"
+  walPath: "/var/lib/baseproof/wal"
+
+  byteStore:
+    backend: "gcs"        # gcs | s3 (the only values cmd/ledger accepts at boot)
+    prefix: "entries"
+    publicBaseURL: ""     # credential-free CDN URL prefix
+    gcs:
+      bucket: ""
+      endpoint: ""
+      anonymous: false
+    s3:
+      bucket: ""
+      endpoint: ""
+      region: ""
+      pathStyle: false
+
+  tile:
+    backend: "gcs"        # gcs | posix
+    bucketPrefix: "tessera/"
+    serveDisable: false
+    # In-memory LRU cache of decoded tiles (entries, NOT bytes).
+    # Sized for the read working set. Each entry holds one decoded
+    # tile (~8 KB for a full-256 tile), so 10000 ≈ 80 MB resident.
+    # Cloud-native adjustment: change this value, then helm upgrade —
+    # the ConfigMap-checksum annotation on the Deployment forces
+    # a rolling restart automatically. Same env var works under
+    # docker / docker-compose / systemd; restart picks up the new size.
+    cacheSize: 10000
+
+  metrics:
+    enable: true
+    environment: "production"
+
+  predrainGrace: "5s"
+  pgStatementTimeout: "5s"
+  pgMaxConns: 0
+  maxConcurrentConns: 0   # 0 → 8 × NumCPU
+  otlpTracesEndpoint: ""
+  serviceVersion: ""
+
+# Free-form LEDGER_* env not surfaced under config.* (witness
+# endpoints, gossip peers, MMD, sequencer tunables). Keys are env
+# var names verbatim; values are strings.
+extraEnv: {}
+
+# envFrom Secret/ConfigMap refs (e.g., S3 credentials).
+extraEnvFrom: []
+
+# In-cluster Postgres via the bitnami sub-chart.
+#
+# When enabled, LEDGER_DATABASE_URL is composed at pod startup
+# from auth.username, auth.database, the sub-chart's Service, and
+# the password key from the bitnami auth Secret (whether the chart
+# generates that Secret or the operator supplies one via
+# auth.existingSecret).
+#
+# All keys mirror the bitnami chart verbatim — see its README at
+# https://github.com/bitnami/charts/tree/main/bitnami/postgresql.
+postgresql:
+  enabled: false
+  auth:
+    database: ledger
+    username: ledger_app
+    # Either set inline OR set existingSecret. Inline values are
+    # picked up by both bitnami AND this chart (so a single value
+    # binding both ends agree on the password).
+    password: ""
+    existingSecret: ""
+    # Bitnami's canonical key name inside the auth Secret for the
+    # custom-user password. Override only if your existingSecret
+    # uses a non-default key.
+    secretKeys:
+      userPasswordKey: password
+  primary:
+    persistence:
+      enabled: true
+      size: 100Gi
+
+# External Postgres. Used when postgresql.enabled is false.
+# Pick exactly one path:
+#   - existingSecret: production. Pre-create a Secret with key
+#     LEDGER_DATABASE_URL (rotation by external-secrets, Vault, etc.).
+#   - url: dev / CI. Chart writes a Secret with this URL inline.
+externalDatabase:
+  existingSecret: ""
+  url: ""
+
+# Production stable signing identity. Disabled by default — the
+# ledger generates ephemeral keys at boot and emits a "NOT for
+# production" warning.
+#
+# Generate keys off-cluster:
+#   openssl ecparam -genkey -name prime256v1 -noout -out signer.pem
+#   openssl ecparam -genkey -name prime256v1 -noout -out tessera-signer.pem
+#   kubectl -n ledger create secret generic ledger-signer-keys \
+#       --from-file=signer.pem=signer.pem \
+#       --from-file=tessera-signer.pem=tessera-signer.pem
+signerKeys:
+  enabled: false
+  existingSecret: "ledger-signer-keys"
+  signerFile: "signer.pem"
+  tesseraSignerFile: "tessera-signer.pem"
+  mountPath: "/etc/ledger/keys"
+
+# Prometheus Operator integration (CRDs must already be installed).
+serviceMonitor:
+  enabled: false
+  interval: 15s
+  scrapeTimeout: 10s
+  labels: {}
+  path: /metrics
+  port: metrics

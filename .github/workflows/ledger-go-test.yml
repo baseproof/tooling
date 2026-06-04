@@ -1,0 +1,94 @@
+# Build + unit tests + race detector + SDK mutation-gate audit for the ledger
+# service (services/ledger). Merge gate, scoped to the ledger subtree.
+#
+# Relocated from the standalone ledger repo (.github/workflows/go-test.yml) when
+# the ledger moved into services/ledger. GitHub Actions only reads workflows
+# from the repo root, so the run steps cd into the module via
+# defaults.run.working-directory and setup-go reads services/ledger/go.mod.
+name: ledger-go-test
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "services/ledger/**"
+      - ".github/workflows/ledger-go-test.yml"
+  pull_request:
+    paths:
+      - "services/ledger/**"
+      - ".github/workflows/ledger-go-test.yml"
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    working-directory: services/ledger
+
+jobs:
+  build:
+    name: build + vet + test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11  # v4.1.1
+        with:
+          persist-credentials: false
+          submodules: recursive
+
+      - name: Set up Go
+        uses: actions/setup-go@cdcb36043654635271a94b9a6d1392de5bb323a7  # v5.0.1
+        with:
+          go-version-file: services/ledger/go.mod
+
+      - name: verify-deps (go mod verify + download)
+        run: make verify-deps
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test (-short, all packages)
+        run: go test -short -count=1 ./...
+
+      - name: SDK mutation-gate audit (audit-sdk)
+        run: make audit-sdk
+
+  race:
+    name: race detector (critical packages)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11  # v4.1.1
+        with:
+          persist-credentials: false
+          submodules: recursive
+
+      - name: Set up Go
+        uses: actions/setup-go@cdcb36043654635271a94b9a6d1392de5bb323a7  # v5.0.1
+        with:
+          go-version-file: services/ledger/go.mod
+
+      - name: race detector
+        run: make test-race
+
+  docker-build:
+    name: docker image build (fork)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11  # v4.1.1
+        with:
+          persist-credentials: false
+          submodules: recursive
+
+      # Proves the production image builds from the new context (services/ledger,
+      # via the inherited working-directory) including the third_party/tessera
+      # submodule that the default fork variant links — so a Dockerfile/context/
+      # submodule regression is caught per-PR, not at release-tag time.
+      - name: docker build (fork — default variant)
+        run: |
+          docker build \
+            -f scripts/local/Dockerfile \
+            --build-arg VERSION=ci \
+            --build-arg TESSERA_VARIANT=fork \
+            -t ledger:ci .

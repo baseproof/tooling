@@ -1,0 +1,14 @@
+#!/bin/bash
+
+while read local_ref local_sha remote_ref remote_sha
+do
+    BRANCH_NAME=$(echo "$local_ref" | sed 's|^refs/heads/||')
+
+    if echo "$BRANCH_NAME" | grep -qi "^claude/"; then
+        echo "❌ ERROR: Cannot push branch '$BRANCH_NAME'."
+        echo "Branch names starting with 'claude/' are blocked."
+        exit 1
+    fi
+done
+
+exit 0

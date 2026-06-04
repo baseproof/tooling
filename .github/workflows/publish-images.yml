@@ -1,0 +1,144 @@
+name: publish-images
+
+# Build the tooling service containers and publish them to the GitHub
+# Container Registry as signed, multi-arch images with SBOM + SLSA provenance.
+#
+# tooling ships MORE than one deployable, so this is the fleet-standard
+# publish-image workflow generalized to a matrix: one entry per service. Images:
+#
+#   ghcr.io/baseproof/tooling/auditor    (evidence custodian + detection)
+#   ghcr.io/baseproof/tooling/witness    (notary daemon + gen-fixtures)
+#
+# Consumers (the JN e2e, k8s) PULL these by tag — no source checkout, no local
+# cross-module build. Deps are public (baseproof SDK + the in-repo libs module via
+# a local replace), so no build-time VCS auth is needed.
+
+on:
+  push:
+    # Publish images ONLY on a pushed release tag — never on every main commit.
+    # Cut a v*.*.* tag (e.g. `v0.1.0`) to release the auditor + witness images;
+    # this is distinct from the `libs/v*` Go-module tags.
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+
+concurrency:
+  group: publish-images-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read # checkout
+  packages: write # push to ghcr
+  id-token: write # cosign keyless signing + provenance (OIDC)
+  attestations: write # GitHub build-provenance attestations
+
+env:
+  REGISTRY: ghcr.io
+  PLATFORMS: linux/amd64,linux/arm64
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The auditor is a CROSS-MODULE build (it imports the sibling libs
+          # module via `replace => ../../libs`), so its context is the repo root.
+          - service: auditor
+            dockerfile: services/auditor/Dockerfile
+            context: .
+          # The witness is self-contained; its context is the module dir.
+          - service: witness
+            dockerfile: services/witness/Dockerfile
+            context: services/witness
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU (cross-arch emulation)
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to ghcr
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Derive tags + OCI labels
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ github.repository }}/${{ matrix.service }}
+          # latest=auto → the `latest` tag tracks the most recent semver release
+          # tag, applied automatically on every v*.*.* push (the only trigger).
+          flavor: |
+            latest=auto
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,format=long
+
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          platforms: ${{ env.PLATFORMS }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VERSION=${{ steps.meta.outputs.version }}
+          # Per-service GHA cache scope so the two builds don't evict each other.
+          cache-from: type=gha,scope=${{ matrix.service }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.service }}
+          provenance: mode=max # SLSA provenance attestation
+          sbom: true # SBOM attestation
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign the image (keyless / Sigstore OIDC)
+        env:
+          IMAGE: ${{ env.REGISTRY }}/${{ github.repository }}/${{ matrix.service }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        # Sign by digest so the signature covers the multi-arch index and every
+        # tag that points at it. Keyless: identity = this workflow's OIDC token,
+        # transparency-logged in Rekor — no long-lived signing key to hold.
+        run: cosign sign --yes "${IMAGE}@${DIGEST}"
+
+  # Keep the libs Go-module tag in lock-step with the image release. A pushed
+  # top-level v*.*.* tag ALSO creates libs/v*.*.* at the same commit, so the
+  # version a downstream proxy consumer pulls (`go get tooling/libs@vX.Y.Z`,
+  # e.g. judicial-network) is exactly the code these images ship — one version,
+  # one source of truth. libs/* does NOT match the v*.*.* trigger, so creating it
+  # never re-triggers this workflow. (Only on tag pushes, not workflow_dispatch.)
+  tag-libs:
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create + push the libs/<version> module tag
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Mirror release version onto the libs module tag
+        env:
+          VERSION: ${{ github.ref_name }} # e.g. v0.2.0
+        run: |
+          set -euo pipefail
+          LIBS_TAG="libs/${VERSION}"
+          if git ls-remote --exit-code --tags origin "refs/tags/${LIBS_TAG}" >/dev/null 2>&1; then
+            echo "libs tag ${LIBS_TAG} already exists — nothing to do"
+            exit 0
+          fi
+          git tag "${LIBS_TAG}" "${GITHUB_SHA}"
+          git push origin "${LIBS_TAG}"
+          echo "created ${LIBS_TAG} -> ${GITHUB_SHA}"

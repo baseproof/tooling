@@ -1,0 +1,142 @@
+name: ledger-publish-image
+
+# Build the ledger container and publish it to the GitHub Container Registry as
+# a signed, multi-arch image with an SBOM and SLSA provenance.
+#
+# Publishes ONLY on a pushed v*.*.* release tag (the shared tooling fleet
+# release tag), never on every main commit. Image (fleet-consistent with
+# auditor/witness): ghcr.io/baseproof/tooling/ledger.
+#
+# Relocated from the standalone ledger repo when the ledger moved into
+# services/ledger. The build context is the module dir (the Dockerfile is
+# context-relative — COPY go.mod/go.sum, COPY . ., go build ./cmd/...), and the
+# checkout pulls the third_party/tessera submodule for the default fork build.
+
+on:
+  push:
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+
+concurrency:
+  group: ledger-publish-image-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read # checkout
+  packages: write # push to ghcr
+  id-token: write # cosign keyless signing + provenance (OIDC)
+  attestations: write # GitHub build-provenance attestations
+
+env:
+  REGISTRY: ghcr.io
+  # Publish under the tooling fleet namespace (consistent with the
+  # auditor/witness images): ghcr.io/baseproof/tooling/ledger.
+  IMAGE_NAME: ${{ github.repository }}/ledger
+  # ── Paths into the relocated module (build context = the module dir). ──
+  DOCKERFILE: services/ledger/scripts/local/Dockerfile
+  BUILD_CONTEXT: services/ledger
+  PLATFORMS: linux/amd64,linux/arm64
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # The default build links the in-repo third_party/tessera fork via
+          # go.work (deterministic shutdown) — the submodule must be present.
+          # The root .gitmodules maps it to services/ledger/third_party/tessera.
+          submodules: recursive
+
+      - name: Set up QEMU (cross-arch emulation)
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to ghcr
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Derive tags + OCI labels
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          flavor: |
+            latest=auto
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,format=long
+
+      # Primary image = the baseproof fork (deterministic shutdown), the default.
+      # Tags are un-suffixed: ledger:{version}, :{major}.{minor}, :latest.
+      - name: Build and push (fork — default)
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ env.BUILD_CONTEXT }}
+          file: ${{ env.DOCKERFILE }}
+          platforms: ${{ env.PLATFORMS }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VERSION=${{ steps.meta.outputs.version }}
+            TESSERA_VARIANT=fork
+          cache-from: type=gha,scope=fork
+          cache-to: type=gha,mode=max,scope=fork
+          provenance: mode=max # SLSA provenance attestation
+          sbom: true # SBOM attestation
+
+      # Secondary variant = Google upstream tessera, for callers that need it
+      # (e.g. e2e cross-checks). Same version, `-upstream`-suffixed tags.
+      - name: Derive tags + OCI labels (upstream variant)
+        id: meta-upstream
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          flavor: |
+            latest=auto
+            suffix=-upstream
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,format=long
+
+      - name: Build and push (upstream tessera variant)
+        id: build-upstream
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ env.BUILD_CONTEXT }}
+          file: ${{ env.DOCKERFILE }}
+          platforms: ${{ env.PLATFORMS }}
+          push: true
+          tags: ${{ steps.meta-upstream.outputs.tags }}
+          labels: ${{ steps.meta-upstream.outputs.labels }}
+          build-args: |
+            VERSION=${{ steps.meta.outputs.version }}
+            TESSERA_VARIANT=upstream
+          cache-from: type=gha,scope=upstream
+          cache-to: type=gha,mode=max,scope=upstream
+          provenance: mode=max
+          sbom: true
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign the images (keyless / Sigstore OIDC)
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          DIGEST_UPSTREAM: ${{ steps.build-upstream.outputs.digest }}
+        # Sign by digest so each signature covers its multi-arch index and every
+        # tag pointing at it. Keyless: identity = this workflow's OIDC token,
+        # transparency-logged in Rekor — no long-lived signing key to hold.
+        run: |
+          cosign sign --yes "${REGISTRY}/${IMAGE_NAME}@${DIGEST}"
+          cosign sign --yes "${REGISTRY}/${IMAGE_NAME}@${DIGEST_UPSTREAM}"

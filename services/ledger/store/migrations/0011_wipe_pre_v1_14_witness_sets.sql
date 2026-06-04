@@ -1,0 +1,30 @@
+-- FILE PATH: store/migrations/0011_wipe_pre_v1_14_witness_sets.sql
+--
+-- One-time pre-launch reset of the cached witness keyset.
+--
+-- baseproof v1.14.0 makes types.WitnessPublicKey.SchemeTag a REQUIRED,
+-- DECLARED field. cosign.NewWitnessKeySet now rejects, at the single
+-- construction chokepoint every boot/rotation path flows through:
+--   * a key with SchemeTag == 0        -> ErrWitnessSchemeUnspecified
+--   * a key whose ID != sha256(pubkey) -> ErrWitnessIDMismatch
+--
+-- witness_sets.keys_json rows written before the bump serialised the
+-- key set WITHOUT a per-key scheme_tag (and possibly with non-canonical
+-- IDs). On the next boot wireWitnessQuorum prefers the persisted set
+-- (witnessclient.LoadCurrentSet) over the genesis config, so such a row
+-- would deserialise SchemeTag = 0 and brick the witness-quorum wiring
+-- at startup (cmd/ledger/boot/wire/gossip.go).
+--
+-- The network is pre-launch: zero rotations have been persisted, so in
+-- practice this DELETE removes nothing. It exists so that any stray dev
+-- or staging row cannot stop boot after the bump. With the table empty,
+-- LoadCurrentSet finds no rows and boot falls back to the genesis path
+-- (witness.KeysFromDIDs), which stamps SchemeTag = ECDSA and canonical
+-- IDs for free.
+--
+-- DISCIPLINE NOTE: the general migration discipline is append-only, but
+-- witness_sets is a mutable table by design — rotations overwrite it,
+-- and it is intentionally excluded from the append-only guard (see
+-- store/append_only_guard_test.go). This DELETE is therefore permitted,
+-- and it is idempotent (a re-run removes nothing further).
+DELETE FROM witness_sets;

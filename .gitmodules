@@ -1,0 +1,4 @@
+[submodule "services/ledger/third_party/tessera"]
+	path = services/ledger/third_party/tessera
+	url = https://github.com/baseproof/tessera
+	branch = main

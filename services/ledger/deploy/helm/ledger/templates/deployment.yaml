@@ -1,0 +1,171 @@
+{{/*
+Deployment. Singleton-writer; replicas=1 enforced at the DB level
+via the Postgres advisory lock (see values.yaml).
+
+Two database modes:
+  - postgresql.enabled: pod composes LEDGER_DATABASE_URL at boot
+    from individual env vars (host, port, user, db inline; password
+    from the bitnami auth Secret). Works with both auth.password
+    and auth.existingSecret without re-rendering.
+  - external: pod reads LEDGER_DATABASE_URL directly from the
+    external Secret (operator-supplied or chart-managed inline).
+*/}}
+{{- include "ledger.validateDatabase" . -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "ledger.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "ledger.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicas }}
+  strategy:
+    type: {{ .Values.strategy.type }}
+  selector:
+    matchLabels:
+      {{- include "ledger.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "ledger.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        # Force pod recreation when non-secret env or the chart-
+        # managed external-DB Secret rotates.
+        checksum/configmap: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        checksum/secret-db: {{ include (print $.Template.BasePath "/secret-db.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "ledger.serviceAccountName" . }}
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: ledger
+          image: "{{ .Values.image.repository }}:{{ default .Chart.AppVersion .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- if .Values.postgresql.enabled }}
+          # Compose LEDGER_DATABASE_URL from individual env vars.
+          # Works for both auth.password and auth.existingSecret —
+          # the chart never has to know the password value.
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              export LEDGER_DATABASE_URL="postgres://${LEDGER_DB_USER}:${LEDGER_DB_PASSWORD}@${LEDGER_DB_HOST}:${LEDGER_DB_PORT}/${LEDGER_DB_NAME}?sslmode=disable"
+              exec /ledger
+          {{- end }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.container.ports.http }}
+            - name: pprof
+              containerPort: {{ .Values.container.ports.pprof }}
+          {{- with .Values.container.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          envFrom:
+            - configMapRef:
+                name: {{ include "ledger.fullname" . }}
+            {{- with .Values.extraEnvFrom }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          env:
+            {{- if .Values.postgresql.enabled }}
+            - name: LEDGER_DB_HOST
+              value: {{ printf "%s-postgresql" .Release.Name | quote }}
+            - name: LEDGER_DB_PORT
+              value: "5432"
+            - name: LEDGER_DB_USER
+              value: {{ .Values.postgresql.auth.username | quote }}
+            - name: LEDGER_DB_NAME
+              value: {{ .Values.postgresql.auth.database | quote }}
+            - name: LEDGER_DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "ledger.bitnamiSecretName" . }}
+                  key: {{ include "ledger.bitnamiPasswordKey" . }}
+            {{- else }}
+            - name: LEDGER_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "ledger.externalDbSecretName" . }}
+                  key: LEDGER_DATABASE_URL
+            {{- end }}
+            {{- if .Values.signerKeys.enabled }}
+            - name: LEDGER_SIGNER_KEY_FILE
+              value: {{ printf "%s/%s" .Values.signerKeys.mountPath .Values.signerKeys.signerFile | quote }}
+            - name: LEDGER_TESSERA_SIGNER_KEY_FILE
+              value: {{ printf "%s/%s" .Values.signerKeys.mountPath .Values.signerKeys.tesseraSignerFile | quote }}
+            {{- end }}
+            {{- range $k, $v := .Values.extraEnv }}
+            - name: {{ $k }}
+              value: {{ $v | quote }}
+            {{- end }}
+          volumeMounts:
+            {{- if .Values.persistence.wal.enabled }}
+            - name: wal
+              mountPath: {{ .Values.config.walPath }}
+            {{- end }}
+            {{- if .Values.persistence.tessera.enabled }}
+            - name: tessera
+              mountPath: {{ .Values.config.tesseraStorageDir }}
+            {{- end }}
+            {{- if .Values.persistence.antispam.enabled }}
+            - name: antispam
+              mountPath: {{ .Values.config.tesseraAntispamPath }}
+            {{- end }}
+            {{- if .Values.signerKeys.enabled }}
+            - name: signer-keys
+              mountPath: {{ .Values.signerKeys.mountPath }}
+              readOnly: true
+            {{- end }}
+          livenessProbe:
+            {{- toYaml .Values.container.livenessProbe | nindent 12 }}
+          readinessProbe:
+            {{- toYaml .Values.container.readinessProbe | nindent 12 }}
+          resources:
+            {{- toYaml .Values.container.resources | nindent 12 }}
+      volumes:
+        {{- if .Values.persistence.wal.enabled }}
+        - name: wal
+          persistentVolumeClaim:
+            claimName: {{ include "ledger.fullname" . }}-wal
+        {{- end }}
+        {{- if .Values.persistence.tessera.enabled }}
+        - name: tessera
+          persistentVolumeClaim:
+            claimName: {{ include "ledger.fullname" . }}-tessera
+        {{- end }}
+        {{- if .Values.persistence.antispam.enabled }}
+        - name: antispam
+          persistentVolumeClaim:
+            claimName: {{ include "ledger.fullname" . }}-antispam
+        {{- end }}
+        {{- if .Values.signerKeys.enabled }}
+        - name: signer-keys
+          secret:
+            secretName: {{ .Values.signerKeys.existingSecret }}
+        {{- end }}

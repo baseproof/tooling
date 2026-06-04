@@ -1,0 +1,42 @@
+# Chaos test suite for the ledger service (services/ledger). Build-tag-isolated;
+# weekly + manual + opt-in on hot-path PRs. NOT a per-PR merge gate. Relocated
+# from the standalone ledger repo with paths re-rooted under services/ledger.
+name: ledger-chaos
+
+on:
+  schedule:
+    - cron: "37 5 * * 0"   # Sunday 05:37 UTC
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "services/ledger/tests/chaos/**"
+      - "services/ledger/lifecycle/safe_run.go"
+      - "services/ledger/lifecycle/shutdown.go"
+      - "services/ledger/store/breaker.go"
+      - "services/ledger/wal/**"
+      - ".github/workflows/ledger-chaos.yml"
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    working-directory: services/ledger
+
+jobs:
+  chaos:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11  # v4.1.1
+        with:
+          persist-credentials: false
+          submodules: recursive
+
+      - name: Set up Go
+        uses: actions/setup-go@cdcb36043654635271a94b9a6d1392de5bb323a7  # v5.0.1
+        with:
+          go-version-file: services/ledger/go.mod
+
+      - name: chaos suite
+        run: make test-chaos

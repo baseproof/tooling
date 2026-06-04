@@ -1,0 +1,15 @@
+# services/ledger is a colocated but INDEPENDENT domain tenant.
+#
+# It carries its own go.mod, go.work, third_party/tessera submodule, CI
+# (.github/workflows/ledger-*.yml), and container image
+# (ghcr.io/baseproof/tooling/ledger). The tooling monorepo
+# layering laws — scripts/dependency-law.sh and scripts/client-contract.sh —
+# govern the AGNOSTIC HALF: libs/ and the first-party services (auditor,
+# witness). They do NOT govern this tenant; the ledger lives in-tree for
+# colocation only and is validated by its own pipeline.
+#
+# This marker is the mechanism: scripts/lib/governed.sh prunes any subtree
+# carrying a .law-exempt file from the law's scans. The ledger nonetheless
+# remains a FORBIDDEN import target for the agnostic half — DOMAIN_RE in
+# dependency-law.sh names it at both its old (clearcompass-ai/ledger) and new
+# (baseproof/tooling/services/ledger) module paths.

@@ -1,0 +1,434 @@
+/*
+FILE PATH: wal/committer.go
+
+Committer — the durable-bytes primitive. Submit blocks until the wire
+bytes are fsync'd to disk; group commit amortizes fsync cost across
+multiple concurrent admissions.
+
+GROUP COMMIT:
+
+	HTTP admission paths call Submit(ctx, hash, wire). Submit pushes a
+	submission record (including a per-call done channel) onto an
+	in-memory queue, then blocks on done. A single background goroutine
+	drains the queue, batches submissions, opens a single Badger txn
+	that writes entry + meta + inflight for every batched submission,
+	commits the txn, then calls db.Sync() ONCE for the whole batch.
+	After Sync returns, the goroutine signals every batched
+	submission's done channel with the same error.
+
+	Triggers (whichever fires first):
+	  - len(batch) >= BatchMaxEntries
+	  - bytes(batch) >= BatchMaxBytes
+	  - elapsed since first submission in batch >= BatchMaxLatency
+
+BACKPRESSURE:
+
+	Submit uses a non-blocking send to the queue. If the queue is full,
+	Submit returns ErrQueueFull immediately; the HTTP handler maps to
+	503 + Retry-After. This protects the ledger from running out of
+	memory or scheduler slots during burst load.
+
+DURABILITY GUARANTEE:
+
+	Badger is opened with SyncWrites=false so individual txn commits
+	return after writing to the in-memory memtable + the WAL buffer
+	(NOT after fsync). The committer goroutine calls db.Sync()
+	explicitly after each batched commit, which flushes Badger's WAL
+	to disk. Submit returns only after Sync has confirmed durability.
+
+	Failure semantics: if db.Sync() errors, EVERY submission in that
+	batch sees the same error. None proceeds to tessera.Add. Submitters
+	retry on their side; the WAL is left in a "partial-but-not-
+	acknowledged" state — entries that are present in the file but
+	never produced a 202 are reconciled at startup as phantoms.
+*/
+package wal
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
+	"sync"
+	"time"
+
+	"github.com/dgraph-io/badger/v4"
+
+	"github.com/baseproof/baseproof/types"
+
+	"github.com/baseproof/tooling/services/ledger/chaos"
+	"github.com/baseproof/tooling/services/ledger/latency"
+	"github.com/baseproof/tooling/services/ledger/lifecycle"
+)
+
+// CommitterConfig configures NewCommitter.
+type CommitterConfig struct {
+	// QueueSize bounds the in-memory submission queue. When full,
+	// Submit returns ErrQueueFull. Default 4096.
+	QueueSize int
+
+	// BatchMaxEntries triggers a group-commit flush when the in-flight
+	// batch reaches this many submissions. Default 256.
+	BatchMaxEntries int
+
+	// BatchMaxBytes triggers a group-commit flush when the in-flight
+	// batch's wire-byte total reaches this many bytes. Default 5 MiB.
+	BatchMaxBytes int
+
+	// BatchMaxLatency triggers a group-commit flush when the oldest
+	// submission in the in-flight batch is this old. Bounds the p99
+	// latency floor for Submit at light load. Default 10 ms.
+	BatchMaxLatency time.Duration
+
+	// DisableSync skips the post-batch db.Sync() call. Production
+	// MUST leave this false — without Sync the durability guarantee
+	// is broken. Tests that use in-memory Badger MUST set this true:
+	// Badger's Sync() panics with a nil-pointer dereference when no
+	// on-disk WAL file exists.
+	DisableSync bool
+
+	// Logger. Defaults to slog.Default if nil.
+	Logger *slog.Logger
+}
+
+// Committer is the durable-bytes primitive. Methods are safe to call
+// from multiple goroutines.
+type Committer struct {
+	db     *badger.DB
+	cfg    CommitterConfig
+	logger *slog.Logger
+
+	in       chan *submission
+	closing  chan struct{}
+	closed   chan struct{}
+	closedMu sync.Mutex
+
+	// submitLatency captures the wall-time distribution of every
+	// Submit call (both committed and canceled outcomes). The OTEL
+	// histogram (instruments.go::recordSubmitDuration) is the
+	// production telemetry surface; this in-process histogram is the
+	// soak/test diagnostic surface — readable via SubmitLatencySnapshot
+	// without an OTEL meter being installed. Initialized in
+	// NewCommitter; never nil after construction.
+	//
+	// Why both: the OTEL one is observed by Prometheus and surfaces
+	// to SRE alerting; the in-process one drives the soak's
+	// scaling_evidence summary, which has no OTEL meter wired. They
+	// observe the same Submit calls; the duplication is at the
+	// observe-site, not the data, and matches the sequencer's
+	// tesseraLatency pattern.
+	submitLatency *latency.Histogram
+}
+
+// submission is a per-Submit record handed to the commit goroutine.
+type submission struct {
+	hash          [32]byte
+	wire          []byte
+	logTimeMicros int64 // unix-micros, persisted in Meta for P5 idempotency
+	receipts      []types.Web3VerificationReceipt
+	done          chan error
+}
+
+// NewCommitter wraps an open Badger DB and starts the group-commit
+// goroutine. Caller is responsible for opening the DB with
+// SyncWrites=false (the committer manages fsync explicitly via
+// db.Sync()) and for closing the DB after Close returns.
+func NewCommitter(db *badger.DB, cfg CommitterConfig) *Committer {
+	if cfg.QueueSize <= 0 {
+		cfg.QueueSize = 4096
+	}
+	if cfg.BatchMaxEntries <= 0 {
+		cfg.BatchMaxEntries = 256
+	}
+	if cfg.BatchMaxBytes <= 0 {
+		cfg.BatchMaxBytes = 5 << 20
+	}
+	if cfg.BatchMaxLatency <= 0 {
+		cfg.BatchMaxLatency = 10 * time.Millisecond
+	}
+	if cfg.Logger == nil {
+		cfg.Logger = slog.Default()
+	}
+	c := &Committer{
+		db:            db,
+		cfg:           cfg,
+		logger:        cfg.Logger,
+		in:            make(chan *submission, cfg.QueueSize),
+		closing:       make(chan struct{}),
+		closed:        make(chan struct{}),
+		submitLatency: latency.New(),
+	}
+	// commitLoop wrapped in SafeRun so a panic during group commit
+	// is logged + the goroutine exits cleanly. The deferred
+	// close(c.closed) inside commitLoop fires on panic-return so
+	// future Submit calls see "closed" and return errClosed; in-
+	// flight submitters waiting on s.done unblock via ctx.
+	go func() {
+		_ = lifecycle.SafeRun(context.Background(), "wal-committer", c.logger, nil, func() error {
+			c.commitLoop()
+			return nil
+		})
+	}()
+	return c
+}
+
+// Submit writes wire bytes to the WAL and blocks until they are
+// fsync'd to disk. Returns ErrQueueFull when the in-memory queue is
+// full (HTTP handler should map to 503), ErrEmptyWire on a nil/empty
+// wire, ctx.Err() on cancellation, or the underlying Badger / Sync
+// error if the group commit failed.
+//
+// logTimeMicros is the ledger-assigned admission time (unix
+// microseconds) that gets persisted in the Meta record. Used by the
+// HTTP handler's deterministic-idempotency path (P5): a
+// byte-identical resubmission reads back the persisted value and
+// re-issues the SAME SCT bytes instead of returning 409 Conflict.
+//
+// receipts is the per-signature Web3VerificationReceipt slice
+// captured by the admission handler via
+// attestation.VerifyEntrySignatures (baseproof v1.7.0+; see
+// api/submission.go::receiptClientBounds). Index-aligned with the
+// submitted entry's Signatures; Zero receipts populate slots for
+// did:key / EOA signers. Nil or empty slice is accepted (legacy
+// single-sig path, or when the multi-sig gate is OFF) and produces
+// a V1 Meta record byte-identical to pre-PR-N3 producers.
+func (c *Committer) Submit(
+	ctx context.Context,
+	hash [32]byte,
+	wire []byte,
+	logTimeMicros int64,
+	receipts []types.Web3VerificationReceipt,
+) error {
+	if len(wire) == 0 {
+		return ErrEmptyWire
+	}
+	t0 := time.Now() // D3 — wall-time histogram
+	s := &submission{
+		hash:          hash,
+		wire:          wire,
+		logTimeMicros: logTimeMicros,
+		receipts:      receipts,
+		done:          make(chan error, 1),
+	}
+	select {
+	case c.in <- s:
+	case <-c.closing:
+		return ErrClosed
+	default:
+		return ErrQueueFull
+	}
+	select {
+	case err := <-s.done:
+		elapsed := time.Since(t0)
+		recordSubmitDuration(ctx, OutcomeCommitted, elapsed)
+		c.submitLatency.Observe(elapsed)
+		return err
+	case <-ctx.Done():
+		// Submitter gave up before group commit completed.
+		// Record the wait time under outcome=canceled so the
+		// histogram sees the saturated path — without this
+		// observation, p99 stays artificially healthy precisely
+		// when WAL pressure is hurting clients (clients time out
+		// first → no observation under outcome=committed → SREs
+		// miss the alert).
+		elapsed := time.Since(t0)
+		recordSubmitDuration(ctx, OutcomeCanceled, elapsed)
+		c.submitLatency.Observe(elapsed)
+		// The submission is still in flight; the commit goroutine will
+		// flush its batch normally and write to a now-orphaned
+		// done channel (buffered, so non-blocking). The bytes will
+		// be durable on disk regardless — at-least-once semantics.
+		return ctx.Err()
+	case <-c.closing:
+		return ErrClosed
+	}
+}
+
+// SubmitLatencySnapshot returns a point-in-time snapshot of the
+// in-process Submit-duration histogram. Records both committed and
+// canceled outcomes; the canceled-path observations are the
+// load-bearing ones for diagnosing WAL backpressure (clients time
+// out first, so under stress committed-p99 looks artificially
+// healthy without canceled-path data).
+//
+// Counterpart to the OTEL histogram (instruments.go). The OTEL one
+// goes to SRE alerting; this one goes to soak / scaling diagnostics
+// that don't wire an OTEL meter.
+//
+// Safe to call concurrently with Submit.
+func (c *Committer) SubmitLatencySnapshot() latency.Snapshot {
+	return c.submitLatency.Snapshot()
+}
+
+// Close stops the commit goroutine. In-flight batches are flushed
+// before Close returns. Submissions arriving after Close return
+// ErrClosed. Caller is responsible for closing the underlying Badger
+// DB after Close returns.
+func (c *Committer) Close() error {
+	c.closedMu.Lock()
+	defer c.closedMu.Unlock()
+	select {
+	case <-c.closing:
+		return nil // already closed
+	default:
+		close(c.closing)
+	}
+	<-c.closed
+	return nil
+}
+
+// commitLoop drains submissions, batches them, and group-commits.
+func (c *Committer) commitLoop() {
+	defer close(c.closed)
+
+	var (
+		batch        []*submission
+		batchBytes   int
+		batchTimer   = time.NewTimer(time.Hour) // long, never fires until reset
+		timerRunning bool
+	)
+	batchTimer.Stop()
+
+	flush := func(reason string) {
+		if len(batch) == 0 {
+			return
+		}
+		err := c.flushBatch(batch)
+		for _, s := range batch {
+			// Buffered done channel; non-blocking even if submitter
+			// gave up via ctx.Done.
+			s.done <- err
+		}
+		c.logger.Debug("wal: group commit",
+			"reason", reason,
+			"batch", len(batch),
+			"bytes", batchBytes,
+			"err", err,
+		)
+		batch = batch[:0]
+		batchBytes = 0
+		if timerRunning {
+			batchTimer.Stop()
+			timerRunning = false
+		}
+	}
+
+	for {
+		select {
+		case <-c.closing:
+			// Drain any pending submissions that already landed in
+			// the channel (closing was signaled; nothing else will
+			// be sent because Submit checks closing first).
+			for {
+				select {
+				case s := <-c.in:
+					batch = append(batch, s)
+					batchBytes += len(s.wire)
+				default:
+					flush("close")
+					return
+				}
+			}
+
+		case s := <-c.in:
+			if len(batch) == 0 {
+				batchTimer.Reset(c.cfg.BatchMaxLatency)
+				timerRunning = true
+			}
+			batch = append(batch, s)
+			batchBytes += len(s.wire)
+			if len(batch) >= c.cfg.BatchMaxEntries || batchBytes >= c.cfg.BatchMaxBytes {
+				flush("size")
+			}
+
+		case <-batchTimer.C:
+			timerRunning = false
+			flush("latency")
+		}
+	}
+}
+
+// flushBatch opens one Badger txn covering all submissions, commits,
+// then fsyncs. Returns the error to fan out to every submission's
+// done channel.
+func (c *Committer) flushBatch(batch []*submission) error {
+	now := time.Now().UnixNano()
+	err := c.db.Update(func(txn *badger.Txn) error {
+		for _, s := range batch {
+			// entry:<hash> = wire (immutable, write-once).
+			// Re-Submit of byte-identical content overwrites with
+			// identical bytes — no harm.
+			if err := txn.Set(entryKey(s.hash), s.wire); err != nil {
+				return fmt.Errorf("wal/committer: set entry: %w", err)
+			}
+			// meta:<hash>: Submit-on-existing-entry preserves the
+			// existing State (Sequenced / Shipped) AND the original
+			// LogTimeMicros AND the original Web3Receipts. Without
+			// this, a re-Submit would regress State Sequenced →
+			// Pending, overwrite the original log_time, and clobber
+			// the captured receipts — breaking deterministic
+			// idempotency (P5) AND losing the receipt provenance for
+			// any entry that has already been admitted with EIP-1271
+			// signers.
+			//
+			// First-time Submit: write {State: Pending, LogTime:
+			//                          this submission's micros,
+			//                          Web3Receipts: from admission}.
+			var existing Meta
+			if rerr := readMeta(txn, s.hash, &existing); rerr == nil {
+				// Entry already exists — preserve everything,
+				// including the receipts written on first admission.
+				// The idempotent re-Submit reaches here.
+			} else if errors.Is(rerr, ErrNotFound) ||
+				errors.Is(rerr, badger.ErrKeyNotFound) {
+				existing = Meta{
+					State:         StatePending,
+					LogTimeMicros: s.logTimeMicros,
+					Web3Receipts:  s.receipts,
+				}
+			} else {
+				return fmt.Errorf("wal/committer: read meta: %w", rerr)
+			}
+			if err := txn.Set(metaKey(s.hash), encodeMeta(existing)); err != nil {
+				return fmt.Errorf("wal/committer: set meta: %w", err)
+			}
+			// inflight:<hash> = now. Cleared by Sequence; scanned by
+			// Reconcile on boot.
+			ts := make([]byte, 8)
+			for i := 0; i < 8; i++ {
+				ts[i] = byte(now >> (56 - 8*i))
+			}
+			if err := txn.Set(inflightKey(s.hash), ts); err != nil {
+				return fmt.Errorf("wal/committer: set inflight: %w", err)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	// Single fsync for the whole batch — the load-bearing performance
+	// property of group commit. Without this call, Badger commits
+	// return when memtable is updated but the WAL has not been
+	// flushed; submitters would see "success" before durability.
+	//
+	// Tests using in-memory Badger MUST disable this — Badger's
+	// Sync() nil-derefs when there is no on-disk WAL. Production
+	// MUST leave it enabled.
+	if !c.cfg.DisableSync {
+		// Chaos injection point #4 — "pre_wal_fsync":
+		// The Badger txn has committed to the in-memory memtable +
+		// WAL buffer but db.Sync() (the fsync that flips entries from
+		// "in memory" to "durable on disk") hasn't fired yet. A kill
+		// here tests the hardest durability claim: every submission
+		// that returned 202 must be recoverable, even if SIGKILL fires
+		// the instant before fsync. The post-kill restart relies on
+		// Badger's WAL replay to surface every entry; the harness
+		// asserts that every 202'd submission ends up in entry_index.
+		chaos.Trigger("pre_wal_fsync")
+		if err := c.db.Sync(); err != nil {
+			return fmt.Errorf("wal/committer: db.Sync: %w", err)
+		}
+	}
+	return nil
+}
