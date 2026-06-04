@@ -1,0 +1,102 @@
+name: ci
+
+# Per-module build/test/vet (in isolation) + the compiler-enforced dependency
+# law. This is the gate that keeps the tools monorepo's layering honest:
+# libs and services may never link a network/domain module, libs may never
+# depend on a service, and no service may expose a remote Sign surface.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  GOPRIVATE: github.com/clearcompass-ai/*,github.com/baseproof/*
+  GOTOOLCHAIN: local # honor the go.mod version; never auto-download a toolchain
+
+jobs:
+  modules:
+    name: build · vet · test (isolated)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # One entry per module. Add new services/libs here as they land.
+        module: [libs, services/auditor, services/witness]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.7"
+          cache-dependency-path: ${{ matrix.module }}/go.sum
+      - name: build · vet · test (GOWORK=off — the module must stand alone)
+        working-directory: ${{ matrix.module }}
+        env:
+          GOWORK: off
+        run: |
+          go build ./...
+          go vet ./...
+          go test -race ./...
+
+  dependency-law:
+    name: dependency law
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.7"
+      - name: enforce layering (go list -deps)
+        run: bash scripts/dependency-law.sh
+
+  client-contract:
+    name: outbound-client contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: no raw &http.Client{} in service binary main.go
+        run: bash scripts/client-contract.sh
+
+  sdk-version-pin:
+    # D10: pin all three go.mod files to the same baseproof SDK version.
+    # A future bump must touch all three together — if one lags, this
+    # job fails and the regression surfaces at PR review time, not in
+    # production telemetry six weeks later.
+    #
+    # C2 (#21) follow-up: the canonical version is derived from
+    # libs/go.mod (the single published module); the services modules
+    # are asserted to match. This eliminates the previous three-place
+    # literal that required manual sync on every bump.
+    name: baseproof SDK version pin
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: derive canonical baseproof version from libs/go.mod and assert services match
+        run: |
+          set -euo pipefail
+          # Extract the baseproof version line from libs/go.mod. There MUST
+          # be exactly one such line; if absent or duplicated, fail loud.
+          libs_line=$(grep -E '^[[:space:]]+github\.com/baseproof/baseproof v' libs/go.mod || true)
+          if [ -z "$libs_line" ]; then
+            echo "::error file=libs/go.mod::no baseproof require line found"
+            exit 1
+          fi
+          if [ "$(printf '%s\n' "$libs_line" | wc -l)" -ne 1 ]; then
+            echo "::error file=libs/go.mod::multiple baseproof require lines found — ambiguous canonical version"
+            exit 1
+          fi
+          # Canonical version string (drop leading whitespace).
+          want=$(printf '%s\n' "$libs_line" | sed 's/^[[:space:]]*//')
+          echo "canonical baseproof version (from libs/go.mod): $want"
+          for f in services/auditor/go.mod services/witness/go.mod; do
+            if ! grep -qF "$want" "$f"; then
+              echo "::error file=$f::baseproof SDK version mismatch — expected '$want' (derived from libs/go.mod)"
+              grep -nE 'github.com/baseproof/baseproof v' "$f" || echo "  (no baseproof require line found)"
+              exit 1
+            fi
+          done
+          echo "all three go.mods agree on baseproof version: $want"

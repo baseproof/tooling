@@ -1,0 +1,58 @@
+# golangci-lint + anchor-contract gate for the ledger service (services/ledger).
+# Relocated from the standalone ledger repo; runs against the ledger module via
+# the action's working-directory input and services/ledger/.golangci.yml.
+name: ledger-lint
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "services/ledger/**"
+      - ".github/workflows/ledger-lint.yml"
+  pull_request:
+    paths:
+      - "services/ledger/**"
+      - ".github/workflows/ledger-lint.yml"
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    working-directory: services/ledger
+
+jobs:
+  golangci:
+    name: golangci-lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11  # v4.1.1
+        with:
+          persist-credentials: false
+          submodules: recursive
+
+      - name: Set up Go
+        uses: actions/setup-go@cdcb36043654635271a94b9a6d1392de5bb323a7  # v5.0.1
+        with:
+          go-version-file: services/ledger/go.mod
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@a4f60bb28d35aeee14e6880718e0c85ff1882e64  # v6.0.1
+        with:
+          # Must be built with Go >= the go directive in go.mod (1.25.x).
+          # v2.5.0 is built with go1.25.
+          version: v2.5.0
+          working-directory: services/ledger
+
+  no-silent-fallback-anchor:
+    name: v1.34 anchor contract — no silent fallback
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11  # v4.1.1
+        with:
+          persist-credentials: false
+          submodules: recursive
+      - name: enforce no silent fallback in anchor/
+        run: bash scripts/no-silent-fallback-anchor.sh

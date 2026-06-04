@@ -1,0 +1,119 @@
+# scripts/local/docker-compose.infra.yml
+#
+# Unified local-test infrastructure compose file. Drives the
+# `scripts/infra` orchestrator. The topology is intentionally
+# WITNESS-FREE:
+#
+#   postgres   — Ledger metadata + index store
+#   seaweedfs  — S3-compatible object store (port 8333)
+#   seaweedfs-init — one-shot bucket creator (exits after success)
+#
+# WHY NO WITNESSES HERE:
+#
+#   The witness daemon lives in github.com/baseproof/tooling
+#   (services/witness) that owns its OWN run tooling — fixture
+#   generation (cmd/gen-fixtures), a process fleet runner
+#   (scripts/run-local.sh), and a Docker fleet (scripts/local/
+#   render-compose.sh). Duplicating witness container definitions
+#   here would intermingle the two repos' runtime config.
+#
+#   Instead, the ledger consumes the witness tier PURELY via env
+#   vars. Run the fleet from the witness repo:
+#
+#     cd ../tooling/services/witness
+#     ./scripts/run-local.sh --witnesses 3
+#       → prints LEDGER_WITNESS_ENDPOINTS / LEDGER_WITNESS_QUORUM_K
+#         / LEDGER_NETWORK_BOOTSTRAP_FILE
+#
+#   Export those, then `./scripts/run-local.sh up` (ledger) wires
+#   them into cmd/ledger. The two repos share NOTHING but those
+#   env vars + the bootstrap file path.
+#
+# USAGE (via the orchestrator script):
+#
+#   ./scripts/infra up      # bring up postgres + seaweedfs
+#   ./scripts/infra env     # emit DSN + S3 env vars
+#   ./scripts/infra down    # tear down
+#
+# DIRECT (without orchestrator):
+#
+#   docker compose -f scripts/local/docker-compose.infra.yml up -d
+
+services:
+  # ─────────────────────────────────────────────────────────────────
+  # Postgres — Ledger's metadata + index store
+  # ─────────────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: baseproof_test_postgres
+    environment:
+      POSTGRES_USER: baseproof
+      POSTGRES_PASSWORD: baseproof
+      POSTGRES_DB: baseproof_test
+    command: ["postgres", "-c", "fsync=off", "-c", "synchronous_commit=off", "-c", "full_page_writes=off"]
+    ports:
+      - "127.0.0.1:5544:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U baseproof -d baseproof_test"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  # ─────────────────────────────────────────────────────────────────
+  # SeaweedFS — S3-compatible object store. Replaces fake-gcs as
+  # the default byte-store backend because:
+  #   - Production-shape: SeaweedFS exposes the same S3 API as
+  #     AWS S3 / RustFS / R2; bytestore/s3.go talks the same
+  #     wire protocol regardless.
+  #   - No GCS auth quirks — fake-gcs's anonymous mode masks ADC
+  #     surprises that bite in production.
+  # ─────────────────────────────────────────────────────────────────
+  seaweedfs:
+    image: chrislusf/seaweedfs:3.71
+    container_name: baseproof_infra_seaweedfs
+    # `server -s3` runs master + volume + filer + s3 in one
+    # process. -s3.allowEmptyFolder permits CreateBucket without
+    # pre-existing folders. Default S3 port is 8333.
+    #
+    # -ip.bind=0.0.0.0 is LOAD-BEARING: without it SeaweedFS auto-
+    # detects the container's external interface (e.g. 172.18.0.2)
+    # and binds ONLY there. Healthchecks running INSIDE the
+    # container against localhost:8333 then fail with "Connection
+    # refused" because nothing is listening on 127.0.0.1. Forcing
+    # 0.0.0.0 makes the listener accept on every interface,
+    # including loopback.
+    command: ["server", "-s3", "-s3.port=8333", "-s3.allowEmptyFolder=true", "-ip.bind=0.0.0.0"]
+    ports:
+      - "127.0.0.1:8333:8333"   # S3 endpoint
+      - "127.0.0.1:9333:9333"   # master (used by init container)
+    healthcheck:
+      # Probe the master's /cluster/status endpoint — it returns
+      # 200 when the cluster has elected a leader and is ready
+      # to accept S3 traffic. wget is in the BusyBox-Alpine base.
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:9333/cluster/status || exit 1"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+      start_period: 5s
+
+  # ─────────────────────────────────────────────────────────────────
+  # seaweedfs-init — one-shot bucket creator. Exits 0 on success.
+  # bytestore/s3.go expects the bucket to exist; this guarantees
+  # it before any test runs.
+  # ─────────────────────────────────────────────────────────────────
+  seaweedfs-init:
+    image: chrislusf/seaweedfs:3.71
+    container_name: baseproof_infra_seaweedfs_init
+    depends_on:
+      seaweedfs:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        # The weed shell talks to the master over gRPC. A short
+        # sleep gives the s3 subsystem time to register so the
+        # bucket-create goes through cleanly.
+        sleep 2
+        echo "s3.bucket.create -name baseproof-bytes" | weed shell -master seaweedfs:9333
+        echo "bucket baseproof-bytes ready"

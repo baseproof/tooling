@@ -1,0 +1,123 @@
+# =============================================================================
+# FILE PATH:
+#     .golangci.yml
+#
+# DESCRIPTION:
+#     golangci-lint config (v2). Mirrors Tessera + Boulder + Sigstore
+#     conventions: a tight, opinionated set that catches real bugs
+#     without flooding noise.
+#
+# RUN LOCALLY:
+#     make lint
+#
+# RUN CI:
+#     .github/workflows/lint.yml
+#
+# VERSION POLICY:
+#     `version: "2"` — golangci-lint v2 syntax. v1 is EOL.
+# =============================================================================
+
+version: "2"
+
+run:
+  timeout: 10m
+  tests: true
+
+linters:
+  default: none
+  enable:
+    # Bug-finders (default Go vet pass + community classics).
+    - errcheck       # unchecked errors
+    - govet          # stdlib's vet pass
+    - ineffassign    # ineffectual assignments
+    - staticcheck    # the comprehensive static analyzer (includes gosimple in v2)
+    - unused         # unused vars, funcs, types
+
+    # Security-shaped (zero-tolerance bugs in transparency-log code).
+    - bodyclose      # unclosed http.Body
+    - rowserrcheck   # unchecked sql.Rows.Err()
+    - sqlclosecheck  # unclosed sql.Stmt / Rows
+
+    # Discipline gate — forbid specific identifiers outside tests.
+    - forbidigo
+
+  settings:
+    govet:
+      enable:
+        - shadow
+
+    errcheck:
+      # Permit `_ =` on intentional-discard assignments (logger sites
+      # already wrapped by lifecycle.SafeRun, etc.).
+      check-type-assertions: false
+      check-blank: false
+
+    staticcheck:
+      # ST1000: package comment style — many packages use block /* ... */
+      #         comments per Tessera/SDK convention; this rule is
+      #         purely stylistic, not a bug-finder.
+      # ST1003: identifier style (LastErrTs vs LastErrTS) — naming
+      #         policy, not bugs.
+      # ST1012: error-var naming convention — naming policy.
+      # QF1011: quickfix style suggestions — not bugs.
+      checks:
+        - all
+        - -ST1000
+        - -ST1003
+        - -ST1012
+        - -QF1011
+
+    forbidigo:
+      forbid:
+        # context.TODO() in production code masks a propagation gap.
+        # If the SDK / external interface forces a no-ctx call site,
+        # bind a process-lifetime ctx at construction (the Phase 2
+        # pattern: ctx field on the struct, set in NewXxx). Allowed
+        # in *_test.go via the exclusions block below.
+        - pattern: '^context\.TODO$'
+          msg: >-
+            context.TODO() is forbidden outside tests. Bind the
+            process-lifetime ctx at struct construction (see Phase 2
+            pattern in store/smt_state.go, store/entries.go, etc.).
+        #
+        # The witness daemon lives in its own repository
+        # (github.com/baseproof/tooling). Because it
+        # is a separate Go module in a separate repo, the witness
+        # cannot import github.com/baseproof/tooling/services/ledger/* by
+        # construction — Go's resolver wouldn't find such an import
+        # in that module's graph. No forbidigo entry needed; the
+        # boundary is enforced at the module layer.
+
+  exclusions:
+    # Tests can use over-allocations + shadowed err vars freely.
+    # context.TODO() is also acceptable in tests (no shutdown to
+    # propagate to; tests use t.Context() or context.Background()).
+    # unused: build-tagged suites (soak, scale, chaos, integration, …)
+    #   keep their callers behind tags the default lint build doesn't
+    #   compile, so helpers/harnesses shared with them read as "unused"
+    #   here; deleting them would break `go test -tags <tag>`.
+    rules:
+      - path: _test\.go
+        linters:
+          - errcheck
+          - govet
+          - forbidigo
+          - bodyclose
+          - unused
+      # Generated code (none today, but reserve the exclusion).
+      - path: \.gen\.go
+        linters:
+          - errcheck
+          - govet
+          - staticcheck
+          - unused
+          - ineffassign
+          - bodyclose
+          - rowserrcheck
+          - sqlclosecheck
+          - forbidigo
+
+formatters:
+  enable:
+    - gofmt
+    - goimports

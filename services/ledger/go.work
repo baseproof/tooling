@@ -1,0 +1,24 @@
+// Go workspace for the ledger.
+//
+// DEFAULT = the baseproof/tessera FORK. The committed workspace links the
+// in-repo `third_party/tessera` submodule (module path
+// github.com/transparency-dev/tessera — the fork is a drop-in) so every
+// `go build` / `go test` / the release image uses the fork's deterministic
+// Appender.Shutdown (drain + cancel + JOIN). See tessera/FORK.md.
+//
+//   - Build the fork (default): `git submodule update --init third_party/tessera`,
+//     then any go command. CI + scripts/local/Dockerfile init the submodule.
+//   - Opt out to Google upstream: `GOWORK=off go build ...` (ignores this
+//     workspace → the go.mod-pinned transparency-dev/tessera) or
+//     `make tessera-upstream` (drops ./third_party/tessera from the workspace).
+//
+// The witness daemon is hosted in its own repository
+// (github.com/baseproof/tooling); it imports the same Baseproof SDK
+// but resolves its module graph independently and never imports the ledger.
+
+go 1.25.7
+
+use (
+	.
+	./third_party/tessera
+)

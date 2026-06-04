@@ -1,0 +1,16 @@
+// Workspace for the ClearCompass tooling monorepo (local dev only).
+//
+// Stitches the modules so cross-module edits resolve without `replace`
+// directives. CI builds each module in isolation with GOWORK=off, so a missing
+// `require` fails loudly instead of being papered over by the workspace.
+//
+//   ./libs                agnostic shared libraries (the one published module)
+//   ./services/auditor    the auditor microservice (evidence custodian)
+//   ./services/witness    the witness daemon (stateless notary)
+go 1.25.7
+
+use (
+	./libs
+	./services/auditor
+	./services/witness
+)
