@@ -22,6 +22,8 @@ import (
 	"context"
 	"testing"
 
+	baseprooflog "github.com/baseproof/baseproof/log"
+
 	"go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 )
@@ -32,8 +34,7 @@ import (
 // start clean.
 func withCountersReader(t *testing.T) (*metric.ManualReader, *Shipper, func()) {
 	t.Helper()
-	reader := metric.NewManualReader()
-	mp := metric.NewMeterProvider(metric.WithReader(reader))
+	mp, reader := baseprooflog.NewInMemoryMeterProvider()
 	meter := mp.Meter("test")
 
 	// Minimal shipper. We don't call Run; we just need the
@@ -122,7 +123,7 @@ func TestInstallCounters_Idempotent(t *testing.T) {
 
 	// First install happened in withCountersReader. Second
 	// install on the SAME package state must short-circuit.
-	mp := metric.NewMeterProvider(metric.WithReader(metric.NewManualReader()))
+	mp := baseprooflog.NewNoopMeterProvider()
 	if InstallCounters(mp.Meter("test2"), s) {
 		t.Error("InstallCounters returned true on second call; expected idempotent false")
 	}
@@ -133,7 +134,7 @@ func TestInstallCounters_NilGuards(t *testing.T) {
 	if InstallCounters(nil, &Shipper{}) {
 		t.Error("InstallCounters(nil meter, ...) = true; want false")
 	}
-	mp := metric.NewMeterProvider()
+	mp := baseprooflog.NewNoopMeterProvider()
 	if InstallCounters(mp.Meter("nil-shipper"), nil) {
 		t.Error("InstallCounters(meter, nil) = true; want false")
 	}
