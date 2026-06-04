@@ -13,6 +13,7 @@ bin/
 # local artifact — CI builds each module in isolation with GOWORK=off, so it is
 # never needed in the tree.
 go.work.sum
+!services/ledger/go.work.sum
 
 # Stray Go binaries from `go build ./cmd/...` or `go build ./...`
 # without -o. Module-root binaries get the package's last path

@@ -12,6 +12,7 @@
 .env
 .env.*
 env.*
+!**/env.go
 
 # Ignore plaintext image-warmer env (anywhere)
 **/image-warmer.env
