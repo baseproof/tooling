@@ -66,6 +66,8 @@ import (
 	"time"
 
 	"github.com/baseproof/tooling/services/ledger/api/middleware"
+
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
 
 // -------------------------------------------------------------------------------------------------
@@ -644,6 +646,13 @@ func NewServer(
 	// handler; here we use a wildcard label rather than echoing
 	// r.URL.Path (which would explode label cardinality).
 	root = RequestDurationMiddleware("*", root)
+
+	// OTel server span (outermost): extracts the W3C traceparent so a request's
+	// spans — including any synchronous tessera.client spans a read/proof
+	// triggers — nest under the caller's trace; roots a fresh trace when no
+	// traceparent is sent. No-op spans when the global provider is NoOp
+	// (LEDGER_OTLP_TRACES_ENDPOINT unset).
+	root = otelhttp.NewHandler(root, "ledger.http")
 
 	// -------------------------------------------------------------------------------------------------
 	// 5) http.Server with DoS-immune timeouts

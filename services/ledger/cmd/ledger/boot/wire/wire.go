@@ -50,6 +50,8 @@ import (
 	"net"
 	"net/http"
 	"net/http/pprof"
+
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"os"
 	"runtime"
 	"strconv"
@@ -191,6 +193,13 @@ func Wire(ctx context.Context, cfg Config, d *deps.AppDeps) error {
 		return fmt.Errorf("wire: peer mTLS config: %w", err)
 	}
 	d.OutboundHTTPClient = client
+	// Trace-propagating transport on the single shared outbound client (witness
+	// cosign, head-sync, peer/gossip fetches all thread d.OutboundHTTPClient):
+	// injects the W3C traceparent so downstream services nest under this ledger's
+	// trace. Wraps the existing (mTLS + retry) transport.
+	if d.OutboundHTTPClient != nil {
+		d.OutboundHTTPClient.Transport = otelhttp.NewTransport(d.OutboundHTTPClient.Transport)
+	}
 	if cfg.PeerClientCertFile != "" {
 		d.Logger.Info("peer mTLS client configured",
 			"cert", cfg.PeerClientCertFile,

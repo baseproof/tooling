@@ -54,6 +54,8 @@ import (
 	"log/slog"
 	"time"
 
+	"go.opentelemetry.io/otel"
+
 	"github.com/baseproof/baseproof/core/smt"
 	"github.com/baseproof/baseproof/types"
 
@@ -237,6 +239,13 @@ func (l *CheckpointLoop) CheckpointOnce(ctx context.Context) error {
 		return nil
 	}
 
+	// One span per working cycle (skip cycles above return before this, so empty
+	// cycles don't flood the tracer). Reassigning ctx parents the step spans and
+	// the durable-tile read (RootAtSize) under it. No-op when the provider is NoOp.
+	tr := otel.Tracer("github.com/baseproof/tooling/services/ledger/builder")
+	ctx, span := tr.Start(ctx, "checkpoint.cycle")
+	defer span.End()
+
 	// ── Step 2: Merkle-durability + genesis gate ──
 	// The head binds RootAtSize(treeSize), so the Merkle tiles must cover treeSize.
 	// IntegratedSize is the inclusive durable upper bound. This single comparison
@@ -279,7 +288,11 @@ func (l *CheckpointLoop) CheckpointOnce(ctx context.Context) error {
 	// ── Step 4: make cRoot's SMT tiles durable. Returns only on PUT-ack; a blob
 	//    outage HOLDS (horizon frozen, commit cursor unaffected). EmptyHash (a
 	//    commentary/seed root) is a no-op success — there are no SMT tiles. ──
-	if eErr := l.emitter.EmitDurable(ctx, fromRoot, cRoot, cSeq); eErr != nil {
+	ectx, espan := tr.Start(ctx, "checkpoint.emit_tiles")
+	eErr := l.emitter.EmitDurable(ectx, fromRoot, cRoot, cSeq)
+	espan.End()
+	if eErr != nil {
+		span.RecordError(eErr)
 		return l.hold(ctx, "smt_tiles_not_durable",
 			"committed_seq", cSeq, "frontier_seq", fSeq,
 			"committed_root", fmt.Sprintf("%x", cRoot[:8]), "error", eErr)
@@ -333,8 +346,11 @@ func (l *CheckpointLoop) CheckpointOnce(ctx context.Context) error {
 		"smt_root", fmt.Sprintf("%x", head.SMTRoot[:8]),
 		"receipt_root", fmt.Sprintf("%x", head.ReceiptRoot[:8]),
 	)
-	cosigned, cErr := l.witness.RequestCosignatures(ctx, head)
+	cctx, cspan := tr.Start(ctx, "checkpoint.cosign")
+	cosigned, cErr := l.witness.RequestCosignatures(cctx, head)
+	cspan.End()
 	if cErr != nil {
+		span.RecordError(cErr)
 		// SRE signal (Backpressure Stall): a failed K-of-N cosign request IS a
 		// witness-quorum failure. Fire per cycle so a sustained stall shows a
 		// positive rate(); the hook no-ops until the composition root wires it.
@@ -352,7 +368,11 @@ func (l *CheckpointLoop) CheckpointOnce(ctx context.Context) error {
 		"tree_size", treeSize, "signatures", len(cosigned.Signatures))
 
 	// ── Step 9: publish. The horizon now advertises a root whose tiles are present. ──
-	if pErr := l.publisher.PublishCosignedCheckpoint(ctx, cosigned); pErr != nil {
+	pctx, pspan := tr.Start(ctx, "checkpoint.publish")
+	pErr := l.publisher.PublishCosignedCheckpoint(pctx, cosigned)
+	pspan.End()
+	if pErr != nil {
+		span.RecordError(pErr)
 		return fmt.Errorf("checkpoint: publish checkpoint at %d: %w", treeSize, pErr)
 	}
 

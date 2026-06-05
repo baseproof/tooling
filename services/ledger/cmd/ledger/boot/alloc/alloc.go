@@ -67,6 +67,7 @@ import (
 	"time"
 
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/propagation"
 
 	tposix "github.com/transparency-dev/tessera/storage/posix"
 	tposixantispam "github.com/transparency-dev/tessera/storage/posix/antispam"
@@ -212,6 +213,11 @@ func allocateTelemetry(cfg Config, d *deps.AppDeps) error {
 		return fmt.Errorf("tracer provider: %w", err)
 	}
 	otel.SetTracerProvider(tp)
+	// W3C trace-context propagation: lets the inbound otelhttp handler extract a
+	// caller's traceparent (so this ledger's spans nest under the caller's trace)
+	// and the outbound otelhttp transport inject it on the witness cosign / peer
+	// fetches. Global, set once alongside the TracerProvider.
+	otel.SetTextMapPropagator(propagation.TraceContext{})
 	d.AppendCloser(deps.NamedCloser{
 		Name:    "otel-tracer",
 		Timeout: 10 * time.Second,
