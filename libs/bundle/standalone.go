@@ -69,12 +69,26 @@ type StandaloneLedgerGather struct {
 	quorumK    int
 	seq        uint64   // the target entry's sequence (for the per-entry section endpoints)
 	smtKey     [32]byte // the target entry's SMT key (the witnessed presence-proof key)
+
+	discoverer *IndexDiscoverer // index-backed evolution-chain discovery (never scan)
+	// governance maps each governance v2 section name to the on-log position of the
+	// schema whose amendments form that chain (DiscoverBySchemaRef key). A chain with
+	// no entry here is left null (a network without that governance surface). This is
+	// the per-network vocabulary the Wave-4 NetworkBundle will carry.
+	governance map[string]types.LogPosition
+	// horizon caches the cosigned head so every leg of the proof (target entry +
+	// every gathered section) anchors on ONE checkpoint — fetched once, reused.
+	horizon *types.CosignedTreeHead
 }
 
 // NewStandaloneLedgerGather wires the gather for ONE target entry. bootstrap +
 // quorumK are the network's static genesis configuration (the verify-side trust
 // root derives from the same bootstrap); seq + smtKey identify the entry (seq must
 // match the seq passed to bundle.BuildStandalone).
+// quorumK are the network's static genesis configuration (the verify-side trust
+// root derives from the same bootstrap); seq + smtKey identify the entry. Optional
+// GatherOptions (e.g. WithGovernanceSchemas) enable the Wave-2 deferred sections;
+// with none, the gather produces a Part-I + receipt proof (a genesis-only network).
 func NewStandaloneLedgerGather(
 	client *clitools.LedgerClient,
 	baseURL string,
@@ -83,6 +97,7 @@ func NewStandaloneLedgerGather(
 	quorumK int,
 	seq uint64,
 	smtKey [32]byte,
+	opts ...GatherOption,
 ) (*StandaloneLedgerGather, error) {
 	if client == nil || httpClient == nil {
 		return nil, fmt.Errorf("bundle/standalone: nil client or http.Client")
@@ -93,10 +108,19 @@ func NewStandaloneLedgerGather(
 	if baseURL == "" {
 		return nil, fmt.Errorf("bundle/standalone: empty baseURL")
 	}
-	return &StandaloneLedgerGather{
+	disc, err := NewIndexDiscoverer(baseURL, httpClient)
+	if err != nil {
+		return nil, err
+	}
+	g := &StandaloneLedgerGather{
 		client: client, baseURL: baseURL, httpClient: httpClient,
 		bootstrap: bootstrap, quorumK: quorumK, seq: seq, smtKey: smtKey,
-	}, nil
+		discoverer: disc,
+	}
+	for _, opt := range opts {
+		opt(g)
+	}
+	return g, nil
 }
 
 // ── StandaloneGather (Part I) ────────────────────────────────────────────────
@@ -119,11 +143,7 @@ func (g *StandaloneLedgerGather) FetchEntry(ctx context.Context, seq uint64) ([]
 }
 
 func (g *StandaloneLedgerGather) FetchCosignedHead(context.Context, uint64) (types.CosignedTreeHead, error) {
-	head, err := g.client.Horizon()
-	if err != nil {
-		return types.CosignedTreeHead{}, fmt.Errorf("bundle/standalone: Horizon: %w", err)
-	}
-	return head, nil
+	return g.getHorizon()
 }
 
 func (g *StandaloneLedgerGather) FetchInclusionProof(_ context.Context, seq, treeSize uint64) (types.MerkleProof, error) {
@@ -161,12 +181,25 @@ func (g *StandaloneLedgerGather) FetchWitnessRotationChain(context.Context, uint
 
 // ── SectionGatherer (Wave-2/3) ───────────────────────────────────────────────
 
-// FetchSection fetches the sections this gather supports (receipt_proof); all
-// others return null (left for a Part-I + receipt proof of a genesis-only network).
+// FetchSection gathers the supported deferred sections: receipt_proof (always) and
+// the six governance evolution chains (when their schema is configured via
+// WithGovernanceSchemas), each discovered index-backed and assembled on the shared
+// checkpoint. Unsupported / unconfigured sections return null (the SDK reports them
+// not-asserted). signer_rotation / schema / consistency / burn / cross_log land as
+// the gather grows.
 func (g *StandaloneLedgerGather) FetchSection(ctx context.Context, name string, _ uint64) (json.RawMessage, error) {
-	if name != "receipt_proof" {
+	switch {
+	case name == "receipt_proof":
+		return g.receiptSection(ctx)
+	case governanceSchemaSections[name]:
+		return g.governanceSection(ctx, name)
+	default:
 		return nil, nil
 	}
+}
+
+// receiptSection fetches the entry's receipt-inclusion proof (third cosigned root).
+func (g *StandaloneLedgerGather) receiptSection(ctx context.Context) (json.RawMessage, error) {
 	url := fmt.Sprintf("%s/v1/receipt/proof/%s", g.baseURL, strconv.FormatUint(g.seq, 10))
 	var body struct {
 		ReceiptProof json.RawMessage `json:"receipt_proof"`
