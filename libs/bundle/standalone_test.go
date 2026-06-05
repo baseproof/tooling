@@ -105,13 +105,13 @@ func TestGather_FetchSection_Receipt(t *testing.T) {
 }
 
 // Sections that are null without any HTTP in a default (unconfigured, genesis-only)
-// gather: still-unimplemented sections, an unconfigured governance chain, and the
-// signer-rotation chain with no rotation schema set. (schema_chain is excluded — it
-// always fetches the target entry to read its SchemaRef, so it is exercised by its
-// own tests, not here.)
+// gather: a still-unimplemented section, an unconfigured governance chain, and the
+// signer-rotation chain with no rotation schema set. (schema_chain and
+// burn_attestation are excluded — they always fetch from the ledger, so they are
+// exercised by their own tests / the e2e, not here.)
 func TestGather_FetchSection_UnsupportedNull(t *testing.T) {
 	g := newTestGather(t, httptest.NewServer(http.NotFoundHandler()), 7)
-	for _, name := range []string{"burn_attestation", "signature_policy_chain", "cross_log_anchors", "signer_rotation_chain"} {
+	for _, name := range []string{"signature_policy_chain", "cross_log_anchors", "signer_rotation_chain"} {
 		got, err := g.FetchSection(context.Background(), name, 100)
 		if err != nil {
 			t.Errorf("%s: unexpected error %v", name, err)

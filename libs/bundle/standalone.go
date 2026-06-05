@@ -206,6 +206,8 @@ func (g *StandaloneLedgerGather) FetchSection(ctx context.Context, name string, 
 		return g.signerRotationSection(ctx)
 	case name == "schema_chain":
 		return g.schemaChainSection(ctx)
+	case name == "burn_attestation":
+		return g.burnSection(ctx)
 	default:
 		return nil, nil
 	}

@@ -2,6 +2,7 @@ package bundle
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -82,6 +83,41 @@ func TestGather_Governance_EmptyDiscovery(t *testing.T) {
 		if strings.Contains(p, "/scan") {
 			t.Fatalf("gather fell back to a SCAN (%q) — forbidden", p)
 		}
+	}
+}
+
+// burn_attestation is gathered from GET /v1/burn (a fetched fact) and encoded with
+// the proof's checkpoint tree size as as_of. (The horizon is pre-cached so the test
+// exercises burnSection without a full cosigned-head mock.)
+func TestGather_BurnSection(t *testing.T) {
+	var gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		_, _ = w.Write([]byte(`{"is_burned":true}`))
+	}))
+	defer srv.Close()
+
+	g := newTestGather(t, srv, 7)
+	g.horizon = &types.CosignedTreeHead{TreeHead: types.TreeHead{TreeSize: 42}} // skip the horizon fetch
+
+	raw, err := g.FetchSection(context.Background(), "burn_attestation", 100)
+	if err != nil {
+		t.Fatalf("burn FetchSection: %v", err)
+	}
+	if gotPath != "/v1/burn" {
+		t.Errorf("path = %q, want /v1/burn", gotPath)
+	}
+	var got struct {
+		ThisNetwork struct {
+			IsBurned bool   `json:"is_burned"`
+			AsOf     uint64 `json:"as_of"`
+		} `json:"this_network"`
+	}
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("decode burn_attestation %s: %v", raw, err)
+	}
+	if !got.ThisNetwork.IsBurned || got.ThisNetwork.AsOf != 42 {
+		t.Errorf("burn_attestation = %+v, want is_burned=true as_of=42 (the checkpoint)", got.ThisNetwork)
 	}
 }
 
