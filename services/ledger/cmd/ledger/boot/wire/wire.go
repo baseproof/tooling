@@ -887,14 +887,20 @@ func composeHandlers(
 	}
 
 	return api.Handlers{
-		Submission:        submitHandler,
-		BatchSubmission:   batchSubmitHandler,
-		TreeHead:          api.NewTreeHeadHandler(treeDeps),
-		TreeInclusion:     api.NewTreeInclusionHandler(treeDeps),
-		TreeConsistency:   api.NewTreeConsistencyHandler(treeDeps),
-		SMTProof:          api.NewSMTProofHandler(smtDeps),
-		SMTBatchProof:     api.NewSMTBatchProofHandler(smtDeps),
-		SMTRoot:           api.NewSMTRootHandler(smtDeps),
+		Submission:      submitHandler,
+		BatchSubmission: batchSubmitHandler,
+		TreeHead:        api.NewTreeHeadHandler(treeDeps),
+		TreeInclusion:   api.NewTreeInclusionHandler(treeDeps),
+		TreeConsistency: api.NewTreeConsistencyHandler(treeDeps),
+		SMTProof:        api.NewSMTProofHandler(smtDeps),
+		SMTBatchProof:   api.NewSMTBatchProofHandler(smtDeps),
+		SMTRoot:         api.NewSMTRootHandler(smtDeps),
+		ReceiptProof: api.NewReceiptProofHandler(&api.ReceiptDeps{
+			Heads:    d.TreeHeadStore,
+			Receipts: store.NewEntryIndexReceiptRanger(d.PgPool.DB, cfg.LogDID),
+			MinSigs:  cfg.WitnessQuorumK,
+			Logger:   d.Logger,
+		}),
 		CosignatureOf:     api.NewQueryCosignatureOfHandler(queryDeps),
 		TargetRoot:        api.NewQueryTargetRootHandler(queryDeps),
 		SignerDID:         api.NewQuerySignerDIDHandler(queryDeps),
