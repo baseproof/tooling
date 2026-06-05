@@ -31,6 +31,7 @@ import (
 
 	"github.com/baseproof/baseproof/core/envelope"
 	sdkbundle "github.com/baseproof/baseproof/log/bundle"
+	"github.com/baseproof/baseproof/protocol"
 	"github.com/baseproof/baseproof/schema"
 	"github.com/baseproof/baseproof/types"
 	"github.com/baseproof/baseproof/verifier"
@@ -72,15 +73,17 @@ func WithSignerRotationSchema(pos types.LogPosition) GatherOption {
 }
 
 // governanceSchemaSections is the set of v2 sections discovered by schema_ref
-// (their amendments all pin one governance schema).
-var governanceSchemaSections = map[string]bool{
-	"signature_policy_chain":        true,
-	"algorithm_policy_chain":        true,
-	"protocol_version_chain":        true,
-	"admission_keyset_chain":        true,
-	"auditor_registration_chain":    true,
-	"auditor_scope_amendment_chain": true,
-}
+// (their amendments all pin one governance schema). It is DERIVED from the SDK's
+// canonical protocol.GovernanceSectionNames so the gather's dispatch, the
+// NetworkBundle vocabulary contract, and the verifier's implemented set can never
+// drift apart.
+var governanceSchemaSections = func() map[string]bool {
+	m := make(map[string]bool, len(protocol.GovernanceSectionNames))
+	for _, name := range protocol.GovernanceSectionNames {
+		m[name] = true
+	}
+	return m
+}()
 
 // getHorizon returns the proof's cosigned checkpoint, fetched once and cached so
 // every leg of the proof binds to the SAME head.
