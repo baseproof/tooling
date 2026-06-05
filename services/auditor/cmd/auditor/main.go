@@ -47,6 +47,7 @@ import (
 	"github.com/baseproof/tooling/libs/monitoring"
 	"github.com/baseproof/tooling/libs/outbound"
 	"github.com/baseproof/tooling/libs/sdkguard"
+	"github.com/baseproof/tooling/libs/tracing"
 	"github.com/baseproof/tooling/services/auditor/internal/app"
 	"github.com/baseproof/tooling/services/auditor/internal/horizon"
 	"github.com/baseproof/tooling/services/auditor/internal/store"
@@ -64,6 +65,11 @@ type config struct {
 	writeTimeout time.Duration
 	idleTimeout  time.Duration
 	shutdownWait time.Duration
+
+	// otlpTracesEndpoint selects the OTel traces exporter: ""=off, "stdout", or
+	// host:port for OTLP HTTP. Installs the W3C propagator regardless, so the
+	// trace from a peer ledger flows through the auditor's outbound calls.
+	otlpTracesEndpoint string
 
 	// Custody + pipeline. gossipDSN empty ⇒ run health-only (no store, no feed):
 	// the auditor IS the evidence custodian, so the inbound pipeline + feed are
@@ -195,7 +201,10 @@ func loadConfig() config {
 		writeTimeout: envDuration("AUDITOR_WRITE_TIMEOUT", 10*time.Second),
 		idleTimeout:  envDuration("AUDITOR_IDLE_TIMEOUT", 60*time.Second),
 		shutdownWait: envDuration("AUDITOR_SHUTDOWN_TIMEOUT", 15*time.Second),
-		gossipDSN:    os.Getenv("AUDITOR_GOSSIP_DSN"),
+
+		otlpTracesEndpoint: os.Getenv("AUDITOR_OTLP_TRACES_ENDPOINT"),
+
+		gossipDSN: os.Getenv("AUDITOR_GOSSIP_DSN"),
 		// The bootstrap is the one shared, byte-identical trust input every
 		// component loads; honor the fleet's LEDGER_* var so one eval feeds all.
 		bootstrapFile:      envOr("AUDITOR_NETWORK_BOOTSTRAP_FILE", os.Getenv("LEDGER_NETWORK_BOOTSTRAP_FILE")),
@@ -241,6 +250,22 @@ func run(ctx context.Context, cfg config, logger *slog.Logger) error {
 	ctx, stop := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	// Tracing: global W3C propagator (so a peer ledger's trace continues through
+	// the auditor's outbound audits) + the auditor's own spans when an endpoint
+	// is configured.
+	traceShutdown, err := tracing.Setup(tracing.Config{
+		ServiceName: "auditor",
+		Endpoint:    cfg.otlpTracesEndpoint,
+	})
+	if err != nil {
+		return fmt.Errorf("auditor: tracing setup: %w", err)
+	}
+	defer func() {
+		sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = traceShutdown(sctx)
+	}()
+
 	var ready atomic.Bool
 	var feed http.Handler
 	// Ladder 5 P10 (#21): done-channels for the background goroutines
@@ -273,6 +298,9 @@ func run(ctx context.Context, cfg config, logger *slog.Logger) error {
 			return fmt.Errorf("auditor: peer http client: %w", err)
 		}
 		peerHTTPClient := out.Client
+		// Trace every outbound peer hop: a client span per request + traceparent
+		// injection so the auditor's audits stitch into the trace they belong to.
+		peerHTTPClient.Transport = sdklog.WithOTel(peerHTTPClient.Transport)
 		nid, exchangeDID, witnessDIDs, bootstrapDoc, err := loadBootstrap(cfg.bootstrapFile, cfg.quorumK)
 		if err != nil {
 			return fmt.Errorf("auditor: trust roots: %w", err)
@@ -620,8 +648,10 @@ func run(ctx context.Context, cfg config, logger *slog.Logger) error {
 	}
 
 	srv := &http.Server{
-		Addr:         cfg.listenAddr,
-		Handler:      newMux(&ready, feed),
+		Addr: cfg.listenAddr,
+		// OTel SERVER span (outermost): extracts traceparent so any traced inbound
+		// request continues its originating trace.
+		Handler:      sdklog.NewOTelHandler(newMux(&ready, feed)),
 		ReadTimeout:  cfg.readTimeout,
 		WriteTimeout: cfg.writeTimeout,
 		IdleTimeout:  cfg.idleTimeout,

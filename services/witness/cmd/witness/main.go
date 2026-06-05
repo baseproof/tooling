@@ -56,8 +56,10 @@ import (
 	"time"
 
 	"github.com/baseproof/baseproof/crypto/cosign"
+	sdklog "github.com/baseproof/baseproof/log"
 	"github.com/baseproof/baseproof/network"
 
+	"github.com/baseproof/tooling/libs/tracing"
 	"github.com/baseproof/tooling/services/witness/internal/blskey"
 	"github.com/baseproof/tooling/services/witness/internal/obs"
 	"github.com/baseproof/tooling/services/witness/internal/serve"
@@ -104,6 +106,8 @@ func main() {
 	burst := flag.Int("burst", 0,
 		"token-bucket burst for -max-rps (defaults to ceil(max-rps) when unset)")
 	showVersion := flag.Bool("version", false, "print version and exit")
+	otlpEndpoint := flag.String("otlp-traces-endpoint", os.Getenv("WITNESS_OTLP_TRACES_ENDPOINT"),
+		"OpenTelemetry traces endpoint: \"\"=off, \"stdout\", or host:port for OTLP HTTP")
 	flag.Parse()
 
 	if *showVersion {
@@ -122,6 +126,24 @@ func main() {
 	}
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+
+	// Tracing: installs the global W3C propagator (so the ledger's cosign→witness
+	// hop continues the same trace) and, when an endpoint is set, exports the
+	// witness's own SERVER span. Always returns a usable shutdown.
+	traceShutdown, err := tracing.Setup(tracing.Config{
+		ServiceName:    "witness",
+		ServiceVersion: version,
+		Endpoint:       *otlpEndpoint,
+	})
+	if err != nil {
+		logger.Error("tracing setup", "error", err)
+		os.Exit(1)
+	}
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = traceShutdown(ctx)
+	}()
 
 	doc, err := loadBootstrap(*bootstrapFile)
 	if err != nil {
@@ -167,8 +189,10 @@ func main() {
 	})
 
 	srv := &http.Server{
-		Addr:              *addr,
-		Handler:           mux,
+		Addr: *addr,
+		// OTel SERVER span (outermost): extracts the caller's traceparent so the
+		// cosign request continues the ledger's checkpoint trace.
+		Handler:           sdklog.NewOTelHandler(mux),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
 		WriteTimeout:      10 * time.Second,
