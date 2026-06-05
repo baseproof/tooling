@@ -224,6 +224,65 @@ func (s *TreeHeadStore) GetBySize(ctx context.Context, size uint64) (*CosignedTr
 	return &head, nil
 }
 
+// CosignedSizeAtOrAbove returns the SMALLEST tree_size >= minSize that has at
+// least minSigs distinct signers — the FIRST published checkpoint covering an
+// entry. The bool is false when none exists (no cosigned checkpoint has caught up
+// to minSize yet). A receipt proof binds to THIS checkpoint, because the cosigned
+// ReceiptRoot is a per-checkpoint delta — the latest horizon's delta would not
+// contain an older entry's receipt.
+func (s *TreeHeadStore) CosignedSizeAtOrAbove(ctx context.Context, minSize uint64, minSigs int) (uint64, bool, error) {
+	row := s.db.QueryRow(ctx, `
+		SELECT h.tree_size
+		FROM tree_heads h
+		WHERE h.tree_size >= $1 AND (
+			SELECT COUNT(DISTINCT signer)
+			FROM tree_head_sigs s
+			WHERE s.tree_size = h.tree_size AND s.hash_algo = h.hash_algo
+		) >= $2
+		ORDER BY h.tree_size ASC
+		LIMIT 1`, minSize, minSigs)
+
+	var first uint64
+	err := row.Scan(&first)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, fmt.Errorf("store/tree_heads: cosigned size at/above %d: %w", minSize, err)
+	}
+	return first, true, nil
+}
+
+// CosignedSizeBelow returns the largest tree_size STRICTLY less than size that
+// has at least minSigs distinct signers — the PREVIOUS published checkpoint. The
+// bool is false when none exists (size is at/before the first published
+// checkpoint, so a receipt delta range starts at genesis seq 0). Used to
+// reconstruct a checkpoint's receipt range [prevSize, size-1] for receipt
+// inclusion proofs (the ReceiptRoot a head commits is the delta since the prior
+// published head — store/receipt_ranger.go + builder/checkpoint_loop.go).
+func (s *TreeHeadStore) CosignedSizeBelow(ctx context.Context, size uint64, minSigs int) (uint64, bool, error) {
+	row := s.db.QueryRow(ctx, `
+		SELECT h.tree_size
+		FROM tree_heads h
+		WHERE h.tree_size < $1 AND (
+			SELECT COUNT(DISTINCT signer)
+			FROM tree_head_sigs s
+			WHERE s.tree_size = h.tree_size AND s.hash_algo = h.hash_algo
+		) >= $2
+		ORDER BY h.tree_size DESC
+		LIMIT 1`, size, minSigs)
+
+	var prev uint64
+	err := row.Scan(&prev)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, fmt.Errorf("store/tree_heads: cosigned size below %d: %w", size, err)
+	}
+	return prev, true, nil
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Internal
 // ─────────────────────────────────────────────────────────────────────────────

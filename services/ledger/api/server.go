@@ -197,6 +197,13 @@ type Handlers struct {
 	SMTBatchProof http.HandlerFunc
 	SMTRoot       http.HandlerFunc
 
+	// ── Receipt proof ──────────────────────────────────────
+	// ReceiptProof — GET /v1/receipt/proof/{seq}. The entry's
+	// receipt-inclusion proof (the third cosigned-root leg of a
+	// v2 self-anchored proof), bound to the first cosigned
+	// checkpoint covering the seq.
+	ReceiptProof http.HandlerFunc
+
 	// ── Index queries ───────────────────────────────────────
 	CosignatureOf http.HandlerFunc
 	TargetRoot    http.HandlerFunc
@@ -454,6 +461,11 @@ func NewServer(
 	}
 	if handlers.SMTRoot != nil {
 		mux.HandleFunc("GET /v1/smt/root", handlers.SMTRoot)
+	}
+
+	// ── Receipt proof (read-only) ─────────────────────────────────
+	if handlers.ReceiptProof != nil {
+		mux.HandleFunc("GET /v1/receipt/proof/{seq}", handlers.ReceiptProof)
 	}
 
 	// ── Query endpoints (read-only) ─────────────────────────────────

@@ -88,4 +88,21 @@ func TestEntryIndexReceiptRanger_MetadataOnly(t *testing.T) {
 	check("gap-spanning sub-range skips 3", 2, 4, want(2, 4))
 	check("empty range (no rows)", 100, 100, [32]byte{})
 	check("inverted range", 9, 8, [32]byte{})
+
+	// Every present seq's receipt inclusion proof reconstructs the SAME checkpoint
+	// ReceiptRoot the cosigned head commits — the third cosigned-root leg the v2
+	// receipt_proof binds to. A target in the gap (seq 3) has no receipt to prove.
+	root := want(0, 1, 2, 4, 5)
+	for _, s := range present {
+		p, err := r.ReceiptInclusionProof(ctx, 0, 5, s)
+		if err != nil {
+			t.Fatalf("ReceiptInclusionProof(0,5,%d): %v", s, err)
+		}
+		if err := smt.VerifyReceiptInclusion(p, root); err != nil {
+			t.Fatalf("seq %d: inclusion proof does not reconstruct the checkpoint ReceiptRoot: %v", s, err)
+		}
+	}
+	if _, err := r.ReceiptInclusionProof(ctx, 0, 5, 3); err == nil {
+		t.Fatal("seq 3 (a gap) must have no receipt inclusion proof")
+	}
 }
