@@ -43,6 +43,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/baseproof/baseproof/core/envelope"
 	sdkbundle "github.com/baseproof/baseproof/log/bundle"
 	"github.com/baseproof/baseproof/network"
 	"github.com/baseproof/baseproof/types"
@@ -76,9 +77,17 @@ type StandaloneLedgerGather struct {
 	// no entry here is left null (a network without that governance surface). This is
 	// the per-network vocabulary the Wave-4 NetworkBundle will carry.
 	governance map[string]types.LogPosition
+	// signerRotationSchema is the on-log position of the network's signer-rotation
+	// schema (BP-ENTRY-SIGNER-ROTATION-PAYLOAD-V1). Rotations are discovered by it
+	// (O(rotations)) then filtered to the target signer; nil ⇒ signer_rotation_chain
+	// is left null.
+	signerRotationSchema *types.LogPosition
 	// horizon caches the cosigned head so every leg of the proof (target entry +
 	// every gathered section) anchors on ONE checkpoint — fetched once, reused.
 	horizon *types.CosignedTreeHead
+	// targetEntryCache caches the deserialized target entry (its header drives the
+	// signer-rotation + schema chains); fetched once.
+	targetEntryCache *envelope.Entry
 }
 
 // NewStandaloneLedgerGather wires the gather for ONE target entry. bootstrap +
@@ -193,6 +202,10 @@ func (g *StandaloneLedgerGather) FetchSection(ctx context.Context, name string, 
 		return g.receiptSection(ctx)
 	case governanceSchemaSections[name]:
 		return g.governanceSection(ctx, name)
+	case name == "signer_rotation_chain":
+		return g.signerRotationSection(ctx)
+	case name == "schema_chain":
+		return g.schemaChainSection(ctx)
 	default:
 		return nil, nil
 	}
