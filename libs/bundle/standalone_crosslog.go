@@ -46,8 +46,6 @@ import (
 	"github.com/baseproof/baseproof/protocol"
 	"github.com/baseproof/baseproof/types"
 	"github.com/baseproof/baseproof/verifier"
-
-	"github.com/baseproof/tooling/libs/clitools"
 )
 
 // anchorScanBatch is the page size for the anchor-discovery scan of A's log.
@@ -60,7 +58,7 @@ const anchorScanBatch = 1000
 // gather looks members up by the source_log_did an anchor entry names.
 type FederationMember struct {
 	Bundle     *protocol.NetworkBundle
-	Client     *clitools.LedgerClient
+	Client     LedgerReader
 	HTTPClient *http.Client
 }
 

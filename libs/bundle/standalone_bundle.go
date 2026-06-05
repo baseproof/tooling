@@ -34,8 +34,6 @@ import (
 
 	"github.com/baseproof/baseproof/network"
 	"github.com/baseproof/baseproof/protocol"
-
-	"github.com/baseproof/tooling/libs/clitools"
 )
 
 // NewBundleGather builds a gather for ONE target entry from a NetworkBundle: it
@@ -51,7 +49,7 @@ import (
 func NewBundleGather(
 	ctx context.Context,
 	bundle *protocol.NetworkBundle,
-	client *clitools.LedgerClient,
+	client LedgerReader,
 	httpClient *http.Client,
 	seq uint64,
 	smtKey [32]byte,

@@ -61,10 +61,25 @@ var (
 	_ sdkbundle.SectionGatherer  = (*StandaloneLedgerGather)(nil)
 )
 
+// LedgerReader is the narrow read surface the gather needs from a ledger client:
+// the cosigned head, an entry's bytes, a horizon-aligned inclusion proof, and an
+// ascending entry scan. *clitools.LedgerClient satisfies it; a test can supply a
+// fake that returns consistent crypto directly, without the HTTP entry-fetch
+// protocol.
+type LedgerReader interface {
+	Horizon() (types.CosignedTreeHead, error)
+	FetchEntry(ctx context.Context, seq uint64) (*clitools.RawEntry, error)
+	InclusionProofAtSize(seq, treeSize uint64) (*types.MerkleProof, error)
+	ScanFrom(ctx context.Context, start uint64, count int) ([]clitools.RawEntry, error)
+}
+
+// The production client satisfies the read surface.
+var _ LedgerReader = (*clitools.LedgerClient)(nil)
+
 // StandaloneLedgerGather implements the SDK's bundle.StandaloneGather (+ the
 // optional SectionGatherer) over a live ledger's read API.
 type StandaloneLedgerGather struct {
-	client     *clitools.LedgerClient
+	client     LedgerReader
 	baseURL    string // for endpoints clitools does not wrap (SMT proof, receipt proof)
 	httpClient *http.Client
 	bootstrap  *network.BootstrapDocument
@@ -112,7 +127,7 @@ type StandaloneLedgerGather struct {
 // GatherOptions (e.g. WithGovernanceSchemas) enable the Wave-2 deferred sections;
 // with none, the gather produces a Part-I + receipt proof (a genesis-only network).
 func NewStandaloneLedgerGather(
-	client *clitools.LedgerClient,
+	client LedgerReader,
 	baseURL string,
 	httpClient *http.Client,
 	bootstrap *network.BootstrapDocument,
