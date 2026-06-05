@@ -160,6 +160,87 @@ func TestMeta_V2_Decode_TruncatedTrailer_Rejected(t *testing.T) {
 	}
 }
 
+const sampleTraceparent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+
+func TestMeta_V3_Roundtrip_TraceOnly(t *testing.T) {
+	in := Meta{
+		State:         StateSequenced,
+		Sequence:      42,
+		LogTimeMicros: 7_000_000,
+		TraceContext:  sampleTraceparent,
+	}
+	buf := encodeMeta(in)
+	if len(buf) <= metaV1Size || buf[metaV1Size] != metaTrailerVersionV3 {
+		t.Fatalf("expected a V3 trailer (0x03); got len=%d trailer=0x%02x", len(buf), buf[metaV1Size])
+	}
+	out, err := decodeMeta(buf)
+	if err != nil {
+		t.Fatalf("decode V3: %v", err)
+	}
+	if out.TraceContext != sampleTraceparent {
+		t.Fatalf("traceparent lost: got %q want %q", out.TraceContext, sampleTraceparent)
+	}
+	if out.State != in.State || out.Sequence != in.Sequence || out.LogTimeMicros != in.LogTimeMicros {
+		t.Fatalf("V3 round-trip clobbered V1 prefix: in=%+v out=%+v", in, out)
+	}
+	if len(out.Web3Receipts) != 0 {
+		t.Fatalf("V3 trace-only surfaced %d receipts (want none)", len(out.Web3Receipts))
+	}
+}
+
+func TestMeta_V3_Roundtrip_TraceAndReceipts(t *testing.T) {
+	in := Meta{
+		State:         StatePending,
+		LogTimeMicros: 8_000_000,
+		TraceContext:  sampleTraceparent,
+		Web3Receipts: []types.Web3VerificationReceipt{
+			{ChainID: 1, BlockNumber: 100},
+			types.ZeroWeb3VerificationReceipt(),
+			{ChainID: 1, BlockNumber: 300},
+		},
+	}
+	buf := encodeMeta(in)
+	out, err := decodeMeta(buf)
+	if err != nil {
+		t.Fatalf("decode V3+receipts: %v", err)
+	}
+	if out.TraceContext != sampleTraceparent {
+		t.Fatalf("traceparent lost: got %q", out.TraceContext)
+	}
+	if len(out.Web3Receipts) != 3 {
+		t.Fatalf("decoded %d receipts, want 3", len(out.Web3Receipts))
+	}
+	if out.Web3Receipts[0].BlockNumber != 100 || out.Web3Receipts[2].BlockNumber != 300 {
+		t.Fatalf("receipt order/content lost across V3: got %d,_,%d",
+			out.Web3Receipts[0].BlockNumber, out.Web3Receipts[2].BlockNumber)
+	}
+}
+
+// The headline backward-compat guarantee: WITHOUT a trace context the encoding
+// is byte-identical to the legacy V1/V2 producer — a V3 trailer is emitted ONLY
+// when TraceContext != "".
+func TestMeta_NoTrace_StaysV1V2_ByteIdentical(t *testing.T) {
+	v1 := Meta{State: StatePending, LogTimeMicros: 1_000_000}
+	if got := encodeMeta(v1); len(got) != metaV1Size {
+		t.Fatalf("no-trace no-receipt encode = %d bytes, want V1 %d", len(got), metaV1Size)
+	}
+	v2 := Meta{State: StatePending, LogTimeMicros: 1, Web3Receipts: []types.Web3VerificationReceipt{{ChainID: 1, BlockNumber: 5}}}
+	b := encodeMeta(v2)
+	if b[metaV1Size] != metaTrailerVersionV2 {
+		t.Fatalf("no-trace receipts encode used trailer 0x%02x, want V2 0x02 (byte-compat)", b[metaV1Size])
+	}
+}
+
+func TestMeta_V3_Decode_TruncatedTraceparent_Rejected(t *testing.T) {
+	full := encodeMeta(Meta{State: StatePending, LogTimeMicros: 1, TraceContext: sampleTraceparent})
+	// Cut into the traceparent payload (after V1 prefix + version + 2-byte len).
+	cut := full[:metaV1Size+1+2+3]
+	_, err := decodeMeta(cut)
+	if err == nil || !errors.Is(err, ErrMetaCorrupt) {
+		t.Fatalf("truncated V3 traceparent accepted (err=%v); want ErrMetaCorrupt", err)
+	}
+}
+
 func TestMeta_V2_LastErrTs_Preserved(t *testing.T) {
 	// Defensive: the V2 trailer must NOT shadow any V1 prefix
 	// field. LastErrTs in particular is at the awkward 13:21 byte

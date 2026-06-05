@@ -54,6 +54,7 @@ import (
 
 	"github.com/dgraph-io/badger/v4"
 
+	sdklog "github.com/baseproof/baseproof/log"
 	"github.com/baseproof/baseproof/types"
 
 	"github.com/baseproof/tooling/services/ledger/chaos"
@@ -126,6 +127,7 @@ type submission struct {
 	wire          []byte
 	logTimeMicros int64 // unix-micros, persisted in Meta for P5 idempotency
 	receipts      []types.Web3VerificationReceipt
+	traceContext  string // W3C traceparent of the admission span (empty if unsampled/off)
 	done          chan error
 }
 
@@ -208,7 +210,11 @@ func (c *Committer) Submit(
 		wire:          wire,
 		logTimeMicros: logTimeMicros,
 		receipts:      receipts,
-		done:          make(chan error, 1),
+		// Capture the admission span's trace context from ctx so the async
+		// downstream stages (sequencer, shipper) resume the SAME trace across
+		// the WAL boundary. Empty when the trace is unsampled or tracing is off.
+		traceContext: sdklog.TraceparentFromCtx(ctx),
+		done:         make(chan error, 1),
 	}
 	select {
 	case c.in <- s:
@@ -385,6 +391,7 @@ func (c *Committer) flushBatch(batch []*submission) error {
 					State:         StatePending,
 					LogTimeMicros: s.logTimeMicros,
 					Web3Receipts:  s.receipts,
+					TraceContext:  s.traceContext,
 				}
 			} else {
 				return fmt.Errorf("wal/committer: read meta: %w", rerr)

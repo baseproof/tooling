@@ -65,6 +65,7 @@ import (
 	"strings"
 	"time"
 
+	sdklog "github.com/baseproof/baseproof/log"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
 	"go.opentelemetry.io/otel/exporters/stdout/stdouttrace"
@@ -188,7 +189,11 @@ func NewTracerProvider(cfg TracerProviderConfig) (trace.TracerProvider, func(ctx
 	tp := sdktrace.NewTracerProvider(
 		sdktrace.WithBatcher(exporter),
 		sdktrace.WithResource(res),
-		sdktrace.WithSampler(sdktrace.TraceIDRatioBased(cfg.SampleRatio)),
+		// Ratio-sample high-cardinality per-entry traces, but ALWAYS record
+		// low-frequency batch/lifecycle roots marked with log.AlwaysSampleAttr
+		// (checkpoint cycle / cosign / publish) so the durability path never
+		// goes dark under sparse sampling at scale.
+		sdktrace.WithSampler(sdklog.SampleRatioOrMarked(cfg.SampleRatio)),
 	)
 
 	shutdown := func(ctx context.Context) error {

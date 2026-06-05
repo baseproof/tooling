@@ -212,6 +212,10 @@ func allocateTelemetry(cfg Config, d *deps.AppDeps) error {
 		return fmt.Errorf("tracer provider: %w", err)
 	}
 	otel.SetTracerProvider(tp)
+	// Install the global W3C propagator so the inbound OTelHandler EXTRACTS and
+	// the outbound WithOTel transport INJECTS traceparent — the prerequisite for
+	// a request to flow as one trace across every component hop.
+	sdklog.InstallPropagation()
 	d.AppendCloser(deps.NamedCloser{
 		Name:    "otel-tracer",
 		Timeout: 10 * time.Second,

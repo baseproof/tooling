@@ -55,11 +55,19 @@ import (
 	"time"
 
 	"github.com/baseproof/baseproof/core/smt"
+	sdklog "github.com/baseproof/baseproof/log"
 	"github.com/baseproof/baseproof/types"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/baseproof/tooling/services/ledger/store"
 	optessera "github.com/baseproof/tooling/services/ledger/tessera"
 )
+
+// checkpointTracerName is the OTel instrumentation scope for the checkpoint loop.
+const checkpointTracerName = "github.com/baseproof/tooling/services/ledger/builder"
 
 // CommitCursorReader reports the durable commit cursor: the highest committed seq
 // and the SMT root at that seq. Satisfied by store.SMTCommitCursor over
@@ -210,6 +218,19 @@ func (l *CheckpointLoop) OnWitnessQuorumFailure(fn func(context.Context)) {
 // next cycle. The only non-nil returns are genuine faults (a DB read failure, a
 // RootAtSize fault that is not the durability sentinel) that the caller logs.
 func (l *CheckpointLoop) CheckpointOnce(ctx context.Context) error {
+	// checkpoint.cycle — the N:1 batch/lifecycle span. A NEW ROOT (its own trace)
+	// marked AlwaysSampleAttr so it is ALWAYS recorded even under sparse per-entry
+	// sampling: the durability path must never go dark. Child spans (emit_tiles /
+	// cosign / publish) carry the cycle's ctx so deeper spans — and the outbound
+	// cosign→witness hop — nest under it.
+	tr := otel.Tracer(checkpointTracerName)
+	ctx, span := tr.Start(ctx, "checkpoint.cycle",
+		trace.WithNewRoot(),
+		trace.WithSpanKind(trace.SpanKindInternal),
+		trace.WithAttributes(sdklog.AlwaysSampleAttr),
+	)
+	defer span.End()
+
 	// ── Step 1: read the commit cursor — the input the whole cycle keys off ──
 	cSeq, cRoot, err := l.commit.ReadCommit(ctx)
 	if err != nil {
@@ -218,6 +239,10 @@ func (l *CheckpointLoop) CheckpointOnce(ctx context.Context) error {
 	// treeSize is the CT-native position the head binds; the +1 lives ONLY in
 	// store.TreeSizeForCommittedSeq (see store/smt_root_state.go — never re-derive).
 	treeSize := store.TreeSizeForCommittedSeq(cSeq)
+	span.SetAttributes(
+		attribute.Int64("ledger.committed_seq", int64(cSeq)),
+		attribute.Int64("ledger.tree_size", int64(treeSize)),
+	)
 	l.logger.DebugContext(ctx, "checkpoint step: read commit cursor",
 		"committed_seq", cSeq,
 		"committed_root", fmt.Sprintf("%x", cRoot[:8]),
@@ -279,7 +304,16 @@ func (l *CheckpointLoop) CheckpointOnce(ctx context.Context) error {
 	// ── Step 4: make cRoot's SMT tiles durable. Returns only on PUT-ack; a blob
 	//    outage HOLDS (horizon frozen, commit cursor unaffected). EmptyHash (a
 	//    commentary/seed root) is a no-op success — there are no SMT tiles. ──
-	if eErr := l.emitter.EmitDurable(ctx, fromRoot, cRoot, cSeq); eErr != nil {
+	emitCtx, emitSpan := tr.Start(ctx, "checkpoint.emit_tiles",
+		trace.WithAttributes(attribute.Int64("ledger.committed_seq", int64(cSeq))))
+	eErr := l.emitter.EmitDurable(emitCtx, fromRoot, cRoot, cSeq)
+	if eErr != nil {
+		emitSpan.RecordError(eErr)
+		emitSpan.SetStatus(codes.Error, eErr.Error())
+	}
+	emitSpan.End()
+	if eErr != nil {
+		span.SetAttributes(attribute.String("checkpoint.hold", "smt_tiles_not_durable"))
 		return l.hold(ctx, "smt_tiles_not_durable",
 			"committed_seq", cSeq, "frontier_seq", fSeq,
 			"committed_root", fmt.Sprintf("%x", cRoot[:8]), "error", eErr)
@@ -333,7 +367,15 @@ func (l *CheckpointLoop) CheckpointOnce(ctx context.Context) error {
 		"smt_root", fmt.Sprintf("%x", head.SMTRoot[:8]),
 		"receipt_root", fmt.Sprintf("%x", head.ReceiptRoot[:8]),
 	)
-	cosigned, cErr := l.witness.RequestCosignatures(ctx, head)
+	cosignCtx, cosignSpan := tr.Start(ctx, "checkpoint.cosign",
+		trace.WithSpanKind(trace.SpanKindClient),
+		trace.WithAttributes(attribute.Int64("ledger.tree_size", int64(head.TreeSize))))
+	cosigned, cErr := l.witness.RequestCosignatures(cosignCtx, head)
+	if cErr != nil {
+		cosignSpan.RecordError(cErr)
+		cosignSpan.SetStatus(codes.Error, cErr.Error())
+	}
+	cosignSpan.End()
 	if cErr != nil {
 		// SRE signal (Backpressure Stall): a failed K-of-N cosign request IS a
 		// witness-quorum failure. Fire per cycle so a sustained stall shows a
@@ -341,6 +383,7 @@ func (l *CheckpointLoop) CheckpointOnce(ctx context.Context) error {
 		if l.onWitnessQuorumFailure != nil {
 			l.onWitnessQuorumFailure(ctx)
 		}
+		span.SetAttributes(attribute.String("checkpoint.hold", "witness_quorum_unavailable"))
 		return l.hold(ctx, "witness_quorum_unavailable", "tree_size", treeSize, "error", cErr)
 	}
 	if cosigned.TreeSize == 0 {
@@ -352,10 +395,19 @@ func (l *CheckpointLoop) CheckpointOnce(ctx context.Context) error {
 		"tree_size", treeSize, "signatures", len(cosigned.Signatures))
 
 	// ── Step 9: publish. The horizon now advertises a root whose tiles are present. ──
-	if pErr := l.publisher.PublishCosignedCheckpoint(ctx, cosigned); pErr != nil {
+	pubCtx, pubSpan := tr.Start(ctx, "checkpoint.publish",
+		trace.WithAttributes(attribute.Int("ledger.signatures", len(cosigned.Signatures))))
+	pErr := l.publisher.PublishCosignedCheckpoint(pubCtx, cosigned)
+	if pErr != nil {
+		pubSpan.RecordError(pErr)
+		pubSpan.SetStatus(codes.Error, pErr.Error())
+	}
+	pubSpan.End()
+	if pErr != nil {
 		return fmt.Errorf("checkpoint: publish checkpoint at %d: %w", treeSize, pErr)
 	}
 
+	span.SetAttributes(attribute.Int("ledger.signatures", len(cosigned.Signatures)))
 	l.lastPublishedSize = treeSize
 	l.lastHoldReason = ""
 	l.logger.InfoContext(ctx, "checkpoint published",

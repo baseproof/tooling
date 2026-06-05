@@ -190,6 +190,11 @@ func Wire(ctx context.Context, cfg Config, d *deps.AppDeps) error {
 	if err != nil {
 		return fmt.Errorf("wire: peer mTLS config: %w", err)
 	}
+	// Trace every outbound hop: wrap the shared transport so each request emits a
+	// client span AND injects the W3C traceparent. The cosign→witness, gossip,
+	// and anchor-publish calls then stitch into the SAME trace as the work that
+	// triggered them — completing the cross-component picture.
+	client.Transport = sdklog.WithOTel(client.Transport)
 	d.OutboundHTTPClient = client
 	if cfg.PeerClientCertFile != "" {
 		d.Logger.Info("peer mTLS client configured",
