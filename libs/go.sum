@@ -1,5 +1,5 @@
-github.com/baseproof/baseproof v0.0.2-rc1 h1:T9H28nVkR2/E6XIxc42QHDFuA6rpOCPVwk6cRaHZ8ek=
-github.com/baseproof/baseproof v0.0.2-rc1/go.mod h1:dofQ7zm9qOLDQEiwuFPORHOjkITeL/83YAnR4+TXFSc=
+github.com/baseproof/baseproof v0.0.3-rc1 h1:xwCLxPvVwAd6J6/SZMEava29wM6SoLroFI2ROWh3TaE=
+github.com/baseproof/baseproof v0.0.3-rc1/go.mod h1:dofQ7zm9qOLDQEiwuFPORHOjkITeL/83YAnR4+TXFSc=
 github.com/beorn7/perks v1.0.1 h1:VlbKKnNfV8bJzeqoa4cOKqO6bYr3WgKZxO8Z16+hsOM=
 github.com/beorn7/perks v1.0.1/go.mod h1:G2ZrVWU2WbWT9wwq4/hrbKbnv/1ERSJQ0ibhJ6rlkpw=
 github.com/bits-and-blooms/bitset v1.24.4 h1:95H15Og1clikBrKr/DuzMXkQzECs1M6hhoGXLwLQOZE=
