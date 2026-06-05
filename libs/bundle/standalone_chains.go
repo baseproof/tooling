@@ -30,6 +30,7 @@ import (
 	"fmt"
 
 	"github.com/baseproof/baseproof/core/envelope"
+	sdkbundle "github.com/baseproof/baseproof/log/bundle"
 	"github.com/baseproof/baseproof/schema"
 	"github.com/baseproof/baseproof/types"
 	"github.com/baseproof/baseproof/verifier"
@@ -115,6 +116,25 @@ func (g *StandaloneLedgerGather) governanceSection(ctx context.Context, name str
 		return nil, err
 	}
 	return AssembleEvolutionChain(ctx, g, discovered, head)
+}
+
+// burnSection fetches the network's observed burn (equivocation) status from
+// GET /v1/burn — a FETCHED FACT, never a constant — and encodes it as the v2
+// burn_attestation, stamped with the proof's checkpoint tree size (as_of). A
+// burned network (is_burned=true) is faithfully carried; VerifyStandalone then
+// fails it closed (ErrEquivocatedLog).
+func (g *StandaloneLedgerGather) burnSection(ctx context.Context) (json.RawMessage, error) {
+	var body struct {
+		IsBurned bool `json:"is_burned"`
+	}
+	if err := g.getJSON(ctx, g.baseURL+"/v1/burn", &body); err != nil {
+		return nil, fmt.Errorf("bundle/standalone: burn status: %w", err)
+	}
+	head, err := g.getHorizon()
+	if err != nil {
+		return nil, err
+	}
+	return sdkbundle.EncodeBurnAttestation(body.IsBurned, head.TreeSize)
 }
 
 // targetEntry fetches and deserializes the proof's target entry once (cached). Its

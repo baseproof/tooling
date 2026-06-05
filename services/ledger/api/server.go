@@ -204,6 +204,13 @@ type Handlers struct {
 	// checkpoint covering the seq.
 	ReceiptProof http.HandlerFunc
 
+	// ── Burn status ────────────────────────────────────────
+	// Burn — GET /v1/burn. The network's observed equivocation
+	// (burn) status as a fetched fact, for the v2 proof's
+	// burn_attestation. Reads gossip equivocation findings; never
+	// a constant.
+	Burn http.HandlerFunc
+
 	// ── Index queries ───────────────────────────────────────
 	CosignatureOf http.HandlerFunc
 	TargetRoot    http.HandlerFunc
@@ -466,6 +473,11 @@ func NewServer(
 	// ── Receipt proof (read-only) ─────────────────────────────────
 	if handlers.ReceiptProof != nil {
 		mux.HandleFunc("GET /v1/receipt/proof/{seq}", handlers.ReceiptProof)
+	}
+
+	// ── Burn status (read-only) ───────────────────────────────────
+	if handlers.Burn != nil {
+		mux.HandleFunc("GET /v1/burn", handlers.Burn)
 	}
 
 	// ── Query endpoints (read-only) ─────────────────────────────────

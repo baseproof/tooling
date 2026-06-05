@@ -901,6 +901,9 @@ func composeHandlers(
 			MinSigs:  cfg.WitnessQuorumK,
 			Logger:   d.Logger,
 		}),
+		// Burn status from observed gossip equivocation findings (nil GossipStore ⇒
+		// is_burned=false). For the v2 proof's burn_attestation (a fetched fact).
+		Burn:              api.NewBurnHandler(api.NewGossipBurnSource(d.GossipStore), cfg.LogDID, d.Logger),
 		CosignatureOf:     api.NewQueryCosignatureOfHandler(queryDeps),
 		TargetRoot:        api.NewQueryTargetRootHandler(queryDeps),
 		SignerDID:         api.NewQuerySignerDIDHandler(queryDeps),
