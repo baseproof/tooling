@@ -182,11 +182,8 @@ func (g *StandaloneLedgerGather) FetchSMTProof(ctx context.Context, _ uint64, sm
 	return body.Proof, nil
 }
 
-// FetchWitnessRotationChain returns no rotations: a genesis-only network has not
-// rotated its witnesses. (The proven-rotation gather is a later layer.)
-func (g *StandaloneLedgerGather) FetchWitnessRotationChain(context.Context, uint64) ([]sdkbundle.RotationElement, error) {
-	return nil, nil
-}
+// FetchWitnessRotationChain is implemented in standalone_witness.go (the
+// genesis short-circuit + the Rebuilder-backed rotated path).
 
 // ── SectionGatherer (Wave-2/3) ───────────────────────────────────────────────
 
