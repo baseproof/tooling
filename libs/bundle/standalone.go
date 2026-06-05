@@ -44,6 +44,7 @@ import (
 	"time"
 
 	"github.com/baseproof/baseproof/core/envelope"
+	"github.com/baseproof/baseproof/crypto/cosign"
 	sdkbundle "github.com/baseproof/baseproof/log/bundle"
 	"github.com/baseproof/baseproof/network"
 	"github.com/baseproof/baseproof/types"
@@ -88,6 +89,18 @@ type StandaloneLedgerGather struct {
 	// targetEntryCache caches the deserialized target entry (its header drives the
 	// signer-rotation + schema chains); fetched once.
 	targetEntryCache *envelope.Entry
+
+	// federation is the registry of CITED networks (keyed by the source_log_did an
+	// anchor entry names), supplied via WithFederationRegistry. Non-empty ⇒ the
+	// gather populates cross_log_anchors by discovering A's anchors and recursively
+	// gathering each cited network's nested proof; empty ⇒ that section is null.
+	federation map[string]FederationMember
+	// fedDepth is this gather's depth in the federation recursion (0 at the top);
+	// fedPath is the set of NetworkIDs already on the recursion path (the cycle
+	// guard). Both are threaded into nested gathers, mirroring the verifier's
+	// depth bound (verifier.MaxCompoundProofDepth) + NetworkID cycle guard.
+	fedDepth int
+	fedPath  map[cosign.NetworkID]bool
 }
 
 // NewStandaloneLedgerGather wires the gather for ONE target entry. bootstrap +
@@ -205,6 +218,8 @@ func (g *StandaloneLedgerGather) FetchSection(ctx context.Context, name string, 
 		return g.schemaChainSection(ctx)
 	case name == "burn_attestation":
 		return g.burnSection(ctx)
+	case name == "cross_log_anchors":
+		return g.crossLogSection(ctx)
 	default:
 		return nil, nil
 	}
@@ -222,14 +237,22 @@ func (g *StandaloneLedgerGather) receiptSection(ctx context.Context) (json.RawMe
 	return body.ReceiptProof, nil
 }
 
-// getJSON GETs url and strict-decodes the JSON body into v (DoS-bounded).
+// getJSON GETs url and strict-decodes the JSON body into v (DoS-bounded), using
+// this gather's http.Client.
 func (g *StandaloneLedgerGather) getJSON(ctx context.Context, url string, v any) error {
+	return getJSONBounded(ctx, g.httpClient, url, v)
+}
+
+// getJSONBounded GETs url over hc and strict-decodes the JSON body into v,
+// bounded by MaxProofSectionBytes (DoS guard). A free function so a nested
+// federation fetch can use a CITED network's own transport, not the top gather's.
+func getJSONBounded(ctx context.Context, hc *http.Client, url string, v any) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return fmt.Errorf("build request: %w", err)
 	}
 	req.Header.Set("Accept", "application/json")
-	resp, err := g.httpClient.Do(req)
+	resp, err := hc.Do(req)
 	if err != nil {
 		return fmt.Errorf("GET %s: %w", url, err)
 	}

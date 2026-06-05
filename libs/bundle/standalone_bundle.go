@@ -55,6 +55,7 @@ func NewBundleGather(
 	httpClient *http.Client,
 	seq uint64,
 	smtKey [32]byte,
+	opts ...GatherOption,
 ) (*StandaloneLedgerGather, error) {
 	if bundle == nil {
 		return nil, fmt.Errorf("bundle/standalone: nil NetworkBundle")
@@ -71,7 +72,7 @@ func NewBundleGather(
 	}
 	return NewStandaloneLedgerGather(
 		client, bundle.Endpoint, httpClient, doc, bundle.TrustRoot.QuorumK, seq, smtKey,
-		gatherOptionsFromBundle(bundle)...,
+		append(gatherOptionsFromBundle(bundle), opts...)...,
 	)
 }
 
