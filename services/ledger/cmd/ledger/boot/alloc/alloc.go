@@ -212,6 +212,10 @@ func allocateTelemetry(cfg Config, d *deps.AppDeps) error {
 		return fmt.Errorf("tracer provider: %w", err)
 	}
 	otel.SetTracerProvider(tp)
+	// W3C trace-context propagation via the SDK wrapper — pairs with the
+	// sdklog.OTelHandler (inbound) and sdklog.WithOTel (outbound) wiring so a
+	// caller's traceparent is honoured across the wire.
+	sdklog.InstallPropagation()
 	d.AppendCloser(deps.NamedCloser{
 		Name:    "otel-tracer",
 		Timeout: 10 * time.Second,

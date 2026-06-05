@@ -66,6 +66,8 @@ import (
 	"time"
 
 	"github.com/baseproof/tooling/services/ledger/api/middleware"
+
+	sdklog "github.com/baseproof/baseproof/log"
 )
 
 // -------------------------------------------------------------------------------------------------
@@ -656,6 +658,12 @@ func NewServer(
 	// handler; here we use a wildcard label rather than echoing
 	// r.URL.Path (which would explode label cardinality).
 	root = RequestDurationMiddleware("*", root)
+
+	// OTel server span (outermost) via the SDK wrapper: extracts the caller's
+	// W3C traceparent so the request — and any synchronous tessera.client spans a
+	// read/proof triggers — nests under it; roots a fresh trace otherwise. No-op
+	// under the default NoOp provider (LEDGER_OTLP_TRACES_ENDPOINT unset).
+	root = sdklog.OTelHandler(root, "ledger.http")
 
 	// -------------------------------------------------------------------------------------------------
 	// 5) http.Server with DoS-immune timeouts

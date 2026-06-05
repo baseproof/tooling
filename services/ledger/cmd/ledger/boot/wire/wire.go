@@ -191,6 +191,13 @@ func Wire(ctx context.Context, cfg Config, d *deps.AppDeps) error {
 		return fmt.Errorf("wire: peer mTLS config: %w", err)
 	}
 	d.OutboundHTTPClient = client
+	// Trace-propagating transport via the SDK wrapper on the single shared
+	// outbound client (witness cosign, head-sync, peer/gossip fetches all thread
+	// d.OutboundHTTPClient): wraps the existing mTLS+retry transport and injects
+	// the W3C traceparent so downstream services nest under this ledger's trace.
+	if d.OutboundHTTPClient != nil {
+		d.OutboundHTTPClient.Transport = sdklog.WithOTel(d.OutboundHTTPClient.Transport)
+	}
 	if cfg.PeerClientCertFile != "" {
 		d.Logger.Info("peer mTLS client configured",
 			"cert", cfg.PeerClientCertFile,
