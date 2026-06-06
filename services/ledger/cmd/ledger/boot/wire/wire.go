@@ -119,6 +119,12 @@ type Config struct {
 	SequencerMaxInFlight int
 	ShipperPollInterval  time.Duration
 	ShipperMaxInFlight   int
+	ShipperMaxAttempts   int
+	ShipperBackoffBase   time.Duration
+	ShipperBackoffMax    time.Duration
+	ShipperHealthyWindow time.Duration
+	ShipperAIMDStep      float64
+	CheckpointInterval   time.Duration
 	SMTNodeCacheSize     int
 
 	RecentEntryCacheSize     int
@@ -332,7 +338,7 @@ func Wire(ctx context.Context, cfg Config, d *deps.AppDeps) error {
 			// ReceiptRoot from entry_index metadata only — never the Badger WAL
 			// bytes, so a shipped+pruned delta entry can't stall the horizon.
 			store.NewEntryIndexReceiptRanger(d.PgPool.DB, cfg.LogDID),
-			0, // interval → 1s default
+			cfg.CheckpointInterval, // LEDGER_CHECKPOINT_INTERVAL (0 ⇒ 1s default)
 			d.Logger,
 		)
 		// Witness-quorum SRE signal (Backpressure-Stall trigger). The core loop
@@ -1801,9 +1807,14 @@ func composeSequencer(cfg Config, d *deps.AppDeps) *sequencer.Sequencer {
 
 func composeShipper(cfg Config, d *deps.AppDeps) *shipper.Shipper {
 	ship := shipper.NewShipper(d.WALCommitter, d.ByteStore, shipper.Config{
-		PollInterval: cfg.ShipperPollInterval,
-		MaxInFlight:  cfg.ShipperMaxInFlight,
-		Logger:       d.Logger,
+		PollInterval:  cfg.ShipperPollInterval,
+		MaxInFlight:   cfg.ShipperMaxInFlight,
+		MaxAttempts:   uint32(cfg.ShipperMaxAttempts),
+		BackoffBase:   cfg.ShipperBackoffBase,
+		BackoffMax:    cfg.ShipperBackoffMax,
+		HealthyWindow: cfg.ShipperHealthyWindow,
+		AIMDStep:      cfg.ShipperAIMDStep,
+		Logger:        d.Logger,
 	})
 	d.Logger.Info("shipper: configured",
 		"max_in_flight", cfg.ShipperMaxInFlight,

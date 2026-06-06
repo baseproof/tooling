@@ -270,6 +270,30 @@ type Config struct {
 	// 100ms.
 	// Env: LEDGER_SHIPPER_POLL_INTERVAL
 	ShipperPollInterval time.Duration
+
+	// Phase-2 tuning knobs — exposed for 30K sustained/durability runs.
+	// Defaults match the prior hardcoded behavior.
+	//
+	//   LEDGER_SHIPPER_MAX_ATTEMPTS    per-entry retries before StateManual (10)
+	//   LEDGER_SHIPPER_BACKOFF_BASE    initial retry delay (1s)
+	//   LEDGER_SHIPPER_BACKOFF_MAX     retry backoff cap (60s)
+	//   LEDGER_SHIPPER_HEALTHY_WINDOW  store-healthy window for quarantine (60s)
+	//   LEDGER_SHIPPER_AIMD_STEP       AIMD additive-increase step (0.5)
+	//   LEDGER_CHECKPOINT_INTERVAL     checkpoint/horizon publish cadence (1s)
+	//   LEDGER_WAL_QUEUE_SIZE          committer submission queue (0 ⇒ 4096)
+	//   LEDGER_WAL_BATCH_MAX_ENTRIES   group-commit flush-on-count (0 ⇒ 256)
+	//   LEDGER_WAL_BATCH_MAX_BYTES     group-commit flush-on-bytes (0 ⇒ 5MiB)
+	//   LEDGER_WAL_BATCH_MAX_LATENCY   group-commit flush-on-age (0 ⇒ 10ms)
+	ShipperMaxAttempts   int
+	ShipperBackoffBase   time.Duration
+	ShipperBackoffMax    time.Duration
+	ShipperHealthyWindow time.Duration
+	ShipperAIMDStep      float64
+	CheckpointInterval   time.Duration
+	WALQueueSize         int
+	WALBatchMaxEntries   int
+	WALBatchMaxBytes     int
+	WALBatchMaxLatency   time.Duration
 	// Tessera embedding — in-process upstream Tessera.
 	// TesseraStorageDir is the POSIX directory the embedded
 	// Tessera POSIX driver writes tiles, entry bundles, and the
@@ -660,6 +684,19 @@ func loadConfig() (*Config, error) {
 		ShipperMaxInFlight: envIntOr("LEDGER_SHIPPER_MAX_IN_FLIGHT", 64),
 		ShipperPollInterval: envDurationOr("LEDGER_SHIPPER_POLL_INTERVAL",
 			100*time.Millisecond),
+
+		// Phase-2 tuning knobs (30K sustained/durability). All defaults
+		// preserve prior behavior; 0 on a WAL-batch knob ⇒ committer default.
+		ShipperMaxAttempts:   envIntOr("LEDGER_SHIPPER_MAX_ATTEMPTS", 10),
+		ShipperBackoffBase:   envDurationOr("LEDGER_SHIPPER_BACKOFF_BASE", 1*time.Second),
+		ShipperBackoffMax:    envDurationOr("LEDGER_SHIPPER_BACKOFF_MAX", 60*time.Second),
+		ShipperHealthyWindow: envDurationOr("LEDGER_SHIPPER_HEALTHY_WINDOW", 60*time.Second),
+		ShipperAIMDStep:      envFloatOr("LEDGER_SHIPPER_AIMD_STEP", 0.5),
+		CheckpointInterval:   envDurationOr("LEDGER_CHECKPOINT_INTERVAL", 1*time.Second),
+		WALQueueSize:         envIntOr("LEDGER_WAL_QUEUE_SIZE", 0),
+		WALBatchMaxEntries:   envIntOr("LEDGER_WAL_BATCH_MAX_ENTRIES", 0),
+		WALBatchMaxBytes:     envIntOr("LEDGER_WAL_BATCH_MAX_BYTES", 0),
+		WALBatchMaxLatency:   envDurationOr("LEDGER_WAL_BATCH_MAX_LATENCY", 0),
 
 		// Pool size: env override OR derived from MaxInFlight (set
 		// after we know the final MaxInFlight value below).
