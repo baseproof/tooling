@@ -302,27 +302,32 @@ func readerHandlers(
 	horizon api.HorizonReader,
 	logger *slog.Logger,
 ) api.Handlers {
+	// CheckpointArchive (1.1a): the per-size cosigned-head read API. The horizon
+	// reader serves it iff it backs a per-size archive (the POSIX TileBackend
+	// horizon does); otherwise NewCheckpointArchiveHandler degrades to a 503.
+	archiveReader, _ := horizon.(api.CheckpointArchiveReader)
 	return api.Handlers{
-		Submission:      nil, // No POST /v1/entries in read-only mode.
-		TreeHead:        api.NewTreeHeadHandler(treeDeps),
-		TreeInclusion:   api.NewTreeInclusionHandler(treeDeps),
-		TreeConsistency: api.NewTreeConsistencyHandler(treeDeps),
-		Horizon:         api.NewCosignedCheckpointHandler(horizon, logger),
-		SMTProof:        api.NewSMTProofHandler(smtDeps),
-		SMTBatchProof:   api.NewSMTBatchProofHandler(smtDeps),
-		SMTRoot:         api.NewSMTRootHandler(smtDeps),
-		CosignatureOf:   api.NewQueryCosignatureOfHandler(queryDeps),
-		TargetRoot:      api.NewQueryTargetRootHandler(queryDeps),
-		SignerDID:       api.NewQuerySignerDIDHandler(queryDeps),
-		SchemaRef:       api.NewQuerySchemaRefHandler(queryDeps),
-		Scan:            api.NewQueryScanHandler(queryDeps),
-		Difficulty:      api.NewDifficultyHandler(queryDeps),
-		EntryBySequence: api.NewEntryBySequenceHandler(entryReadDeps),
-		EntryBatch:      api.NewEntryBatchHandler(entryReadDeps),
-		EntryRaw:        api.NewRawEntryHandler(entryReadDeps),
-		SMTLeaf:         api.NewSMTLeafHandler(smtDeps),
-		SMTLeafBatch:    api.NewSMTLeafBatchHandler(smtDeps),
-		CommitmentQuery: api.NewDerivationCommitmentQueryHandler(commitDeps),
+		Submission:        nil, // No POST /v1/entries in read-only mode.
+		TreeHead:          api.NewTreeHeadHandler(treeDeps),
+		TreeInclusion:     api.NewTreeInclusionHandler(treeDeps),
+		TreeConsistency:   api.NewTreeConsistencyHandler(treeDeps),
+		Horizon:           api.NewCosignedCheckpointHandler(horizon, logger),
+		CheckpointArchive: api.NewCheckpointArchiveHandler(archiveReader, logger),
+		SMTProof:          api.NewSMTProofHandler(smtDeps),
+		SMTBatchProof:     api.NewSMTBatchProofHandler(smtDeps),
+		SMTRoot:           api.NewSMTRootHandler(smtDeps),
+		CosignatureOf:     api.NewQueryCosignatureOfHandler(queryDeps),
+		TargetRoot:        api.NewQueryTargetRootHandler(queryDeps),
+		SignerDID:         api.NewQuerySignerDIDHandler(queryDeps),
+		SchemaRef:         api.NewQuerySchemaRefHandler(queryDeps),
+		Scan:              api.NewQueryScanHandler(queryDeps),
+		Difficulty:        api.NewDifficultyHandler(queryDeps),
+		EntryBySequence:   api.NewEntryBySequenceHandler(entryReadDeps),
+		EntryBatch:        api.NewEntryBatchHandler(entryReadDeps),
+		EntryRaw:          api.NewRawEntryHandler(entryReadDeps),
+		SMTLeaf:           api.NewSMTLeafHandler(smtDeps),
+		SMTLeafBatch:      api.NewSMTLeafBatchHandler(smtDeps),
+		CommitmentQuery:   api.NewDerivationCommitmentQueryHandler(commitDeps),
 	}
 }
 
