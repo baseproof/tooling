@@ -609,7 +609,7 @@ func (e *EmbeddedAppender) PublishCosignedCheckpoint(
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	return publishCheckpointFiles(e.publicCheckpointPath, head)
+	return publishCheckpoint(ctx, e.publicCheckpointPath, head, e.logger)
 }
 
 // checkpointArchiveDir is the subdirectory (beside the latest cosigned-checkpoint)
@@ -627,25 +627,39 @@ func archivedCheckpointPath(publicPath string, treeSize uint64) string {
 		strconv.FormatUint(treeSize, 10))
 }
 
-// publishCheckpointFiles writes the cosigned head to BOTH the latest publicPath
-// (overwritten each publish) and its per-tree_size archive sibling (never
-// overwritten across sizes), each atomically. The archive durably retains every
-// cosigned head — with its witness cosignatures — so historical heads stay
-// fetchable PG-free after the latest checkpoint advances; this is the anchor a
-// cold-seq inclusion proof binds to (1.1a). Separated from the appender so the
-// dual-write is unit-testable without a live tessera backend.
+// publishCheckpoint writes the LOAD-BEARING latest checkpoint (which gates the
+// publish), then makes a BEST-EFFORT per-size archive copy. Extracted from the
+// appender so the load-bearing contract is unit-testable.
 //
-// Both files carry the canonical wire shape (lowercase-hex) — the same contract
-// /v1/tree/head and gossip use — decoded by types.WireCosignedTreeHead.ToCosignedTreeHead.
-func publishCheckpointFiles(publicPath string, head types.CosignedTreeHead) error {
+// Resilience invariant (Phase 1): the latest cosigned-checkpoint is the horizon —
+// the single object every as-of proof anchors to — so its write is the ONLY thing
+// that may fail the publish. The per-size archive (1.1a) is an additive durability
+// side-effect: a failure there is logged and swallowed, NEVER propagated, because a
+// publish error aborts the checkpoint step (builder/checkpoint_loop.go) and would
+// stall the horizon. The archive self-heals on the next publish / backfill (1.x).
+func publishCheckpoint(ctx context.Context, publicPath string, head types.CosignedTreeHead, logger *slog.Logger) error {
 	body, err := json.Marshal(types.FromCosignedTreeHead(head))
 	if err != nil {
 		return fmt.Errorf("tessera/embedded: marshal cosigned head: %w", err)
 	}
+	// Load-bearing: the horizon must be durable before the publish is acked.
 	if err := atomicWriteFile(publicPath, body); err != nil {
 		return fmt.Errorf("tessera/embedded: write cosigned checkpoint %s: %w", publicPath, err)
 	}
-	archivePath := archivedCheckpointPath(publicPath, head.TreeSize)
+	// Best-effort: never fail the publish on the archive.
+	if aerr := archiveCheckpoint(publicPath, head.TreeSize, body); aerr != nil && logger != nil {
+		logger.WarnContext(ctx,
+			"per-size cosigned-checkpoint archive failed (best-effort; horizon unaffected)",
+			"tree_size", head.TreeSize, "error", aerr)
+	}
+	return nil
+}
+
+// archiveCheckpoint writes the per-size archive copy at checkpoints/<treeSize>.
+// Its error is advisory — callers MUST NOT fail the publish on it (see
+// publishCheckpoint).
+func archiveCheckpoint(publicPath string, treeSize uint64, body []byte) error {
+	archivePath := archivedCheckpointPath(publicPath, treeSize)
 	if err := os.MkdirAll(filepath.Dir(archivePath), 0o755); err != nil {
 		return fmt.Errorf("tessera/embedded: mkdir checkpoint archive %s: %w",
 			filepath.Dir(archivePath), err)
