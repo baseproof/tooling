@@ -133,6 +133,18 @@ type ReceiptRanger interface {
 	ReceiptRoot(ctx context.Context, fromSeq, toSeq uint64) ([32]byte, error)
 }
 
+// ReceiptCommitArchiver durably archives the dense receipt-commitment set a
+// published checkpoint's ReceiptRoot is computed over (to the object store), so
+// receipt proofs reconstruct PG-free (store.ArchiveReceiptRanger). OPTIONAL +
+// BEST-EFFORT: the loop calls it AFTER a successful publish and never fails the
+// checkpoint on an archive error — exactly the non-load-bearing contract of the
+// 1.1a per-size checkpoint archive. coveringSize is the published tree_size;
+// [fromSeq, toSeq] is the same delta the ReceiptRoot was computed over. nil ⇒ no
+// receipt archiving (receipts read from PG only).
+type ReceiptCommitArchiver interface {
+	ArchiveReceiptCommits(ctx context.Context, coveringSize, fromSeq, toSeq uint64) error
+}
+
 // EntryTraceReader resolves the W3C traceparent stored on the WAL Meta of the
 // entry at a committed seq (the admission trace captured at Submit). Used to LINK
 // the checkpoint.cycle span to a bounded sample of the entries it commits, so an
@@ -157,6 +169,13 @@ type CheckpointLoop struct {
 	receipts  ReceiptRanger // optional; nil ⇒ ReceiptRoot bound as the empty hash
 	interval  time.Duration
 	logger    *slog.Logger
+
+	// receiptArchiver, when non-nil, best-effort archives each published
+	// checkpoint's dense receipt-commitment set so receipt proofs reconstruct
+	// PG-free (1.2a). Injected by the composition root (SetReceiptArchiver); a write
+	// error is logged and dropped — it never stalls a checkpoint. nil ⇒ receipts
+	// read from PG only.
+	receiptArchiver ReceiptCommitArchiver
 
 	// onWitnessQuorumFailure, when non-nil, fires once per cycle the K-of-N
 	// witness cosign is unavailable (the "witness_quorum_unavailable" hold) —
@@ -251,6 +270,15 @@ func (l *CheckpointLoop) OnWitnessQuorumFailure(fn func(context.Context)) {
 // with a running loop. nil disables entry links (the default).
 func (l *CheckpointLoop) SetEntryTraceReader(r EntryTraceReader) {
 	l.entryTrace = r
+}
+
+// SetReceiptArchiver injects the best-effort archiver that durably retains each
+// published checkpoint's dense receipt-commitment set (1.2a), the source receipt
+// proofs reconstruct from PG-free. Set before Run; not safe to change concurrently
+// with a running loop. nil disables receipt archiving (the default) — receipts then
+// read from PG only.
+func (l *CheckpointLoop) SetReceiptArchiver(a ReceiptCommitArchiver) {
+	l.receiptArchiver = a
 }
 
 // maxCheckpointLinks bounds the number of entry links on a checkpoint.cycle span.
@@ -506,6 +534,19 @@ func (l *CheckpointLoop) CheckpointOnce(ctx context.Context) error {
 	pubSpan.End()
 	if pErr != nil {
 		return fmt.Errorf("checkpoint: publish checkpoint at %d: %w", treeSize, pErr)
+	}
+
+	// Best-effort (1.2a): archive the dense receipt-commitment set this checkpoint's
+	// ReceiptRoot was computed over, so receipt proofs reconstruct PG-free. The
+	// publish has ALREADY succeeded; an archive error only degrades the receipt
+	// endpoint to its PG path (cf. 1.1a) and MUST NOT fail the checkpoint. Uses the
+	// not-yet-advanced lastPublishedSize as the delta start — the exact [fromSeq, cSeq]
+	// the ReceiptRoot was computed over at Step 7, covering size = published tree_size.
+	if l.receiptArchiver != nil && cSeq >= l.lastPublishedSize {
+		if aErr := l.receiptArchiver.ArchiveReceiptCommits(pubCtx, treeSize, l.lastPublishedSize, cSeq); aErr != nil {
+			l.logger.WarnContext(ctx, "checkpoint: receipt-commit archive failed (best-effort; receipts fall back to PG)",
+				"tree_size", treeSize, "from_seq", l.lastPublishedSize, "to_seq", cSeq, "error", aErr)
+		}
 	}
 
 	span.SetAttributes(attribute.Int("ledger.signatures", len(cosigned.Signatures)))

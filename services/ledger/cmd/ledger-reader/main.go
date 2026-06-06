@@ -76,6 +76,11 @@ func run(logger *slog.Logger) error {
 	if dsn == "" {
 		dsn = cfg.PostgresDSN
 	}
+	// PG-off read front: boot even when Postgres is unreachable (LazyConnect),
+	// so the object-store-backed surface (proofs, horizon, SMT/log tiles) stays
+	// available during a PG outage. PG-backed endpoints (/v1/entries value
+	// lookups, /v1/smt/leaf, /v1/query/*) then fail per-request and recover when
+	// PG returns. Only a malformed DSN is fatal here.
 	pool, err := store.InitPool(ctx, store.PoolConfig{
 		DSN:              dsn,
 		MaxConns:         int32(cfg.MaxConns),
@@ -83,12 +88,19 @@ func run(logger *slog.Logger) error {
 		MaxConnLifetime:  30 * time.Minute,
 		MaxConnIdleTime:  5 * time.Minute,
 		StatementTimeout: cfg.StatementTimeout,
+		LazyConnect:      true,
 	})
 	if err != nil {
 		return fmt.Errorf("postgres pool: %w", err)
 	}
 	defer pool.Close()
-	logger.Info("postgres read pool initialized", "replica", cfg.ReplicaDSN != "")
+	pingCtx, pingCancel := context.WithTimeout(ctx, 3*time.Second)
+	if pingErr := pool.DB.Ping(pingCtx); pingErr != nil {
+		logger.Warn("postgres unreachable at boot — serving object-store-backed surface only; PG-backed endpoints will error until PG recovers", "error", pingErr)
+	} else {
+		logger.Info("postgres read pool initialized", "replica", cfg.ReplicaDSN != "")
+	}
+	pingCancel()
 
 	// ── Tessera (read-only) ─────────────────────────────────────
 	// The reader binary reads tiles + checkpoint directly off the
@@ -192,6 +204,9 @@ func run(logger *slog.Logger) error {
 	treeDeps := &api.TreeDeps{
 		TreeHeadStore: treeHeadStore, Inclusion: tesseraAdapter,
 		Consistency: tesseraAdapter, Logger: logger,
+		// PG-off: default the inclusion proof's tree size to the cosigned
+		// horizon when the live head (Postgres) is unavailable.
+		Horizon: horizon,
 	}
 	smtDeps := &api.SMTDeps{
 		Tree:        tree,
@@ -218,32 +233,22 @@ func run(logger *slog.Logger) error {
 		PublicURLer: entryBytes.(api.PublicURLer),
 		LogDID:      cfg.LogDID,
 		Logger:      logger,
+		// PG-off seq→hash: when the entry_index is unreachable, resolve the
+		// canonical hash from the entry tile (object store), bounded by the
+		// cosigned horizon, so /v1/entries/{seq}/raw still serves via redirect.
+		SeqHashFallback: func(ctx context.Context, seq uint64) ([32]byte, bool, error) {
+			head, _, herr := horizon.ReadHorizon(ctx)
+			if herr != nil {
+				return [32]byte{}, false, herr
+			}
+			return tessera.SeqHashFromEntryTile(ctx, tileReader, head.TreeSize, seq)
+		},
 	}
 	commitDeps := &api.DerivationCommitmentDeps{
 		CommitmentStore: commitmentStore, Logger: logger,
 	}
 
-	handlers := api.Handlers{
-		Submission:      nil, // No POST /v1/entries in read-only mode.
-		TreeHead:        api.NewTreeHeadHandler(treeDeps),
-		TreeInclusion:   api.NewTreeInclusionHandler(treeDeps),
-		TreeConsistency: api.NewTreeConsistencyHandler(treeDeps),
-		SMTProof:        api.NewSMTProofHandler(smtDeps),
-		SMTBatchProof:   api.NewSMTBatchProofHandler(smtDeps),
-		SMTRoot:         api.NewSMTRootHandler(smtDeps),
-		CosignatureOf:   api.NewQueryCosignatureOfHandler(queryDeps),
-		TargetRoot:      api.NewQueryTargetRootHandler(queryDeps),
-		SignerDID:       api.NewQuerySignerDIDHandler(queryDeps),
-		SchemaRef:       api.NewQuerySchemaRefHandler(queryDeps),
-		Scan:            api.NewQueryScanHandler(queryDeps),
-		Difficulty:      api.NewDifficultyHandler(queryDeps),
-		EntryBySequence: api.NewEntryBySequenceHandler(entryReadDeps),
-		EntryBatch:      api.NewEntryBatchHandler(entryReadDeps),
-		EntryRaw:        api.NewRawEntryHandler(entryReadDeps),
-		SMTLeaf:         api.NewSMTLeafHandler(smtDeps),
-		SMTLeafBatch:    api.NewSMTLeafBatchHandler(smtDeps),
-		CommitmentQuery: api.NewDerivationCommitmentQueryHandler(commitDeps),
-	}
+	handlers := readerHandlers(treeDeps, smtDeps, queryDeps, entryReadDeps, commitDeps, horizon, logger)
 
 	serverCfg := api.DefaultServerConfig()
 	serverCfg.Addr = cfg.ServerAddr
@@ -276,6 +281,54 @@ func run(logger *slog.Logger) error {
 	wg.Wait()
 	logger.Info("ledger-reader stopped cleanly")
 	return nil
+}
+
+// readerHandlers assembles the read-only ledger's HTTP handler set. Extracted
+// from run() so the wiring — notably the cosigned-horizon route, which a PG-off
+// read front MUST mount — is unit-testable without standing up PG / S3 / the
+// object store.
+//
+// The Horizon route is the load-bearing addition: server.go mounts
+// GET /v1/tree/horizon iff handlers.Horizon != nil, and an offline proof binds
+// to the published cosigned head this serves, so a read front that omits it
+// leaves clients with no anchor to fetch. It is built from the SAME
+// HorizonReader smtDeps already uses for as-of proof serving.
+func readerHandlers(
+	treeDeps *api.TreeDeps,
+	smtDeps *api.SMTDeps,
+	queryDeps *api.QueryDeps,
+	entryReadDeps *api.EntryReadDeps,
+	commitDeps *api.DerivationCommitmentDeps,
+	horizon api.HorizonReader,
+	logger *slog.Logger,
+) api.Handlers {
+	// CheckpointArchive (1.1a): the per-size cosigned-head read API. The horizon
+	// reader serves it iff it backs a per-size archive (the POSIX TileBackend
+	// horizon does); otherwise NewCheckpointArchiveHandler degrades to a 503.
+	archiveReader, _ := horizon.(api.CheckpointArchiveReader)
+	return api.Handlers{
+		Submission:        nil, // No POST /v1/entries in read-only mode.
+		TreeHead:          api.NewTreeHeadHandler(treeDeps),
+		TreeInclusion:     api.NewTreeInclusionHandler(treeDeps),
+		TreeConsistency:   api.NewTreeConsistencyHandler(treeDeps),
+		Horizon:           api.NewCosignedCheckpointHandler(horizon, logger),
+		CheckpointArchive: api.NewCheckpointArchiveHandler(archiveReader, logger),
+		SMTProof:          api.NewSMTProofHandler(smtDeps),
+		SMTBatchProof:     api.NewSMTBatchProofHandler(smtDeps),
+		SMTRoot:           api.NewSMTRootHandler(smtDeps),
+		CosignatureOf:     api.NewQueryCosignatureOfHandler(queryDeps),
+		TargetRoot:        api.NewQueryTargetRootHandler(queryDeps),
+		SignerDID:         api.NewQuerySignerDIDHandler(queryDeps),
+		SchemaRef:         api.NewQuerySchemaRefHandler(queryDeps),
+		Scan:              api.NewQueryScanHandler(queryDeps),
+		Difficulty:        api.NewDifficultyHandler(queryDeps),
+		EntryBySequence:   api.NewEntryBySequenceHandler(entryReadDeps),
+		EntryBatch:        api.NewEntryBatchHandler(entryReadDeps),
+		EntryRaw:          api.NewRawEntryHandler(entryReadDeps),
+		SMTLeaf:           api.NewSMTLeafHandler(smtDeps),
+		SMTLeafBatch:      api.NewSMTLeafBatchHandler(smtDeps),
+		CommitmentQuery:   api.NewDerivationCommitmentQueryHandler(commitDeps),
+	}
 }
 
 // -------------------------------------------------------------------------------------------------

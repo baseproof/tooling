@@ -284,6 +284,12 @@ type Handlers struct {
 	// quorum out-of-band. CDN-frontable.
 	Horizon http.HandlerFunc
 
+	// CheckpointArchive serves GET /v1/tree/checkpoint/{size} — the cosigned head
+	// archived at a SPECIFIC tree size, served verbatim from the object store
+	// (PG-free). The auditor's anchor for cold-seq inclusion. Mounted iff a
+	// checkpoint-archive reader is configured.
+	CheckpointArchive http.HandlerFunc
+
 	// ── Public introspection endpoints (G5/G6 zero-trust shape) ─────
 	// LogInfo serves GET /v1/log-info — public deployment posture
 	// (LogDID, NetworkID, witness set, byte-store + tile backend,
@@ -457,6 +463,9 @@ func NewServer(
 	}
 	if handlers.Horizon != nil {
 		mux.HandleFunc("GET /v1/tree/horizon", handlers.Horizon)
+	}
+	if handlers.CheckpointArchive != nil {
+		mux.HandleFunc("GET /v1/tree/checkpoint/{size}", handlers.CheckpointArchive)
 	}
 
 	// ── SMT proofs (read-only) ────────────────────────────────────

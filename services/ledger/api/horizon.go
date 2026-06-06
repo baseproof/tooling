@@ -38,6 +38,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"strconv"
 	"time"
 
 	"github.com/baseproof/baseproof/types"
@@ -79,15 +80,95 @@ func (h *tileBackendHorizon) ReadHorizon(ctx context.Context) (*types.CosignedTr
 		// pre-genesis (no checkpoint yet → 503) from a real read fault.
 		return nil, nil, err
 	}
+	head, err := decodeCosignedCheckpoint(raw)
+	if err != nil {
+		return nil, nil, err
+	}
+	return head, raw, nil
+}
+
+// decodeCosignedCheckpoint parses the published wire shape (lowercase-hex
+// WireCosignedTreeHead) into a CosignedTreeHead. Shared by ReadHorizon (latest)
+// and ReadCheckpointAt (per-size archive).
+func decodeCosignedCheckpoint(raw []byte) (*types.CosignedTreeHead, error) {
 	var w types.WireCosignedTreeHead
-	if uErr := json.Unmarshal(raw, &w); uErr != nil {
-		return nil, nil, fmt.Errorf("api/horizon: decode cosigned checkpoint: %w", uErr)
+	if err := json.Unmarshal(raw, &w); err != nil {
+		return nil, fmt.Errorf("api/horizon: decode cosigned checkpoint: %w", err)
 	}
-	head, cErr := w.ToCosignedTreeHead()
-	if cErr != nil {
-		return nil, nil, fmt.Errorf("api/horizon: decode cosigned checkpoint: %w", cErr)
+	head, err := w.ToCosignedTreeHead()
+	if err != nil {
+		return nil, fmt.Errorf("api/horizon: decode cosigned checkpoint: %w", err)
 	}
-	return &head, raw, nil
+	return &head, nil
+}
+
+// checkpointArchiveObject is the storage key for the per-tree_size archived
+// cosigned head — the never-overwritten copy the builder writes beside the latest
+// cosigned-checkpoint (tessera checkpointArchiveDir = "checkpoints"). MUST match
+// the tessera writer and store/horizon_s3.go checkpointArchiveKey.
+func checkpointArchiveObject(size uint64) string {
+	return "checkpoints/" + strconv.FormatUint(size, 10)
+}
+
+// CheckpointArchiveReader reads a cosigned head at a SPECIFIC tree size from the
+// per-size archive (object store) — the PG-free path for historical heads and the
+// cold-seq inclusion anchor (1.1a). tileBackendHorizon and store.S3HorizonReader
+// both implement it.
+type CheckpointArchiveReader interface {
+	ReadCheckpointAt(ctx context.Context, size uint64) (head *types.CosignedTreeHead, raw []byte, err error)
+}
+
+// receiptArchiveObject is the storage key for the per-checkpoint dense
+// receipt-commitment archive (1.2a) — MUST match store/horizon_s3.go
+// receiptArchiveKey and the builder's best-effort write.
+func receiptArchiveObject(coveringSize uint64) string {
+	return "receipts/" + strconv.FormatUint(coveringSize, 10)
+}
+
+// ReadReceiptCommits reads the archived dense receipt-commitment blob for the
+// checkpoint at coveringSize from the object store — PG-free. A wrapped
+// os.ErrNotExist when that checkpoint's receipts were never archived. Satisfies
+// store.ReceiptCommitReader (the source store.ArchiveReceiptRanger reconstructs
+// receipt proofs from); the ledger's wiring composes it behind FallbackReceiptProver.
+func (h *tileBackendHorizon) ReadReceiptCommits(ctx context.Context, coveringSize uint64) ([]byte, error) {
+	raw, err := h.backend.ReadTileByPath(ctx, receiptArchiveObject(coveringSize))
+	if err != nil {
+		return nil, err
+	}
+	return raw, nil
+}
+
+// rotationChainObject is the storage key for the archived witness-rotation chain
+// (1.2b) — a single key (the chain is small). MUST match store/rotation_archive.go
+// rotationChainKey.
+func rotationChainObject() string { return "witness-rotations" }
+
+// ReadRotationIndex reads the archived witness-rotation INDEX blob (the rotation log
+// positions) from the object store — PG-free. A wrapped os.ErrNotExist when none was
+// archived (a never-rotated network). Satisfies store.RotationIndexReader (the source
+// store.ArchiveRotationChainFetcher rebuilds the SDK's FetchWitnessRotationChain seam
+// from, anchoring each element's inclusion proof at the requested tree size).
+func (h *tileBackendHorizon) ReadRotationIndex(ctx context.Context) ([]byte, error) {
+	raw, err := h.backend.ReadTileByPath(ctx, rotationChainObject())
+	if err != nil {
+		return nil, err
+	}
+	return raw, nil
+}
+
+// ReadCheckpointAt reads the archived cosigned head at the given tree size from
+// the object store — PG-free. Returns a wrapped os.ErrNotExist when that size was
+// never archived (pre-archive history, or a size that was never a cosigned head).
+func (h *tileBackendHorizon) ReadCheckpointAt(ctx context.Context, size uint64) (*types.CosignedTreeHead, []byte, error) {
+	raw, err := h.backend.ReadTileByPath(ctx, checkpointArchiveObject(size))
+	if err != nil {
+		return nil, nil, err
+	}
+	head, err := decodeCosignedCheckpoint(raw)
+	if err != nil {
+		return nil, nil, err
+	}
+	return head, raw, nil
 }
 
 // NewCosignedCheckpointHandler returns the GET /v1/tree/horizon handler — the
@@ -123,5 +204,50 @@ func NewCosignedCheckpointHandler(reader HorizonReader, logger *slog.Logger) htt
 		// from POSIX or shared S3 behind the same HorizonReader interface.
 		w.Header().Set("Cache-Control", "public, max-age=2")
 		http.ServeContent(w, r, cosignedCheckpointObject, time.Time{}, bytes.NewReader(raw))
+	}
+}
+
+// NewCheckpointArchiveHandler returns GET /v1/tree/checkpoint/{size} — the
+// cosigned head (SMTRoot + K-of-N witness sigs) archived at a SPECIFIC tree size,
+// served verbatim from the object store (PG-free). The auditor's anchor for
+// cold-seq inclusion: fetch the covering cosigned head, then verify the entry's
+// inclusion against it. A nil reader is a graceful 503.
+//
+// Negative-answer discipline (cf. 1.3f): checkpoints publish at cosign-cycle
+// boundaries, not every size, so a size with no archived checkpoint is a GENUINE
+// 404 — while a transient read fault is a 500. A 404 never masquerades a backend
+// hiccup as definitive absence.
+func NewCheckpointArchiveHandler(reader CheckpointArchiveReader, logger *slog.Logger) http.HandlerFunc {
+	if reader == nil {
+		return func(w http.ResponseWriter, r *http.Request) {
+			writeTypedError(r.Context(), w, apitypes.ErrorClassHorizonUnavailable,
+				http.StatusServiceUnavailable, "checkpoint archive not configured")
+		}
+	}
+	return func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
+		size, perr := strconv.ParseUint(r.PathValue("size"), 10, 64)
+		if perr != nil || size == 0 {
+			writeTypedError(ctx, w, apitypes.ErrorClassInvalidQueryParam,
+				http.StatusBadRequest, "invalid tree size")
+			return
+		}
+		head, raw, err := reader.ReadCheckpointAt(ctx, size)
+		if errors.Is(err, os.ErrNotExist) {
+			writeTypedError(ctx, w, apitypes.ErrorClassNotFound,
+				http.StatusNotFound, fmt.Sprintf("no cosigned checkpoint archived at tree size %d", size))
+			return
+		}
+		if err != nil {
+			logger.ErrorContext(ctx, "checkpoint archive read failed", "size", size, "error", err)
+			writeTypedError(ctx, w, apitypes.ErrorClassReadProjectionFailed,
+				http.StatusInternalServerError, fmt.Sprintf("checkpoint archive read failed: %s", err))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("ETag", fmt.Sprintf(`"%d"`, head.TreeSize))
+		// Archived checkpoints are immutable per size → cache hard.
+		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		http.ServeContent(w, r, checkpointArchiveObject(size), time.Time{}, bytes.NewReader(raw))
 	}
 }

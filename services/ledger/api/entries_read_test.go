@@ -358,6 +358,59 @@ func TestRawEntry_PostgresError_500(t *testing.T) {
 }
 
 // ─────────────────────────────────────────────────────────────────────
+// 8b) PG-off read front (1.3d): FetchHashBySeq errors, but SeqHashFallback
+//     resolves seq→hash from the entry tile → 302 bytestore redirect.
+//     Without a fallback (TestRawEntry_PostgresError_500 above) the same
+//     error is a 500 — together they are the +/- guard for the slice.
+// ─────────────────────────────────────────────────────────────────────
+
+func TestRawEntry_PostgresError_TileFallback_Redirects(t *testing.T) {
+	deps, store, _, p := newDeps(t)
+	deps.WAL = nil                                   // the read-only ledger runs WAL==nil (redirect-only)
+	store.err = errors.New("pg: connection refused") // entry_index unreachable
+
+	const seq = 7
+	hash := hashFor("pg-off-entry")
+	p.urlByPair[seq] = "https://cdn.example/entries/7/data"
+	deps.SeqHashFallback = func(_ context.Context, s uint64) ([32]byte, bool, error) {
+		if s == seq {
+			return hash, true, nil
+		}
+		return [32]byte{}, false, nil
+	}
+
+	rec := httptest.NewRecorder()
+	NewRawEntryHandler(deps)(rec, makeRequest(seq))
+
+	if rec.Code != http.StatusFound {
+		t.Fatalf("PG-off raw: got %d, want 302 (tile fallback → bytestore redirect)", rec.Code)
+	}
+	if got := rec.Header().Get("Location"); got != "https://cdn.example/entries/7/data" {
+		t.Fatalf("Location: got %q, want the public URL", got)
+	}
+	if rec.Header().Get("X-Source") != "bytestore" {
+		t.Errorf("X-Source: got %q, want bytestore", rec.Header().Get("X-Source"))
+	}
+}
+
+func TestRawEntry_PostgresError_TileFallback_BeyondHorizon_404(t *testing.T) {
+	deps, store, _, _ := newDeps(t)
+	deps.WAL = nil
+	store.err = errors.New("pg: connection refused")
+	// Fallback reports the seq is beyond the cosigned horizon → genuine 404.
+	deps.SeqHashFallback = func(_ context.Context, _ uint64) ([32]byte, bool, error) {
+		return [32]byte{}, false, nil
+	}
+
+	rec := httptest.NewRecorder()
+	NewRawEntryHandler(deps)(rec, makeRequest(999))
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("PG-off raw beyond horizon: got %d, want 404", rec.Code)
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────
 // 9) WAL transport error (non-NotFound) → 500
 // ─────────────────────────────────────────────────────────────────────
 

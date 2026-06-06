@@ -122,8 +122,16 @@ type EntryReadDeps struct {
 	// PublicURLer composes the credential-free 302 target. Required
 	// for the redirect path; nil → 500 on shipped entries.
 	PublicURLer PublicURLer
-	LogDID      string
-	Logger      *slog.Logger
+	// SeqHashFallback resolves seq→canonical_hash from the entry tile (object
+	// store) when EntryStore.FetchHashBySeq fails because Postgres is
+	// unavailable. Optional: nil preserves PG-only behavior (a lookup error is a
+	// 500). When set (the PG-off read front), the raw handler uses it on a
+	// FetchHashBySeq error and serves bytes via the bytestore redirect — the
+	// reader runs WAL==nil, so the redirect is the only serving mode regardless.
+	// found=false means seq is beyond the cosigned horizon → 404.
+	SeqHashFallback func(ctx context.Context, seq uint64) (hash [32]byte, found bool, err error)
+	LogDID          string
+	Logger          *slog.Logger
 }
 
 const maxBatchSize = 1000
@@ -256,6 +264,26 @@ func NewRawEntryHandler(deps *EntryReadDeps) http.HandlerFunc {
 		// Postgres entry_index.
 		hash, logTime, isGhost, found, err := deps.EntryStore.FetchHashBySeq(ctx, seq)
 		if err != nil {
+			// Postgres entry_index unavailable. PG-off read front: fall back to
+			// the entry tile (object store) for seq→hash, then serve via the
+			// bytestore redirect (the reader runs WAL==nil, so redirect is the
+			// only serving mode anyway).
+			if deps.SeqHashFallback != nil {
+				h, ok, ferr := deps.SeqHashFallback(ctx, seq)
+				if ferr != nil {
+					deps.Logger.Error("raw entry: tile seq lookup", "seq", seq, "error", ferr)
+					writeTypedError(ctx, w, apitypes.ErrorClassDBQueryFailed,
+						http.StatusInternalServerError, "lookup failed")
+					return
+				}
+				if !ok {
+					writeTypedError(ctx, w, apitypes.ErrorClassNotFound,
+						http.StatusNotFound, "entry not found")
+					return
+				}
+				deps.serveBytestoreRedirect(w, r, seq, h, time.Time{})
+				return
+			}
 			deps.Logger.Error("raw entry: seq lookup", "seq", seq, "error", err)
 			writeTypedError(ctx, w, apitypes.ErrorClassDBQueryFailed,
 				http.StatusInternalServerError, "lookup failed")

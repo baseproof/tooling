@@ -143,6 +143,18 @@ func (zeroReceipts) ReceiptRoot(context.Context, uint64, uint64) ([32]byte, erro
 
 func rootN(n byte) [32]byte { var r [32]byte; r[0] = n; return r }
 
+// fakeReceiptArchiver records the archive call and can be forced to fail (to prove
+// archiving is best-effort — a write error must not fail the checkpoint).
+type fakeReceiptArchiver struct {
+	calls []struct{ coveringSize, fromSeq, toSeq uint64 }
+	err   error
+}
+
+func (f *fakeReceiptArchiver) ArchiveReceiptCommits(_ context.Context, coveringSize, fromSeq, toSeq uint64) error {
+	f.calls = append(f.calls, struct{ coveringSize, fromSeq, toSeq uint64 }{coveringSize, fromSeq, toSeq})
+	return f.err
+}
+
 func newLoop(c *fakeCommit, f *fakeFrontier, t *fakeTiles, w *fakeWitness, p *fakePublisher) *CheckpointLoop {
 	// integrated defaults to "every committed size is durable" so tests asserting a
 	// publish are not gated by the Merkle-durability check. Tests exercising the
@@ -191,6 +203,37 @@ func TestCheckpoint_PublishesDurableRoot(t *testing.T) {
 	}
 	if len(witness.cosigns) != 1 || witness.cosigns[0].SMTRoot != cRoot {
 		t.Fatal("witness was not asked to cosign the durable root")
+	}
+}
+
+// TestCheckpoint_ArchivesReceiptCommits_BestEffort: after a successful publish the
+// loop invokes the receipt archiver with (coveringSize=tree_size, fromSeq=prev
+// published size, toSeq=cSeq), and an archiver error is SWALLOWED (best-effort) —
+// the checkpoint still succeeds and the horizon still advances (cf. 1.1a).
+func TestCheckpoint_ArchivesReceiptCommits_BestEffort(t *testing.T) {
+	cRoot := rootN(0x11)
+	commit := &fakeCommit{seq: 41, root: cRoot}
+	frontier := &fakeFrontier{root: smt.EmptyHash}
+	tiles := newFakeTiles()
+	witness := &fakeWitness{}
+	pub := &fakePublisher{}
+	loop := newLoop(commit, frontier, tiles, witness, pub)
+
+	arch := &fakeReceiptArchiver{err: errors.New("object store down")}
+	loop.SetReceiptArchiver(arch)
+
+	// Best-effort: an archiver error must NOT fail the checkpoint.
+	if err := loop.CheckpointOnce(context.Background()); err != nil {
+		t.Fatalf("CheckpointOnce must succeed despite archive error: %v", err)
+	}
+	if len(pub.published) != 1 {
+		t.Fatalf("publish must still happen, got %d", len(pub.published))
+	}
+	if len(arch.calls) != 1 {
+		t.Fatalf("want 1 archive call, got %d", len(arch.calls))
+	}
+	if c := arch.calls[0]; c.coveringSize != 42 || c.fromSeq != 0 || c.toSeq != 41 {
+		t.Fatalf("archive call = (cover=%d, from=%d, to=%d), want (42,0,41)", c.coveringSize, c.fromSeq, c.toSeq)
 	}
 }
 

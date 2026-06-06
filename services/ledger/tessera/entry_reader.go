@@ -21,6 +21,8 @@ DESCRIPTION:
 package tessera
 
 import (
+	"context"
+	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
 )
@@ -58,4 +60,51 @@ func ParseEntryBundle(tileData []byte, offset uint64) ([]byte, error) {
 		pos += entryLen
 	}
 	return nil, fmt.Errorf("tessera/entry_reader: offset %d not found in tile", offset)
+}
+
+// SeqHashFromEntryTile resolves a leaf sequence to its 32-byte canonical hash
+// (envelope.EntryIdentity) by reading the entry tile from the object store —
+// no Postgres. treeSize (the cosigned horizon) bounds the lookup (seq >=
+// treeSize → found=false, a genuine not-found rather than an error) and fixes
+// the frontier bundle's partial width so the last, not-yet-full bundle is read
+// from its tile/entries/<N>.p/<w> path. Earlier (full) bundles use width 0 →
+// the full tile/entries/<N> path.
+//
+// Used by the PG-off read front so GET /v1/entries/{seq}/raw resolves seq→hash
+// without the entry_index table: the reader serves the bytes via a bytestore
+// redirect keyed on (seq, hash).
+func SeqHashFromEntryTile(ctx context.Context, tr *TileReader, treeSize, seq uint64) (hash [32]byte, found bool, err error) {
+	if tr == nil {
+		return hash, false, fmt.Errorf("tessera/entry_reader: nil TileReader")
+	}
+	if seq >= treeSize {
+		return hash, false, nil
+	}
+
+	bundleIndex := seq / EntriesPerTile
+	offset := seq % EntriesPerTile
+
+	// The frontier bundle (the one holding the horizon's last leaf) is partial
+	// when treeSize is not a multiple of EntriesPerTile; FetchEntryBundle needs
+	// its width to locate the tile/entries/<N>.p/<w> object. Every earlier
+	// bundle is full → width 0.
+	var width uint8
+	if bundleIndex == treeSize/EntriesPerTile {
+		width = uint8(treeSize % EntriesPerTile)
+	}
+
+	data, err := tr.FetchEntryBundle(ctx, bundleIndex, width)
+	if err != nil {
+		return hash, false, fmt.Errorf("tessera/entry_reader: read entry bundle %d: %w", bundleIndex, err)
+	}
+	leaf, err := ParseEntryBundle(data, offset)
+	if err != nil {
+		return hash, false, fmt.Errorf("tessera/entry_reader: parse entry bundle %d offset %d: %w", bundleIndex, offset, err)
+	}
+	if len(leaf) != sha256.Size {
+		return hash, false, fmt.Errorf("tessera/entry_reader: entry-tile leaf at seq %d is %d bytes, want %d (hash-only tile expected)",
+			seq, len(leaf), sha256.Size)
+	}
+	copy(hash[:], leaf)
+	return hash, true, nil
 }

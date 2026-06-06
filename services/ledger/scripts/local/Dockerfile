@@ -54,6 +54,9 @@ RUN --mount=type=cache,target=/go/pkg/mod \
       -trimpath -buildvcs=false -ldflags "-X main.Version=${VERSION}" \
       -o /ledger ./cmd/ledger && \
     CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build \
+      -trimpath -buildvcs=false -ldflags "-X main.Version=${VERSION}" \
+      -o /ledger-reader ./cmd/ledger-reader && \
+    CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build \
       -trimpath -buildvcs=false -o /submit-stamp ./cmd/submit-stamp && \
     CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build \
       -trimpath -buildvcs=false -o /init-network ./cmd/init-network && \
@@ -76,6 +79,10 @@ RUN --mount=type=secret,id=ca_bundle \
 
 WORKDIR /
 COPY --from=builder /ledger /ledger
+# ledger-reader is the PG-OFF read front (Phase 1, 1.3): serves horizon / inclusion
+# / SMT / entry / receipt proofs reconstructed from the object-store archives when
+# Postgres is unreachable. Reachable via `--entrypoint /ledger-reader`.
+COPY --from=builder /ledger-reader /ledger-reader
 # Ops CLIs (reachable via `--entrypoint /submit-stamp` etc.) for image-only
 # seeding + bootstrap generation — the daemon stays the default entrypoint.
 COPY --from=builder /submit-stamp /submit-stamp

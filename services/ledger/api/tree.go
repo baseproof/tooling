@@ -41,7 +41,12 @@ type TreeDeps struct {
 	TreeHeadStore TreeHeadFetcher
 	Inclusion     InclusionProver
 	Consistency   ConsistencyProver
-	Logger        *slog.Logger
+	// Horizon is the object-store-backed cosigned tree head. When set, the
+	// inclusion handler falls back to it for the default/maximum provable tree
+	// size if TreeHeadStore.Latest is unavailable (the PG-off read front). nil
+	// preserves PG-only behavior. Optional.
+	Horizon HorizonReader
+	Logger  *slog.Logger
 }
 
 // NewTreeHeadHandler creates GET /v1/tree/head[?size=N].
@@ -150,21 +155,35 @@ func NewTreeInclusionHandler(deps *TreeDeps) http.HandlerFunc {
 			return
 		}
 
-		head, err := deps.TreeHeadStore.Latest(ctx)
-		if err != nil || head == nil {
+		// Maximum provable tree size for the proof. Prefer the live cosigned head
+		// from Postgres (TreeHeadStore.Latest); when PG is unavailable (the PG-off
+		// read front) fall back to the cosigned horizon from the object store,
+		// which lags the live head but is always a witnessed, provable size. A
+		// leaf is only provable in a tree that already commits it, so maxSize also
+		// bounds the optional ?tree_size=N override.
+		var maxSize uint64
+		if head, herr := deps.TreeHeadStore.Latest(ctx); herr == nil && head != nil {
+			maxSize = head.TreeSize
+		} else if deps.Horizon != nil {
+			hh, _, rerr := deps.Horizon.ReadHorizon(ctx)
+			if rerr != nil || hh == nil {
+				writeTypedError(ctx, w, apitypes.ErrorClassDBQueryFailed,
+					http.StatusServiceUnavailable, "no tree head available")
+				return
+			}
+			maxSize = hh.TreeSize
+		} else {
 			writeTypedError(ctx, w, apitypes.ErrorClassDBQueryFailed,
 				http.StatusServiceUnavailable, "no tree head available")
 			return
 		}
 
 		// Optional ?tree_size=N requests the proof against a SPECIFIC tree size
-		// (default: the current head). An auditor rebuilding the witness-rotation
-		// chain needs a proof bound to the witness-COSIGNED horizon (which lags
-		// the live head), not the live sub-quorum head — so it pins the size to
-		// horizon.TreeSize here. N must be in (seq, head.TreeSize]: a leaf is only
-		// provable in a tree that already commits it, and we cannot prove against
-		// a future size we have not built.
-		treeSize := head.TreeSize
+		// (default: maxSize). An auditor rebuilding the witness-rotation chain
+		// needs a proof bound to the witness-COSIGNED horizon (which lags the live
+		// head); ?tree_size=N pins it. N must be in (seq, maxSize]: we cannot prove
+		// against a future size we have not built.
+		treeSize := maxSize
 		if ts := r.URL.Query().Get("tree_size"); ts != "" {
 			parsed, perr := strconv.ParseUint(ts, 10, 64)
 			if perr != nil {
@@ -172,10 +191,10 @@ func NewTreeInclusionHandler(deps *TreeDeps) http.HandlerFunc {
 					http.StatusBadRequest, "invalid tree_size")
 				return
 			}
-			if parsed == 0 || parsed > head.TreeSize {
+			if parsed == 0 || parsed > maxSize {
 				writeTypedError(ctx, w, apitypes.ErrorClassInvalidQueryParam,
 					http.StatusBadRequest,
-					fmt.Sprintf("tree_size %d out of range (1..%d)", parsed, head.TreeSize))
+					fmt.Sprintf("tree_size %d out of range (1..%d)", parsed, maxSize))
 				return
 			}
 			treeSize = parsed
@@ -187,11 +206,27 @@ func NewTreeInclusionHandler(deps *TreeDeps) http.HandlerFunc {
 			return
 		}
 
-		proof, err := deps.Inclusion.RawInclusionProof(seq, treeSize)
-		if err != nil {
+		// Negative-answer audit (PG-off read front): a leaf is provable iff the
+		// tree of size treeSize commits it, i.e. seq < treeSize (leaves are
+		// 0-indexed). seq beyond the tree is a GENUINE cryptographic negative →
+		// 404. Past that bound a RawInclusionProof failure is a tile/object-store
+		// READ error, not absence: surface it as 500. Returning 404 there would
+		// let a transient backend hiccup masquerade as proof the leaf does not
+		// exist — on a PG-off front the object store is the sole backend, so this
+		// distinction is load-bearing.
+		if seq >= treeSize {
 			writeTypedError(ctx, w, apitypes.ErrorClassProofGenFailed,
 				http.StatusNotFound,
-				fmt.Sprintf("inclusion proof: %s", err))
+				fmt.Sprintf("seq %d not in tree of size %d", seq, treeSize))
+			return
+		}
+
+		proof, err := deps.Inclusion.RawInclusionProof(seq, treeSize)
+		if err != nil {
+			deps.Logger.Error("inclusion proof", "seq", seq, "tree_size", treeSize, "error", err)
+			writeTypedError(ctx, w, apitypes.ErrorClassProofGenFailed,
+				http.StatusInternalServerError,
+				"inclusion proof generation failed")
 			return
 		}
 

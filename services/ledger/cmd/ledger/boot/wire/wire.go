@@ -357,6 +357,15 @@ func Wire(ctx context.Context, cfg Config, d *deps.AppDeps) error {
 		if d.WALCommitter != nil {
 			checkpointLoop.SetEntryTraceReader(walEntryTrace{wal: d.WALCommitter})
 		}
+		// 1.2a: best-effort archive each published checkpoint's dense receipt-commitment
+		// set to the shared object store (PutObject — the S3/SeaweedFS standard
+		// interface) so receipt proofs reconstruct PG-free. Re-gathers the SAME set the
+		// cosigned ReceiptRoot was computed from; an object-store write error never
+		// stalls a checkpoint. Object-store deployments only (POSIX single-node co-locates PG).
+		if s3, ok := d.ByteStore.(*bytestore.S3); ok {
+			checkpointLoop.SetReceiptArchiver(store.NewReceiptArchiveWriter(
+				store.NewEntryIndexReceiptRanger(d.PgPool.DB, cfg.LogDID), s3))
+		}
 		d.Logger.Info("checkpoint loop enabled", "tile_dir", tileDir, "quorum_k", cfg.WitnessQuorumK)
 	}
 
@@ -922,6 +931,21 @@ func composeHandlers(
 		gossipFeedH = d.GossipBundle.FeedHandler
 	}
 
+	// 1.2a: receipt proofs default to the PG ranger (entry_index). When the
+	// object-store archive is available (same horizon reader the cold-seq checkpoint
+	// archive uses, now also exposing ReadReceiptCommits), wrap it so receipts serve
+	// PG-free as a graceful fallback — entry_index GC / PG-off — without masking a
+	// genuine "no receipt for this seq".
+	pgReceipts := store.NewEntryIndexReceiptRanger(d.PgPool.DB, cfg.LogDID)
+	var receiptProver api.ReceiptProver = pgReceipts
+	if rcr, ok := horizonReader.(store.ReceiptCommitReader); ok {
+		receiptProver = &api.FallbackReceiptProver{
+			Primary:  pgReceipts,
+			Fallback: store.NewArchiveReceiptRanger(rcr, cfg.LogDID),
+			Logger:   d.Logger,
+		}
+	}
+
 	return api.Handlers{
 		Submission:      submitHandler,
 		BatchSubmission: batchSubmitHandler,
@@ -933,7 +957,7 @@ func composeHandlers(
 		SMTRoot:         api.NewSMTRootHandler(smtDeps),
 		ReceiptProof: api.NewReceiptProofHandler(&api.ReceiptDeps{
 			Heads:    d.TreeHeadStore,
-			Receipts: store.NewEntryIndexReceiptRanger(d.PgPool.DB, cfg.LogDID),
+			Receipts: receiptProver,
 			MinSigs:  cfg.WitnessQuorumK,
 			Logger:   d.Logger,
 		}),
