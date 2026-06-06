@@ -29,10 +29,12 @@ import (
 	"github.com/baseproof/baseproof/crypto/cosign"
 
 	"github.com/baseproof/tooling/services/ledger/api"
+	"github.com/baseproof/tooling/services/ledger/bytestore"
 	"github.com/baseproof/tooling/services/ledger/cmd/ledger/boot/deps"
 	"github.com/baseproof/tooling/services/ledger/gossipnet"
 	"github.com/baseproof/tooling/services/ledger/lifecycle"
 	"github.com/baseproof/tooling/services/ledger/quorum"
+	"github.com/baseproof/tooling/services/ledger/store"
 	"github.com/baseproof/tooling/services/ledger/tessera"
 	"github.com/baseproof/tooling/services/ledger/witnessclient"
 )
@@ -279,6 +281,13 @@ func wireRotationHandler(
 		// rejected before it is committed on-log.
 		cfg.GenesisBootstrapDocument.GenesisSignaturePolicy.AllowedCosignSchemeTags,
 	)
+
+	// 1.2b: refresh the witness-rotation INDEX archive after each applied rotation, so
+	// a PG-off read front reconstructs FetchWitnessRotationChain. Object-store
+	// deployments only (PutObject — the S3/SeaweedFS standard interface).
+	if s3, ok := d.ByteStore.(*bytestore.S3); ok {
+		handler.WithRotationIndexArchiver(store.NewRotationIndexArchiveJob(d.PgPool.DB, s3))
+	}
 
 	// SDK gossip emitter when the Sink is available; logging
 	// emitter when gossip is otherwise unwired (single-ledger

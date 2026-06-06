@@ -46,3 +46,30 @@ func RotationSeqsFromWitnessSets(ctx context.Context, db *pgxpool.Pool) ([]uint6
 	}
 	return seqs, nil
 }
+
+// RotationIndexArchiveJob enumerates the rotation index from witness_sets and writes
+// it to the object store — the single operation shared by the post-rotation refresh
+// (witnessclient ProcessRotation) and the archive backfill (1.x). Best-effort at
+// both call sites: the caller logs the error and never stalls on it.
+type RotationIndexArchiveJob struct {
+	db     *pgxpool.Pool
+	writer *RotationIndexArchiveWriter
+}
+
+// NewRotationIndexArchiveJob composes the PG source and the object-store writer. A nil
+// db or obj makes ArchiveCurrentIndex a no-op, so it can be wired unconditionally.
+func NewRotationIndexArchiveJob(db *pgxpool.Pool, obj objectPutGetter) *RotationIndexArchiveJob {
+	return &RotationIndexArchiveJob{db: db, writer: NewRotationIndexArchiveWriter(obj)}
+}
+
+// ArchiveCurrentIndex enumerates the current rotation seqs and archives the index.
+func (j *RotationIndexArchiveJob) ArchiveCurrentIndex(ctx context.Context) error {
+	if j == nil || j.db == nil {
+		return nil
+	}
+	seqs, err := RotationSeqsFromWitnessSets(ctx, j.db)
+	if err != nil {
+		return err
+	}
+	return j.writer.ArchiveRotationIndex(ctx, seqs)
+}

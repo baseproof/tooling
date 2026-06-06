@@ -103,6 +103,17 @@ type RotationHandler struct {
 	// rotation unwired (dormant); ProcessRotation fails closed rather
 	// than persist an unprovable position. See RotationLogAppender.
 	appender RotationLogAppender
+
+	// indexArchiver, when non-nil, best-effort refreshes the witness-rotation INDEX
+	// archive after each applied rotation (1.2b), so a PG-off read front reconstructs
+	// FetchWitnessRotationChain. A write error never fails a rotation.
+	indexArchiver rotationIndexArchiver
+}
+
+// rotationIndexArchiver best-effort refreshes the witness-rotation index archive
+// (satisfied by store.RotationIndexArchiveJob). Optional; see WithRotationIndexArchiver.
+type rotationIndexArchiver interface {
+	ArchiveCurrentIndex(ctx context.Context) error
 }
 
 // NewRotationHandler creates a rotation handler over the shared witness
@@ -161,6 +172,14 @@ func (rh *RotationHandler) WithCosignSchemePolicy(allowed []uint8) *RotationHand
 // chain. Mirrors WithEmitter.
 func (rh *RotationHandler) WithAppender(a RotationLogAppender) *RotationHandler {
 	rh.appender = a
+	return rh
+}
+
+// WithRotationIndexArchiver wires the best-effort archiver that refreshes the
+// witness-rotation index after each applied rotation (1.2b). nil = no inline
+// archiving (the backfill job still regenerates it). Returns rh for chaining.
+func (rh *RotationHandler) WithRotationIndexArchiver(a rotationIndexArchiver) *RotationHandler {
+	rh.indexArchiver = a
 	return rh
 }
 
@@ -339,6 +358,15 @@ func (rh *RotationHandler) ProcessRotation(
 				"error", ferr)
 		} else {
 			rh.emitter.Emit(ctx, finding)
+		}
+	}
+
+	// Step 6: best-effort refresh the witness-rotation INDEX archive (1.2b) so a
+	// PG-off read front reconstructs FetchWitnessRotationChain. nil-safe; an archive
+	// error is logged and dropped — it never fails a rotation that already applied.
+	if rh.indexArchiver != nil {
+		if aErr := rh.indexArchiver.ArchiveCurrentIndex(ctx); aErr != nil {
+			rh.logger.WarnContext(ctx, "witness/rotation: rotation-index archive failed (best-effort)", "error", aErr)
 		}
 	}
 
