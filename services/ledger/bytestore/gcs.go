@@ -9,7 +9,7 @@ file.
 
 OBJECT LAYOUT:
 
-	All adapters share layoutKey: <prefix>/<seq:016x>/<hash_hex>
+	All adapters share layoutKey: <prefix>/<shard>/<seq:016x>/<hash_hex>
 
 CACHING:
 

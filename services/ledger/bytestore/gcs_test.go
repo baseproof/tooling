@@ -8,7 +8,7 @@ store/sequence_cursor_test.go and store/commitment_fetcher_test.go.
 
 Coverage:
   - Constructor validation (empty bucket).
-  - Object naming uses the canonical layoutKey (<prefix>/<seq:016x>/<hash_hex>).
+  - Object naming uses the canonical layoutKey (<prefix>/<shard>/<seq:016x>/<hash_hex>).
   - WriteEntry → ReadEntry round-trip.
   - ReadEntry on missing key returns ErrNotFound (also wraps GCS's
     ErrObjectNotExist).
@@ -156,7 +156,7 @@ func TestGCS_ObjectName_UsesLayoutKey(t *testing.T) {
 	store := &GCS{objectPrefix: "entries"}
 	hash := sha256.Sum256([]byte("k"))
 	got := store.keyOf(42, hash)
-	want := fmt.Sprintf("entries/%016x/%x", uint64(42), hash[:])
+	want := fmt.Sprintf("entries/%02x/%016x/%x", hash[0], uint64(42), hash[:])
 	if got != want {
 		t.Errorf("keyOf: got %q, want %q", got, want)
 	}

@@ -62,8 +62,8 @@ func TestS3_Namespace_IsolatesRawSurface(t *testing.T) {
 	// Entries are content-addressed and NOT namespaced: same (seq,hash) → same
 	// flat key under either namespace; two logs never collide because distinct
 	// content yields a distinct hash (and thus a distinct key).
-	if got, want := a.keyOf(7, hash), fmt.Sprintf("entries/%016x/%x", uint64(7), hash[:]); got != want {
-		t.Errorf("entry keyOf = %q, want flat %q (entries are not namespaced)", got, want)
+	if got, want := a.keyOf(7, hash), fmt.Sprintf("entries/%02x/%016x/%x", hash[0], uint64(7), hash[:]); got != want {
+		t.Errorf("entry keyOf = %q, want %q (entries are not namespaced)", got, want)
 	}
 	if a.keyOf(7, hash) != b.keyOf(7, hash) {
 		t.Error("entry keyOf must be namespace-independent (content-addressed surface)")

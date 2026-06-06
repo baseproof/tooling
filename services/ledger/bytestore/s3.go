@@ -28,8 +28,10 @@ PATH-STYLE vs VIRTUAL-HOST URLS:
 
 OBJECT LAYOUT:
 
-	Same layoutKey as GCS: <prefix>/<seq:016x>/<hash_hex>. A bucket
-	written by GCS can be read by S3 and vice versa.
+	Same layoutKey as GCS: <prefix>/<shard>/<seq:016x>/<hash_hex>, where
+	<shard> is the first hash byte (256 prefixes) so writes spread across
+	partitions instead of hot-spotting a monotonic seq. A bucket written
+	by GCS can be read by S3 and vice versa.
 
 PUBLIC URLS:
 
@@ -306,7 +308,7 @@ func NewS3(ctx context.Context, cfg S3Config) (*S3, error) {
 	}, nil
 }
 
-// keyOf is the entry path: <objectPrefix>/<seq:016x>/<hash>. Entries are
+// keyOf is the entry path: <objectPrefix>/<shard>/<seq:016x>/<hash>. Entries are
 // content-addressed (the key carries the hash), so they never collide across logs
 // and are NOT namespaced — that keeps the entry surface readable by the offline
 // tools and the 302 PublicURL without a namespace handshake.
