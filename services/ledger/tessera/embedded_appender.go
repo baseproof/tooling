@@ -609,17 +609,49 @@ func (e *EmbeddedAppender) PublishCosignedCheckpoint(
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	// Publish the canonical wire shape (lowercase-hex) — the same contract
-	// /v1/tree/head and gossip use, NOT the Go-layout-native json.Marshal(head).
-	// The published checkpoint is the cross-version trust anchor; the SDK decodes
-	// it via types.WireCosignedTreeHead.ToCosignedTreeHead.
+	return publishCheckpointFiles(e.publicCheckpointPath, head)
+}
+
+// checkpointArchiveDir is the subdirectory (beside the latest cosigned-checkpoint)
+// holding the never-overwritten per-tree_size archive of cosigned heads. The
+// readers derive the same scheme — keep these in sync:
+//   - api/horizon.go      checkpointArchiveObject  (POSIX TileBackend)
+//   - store/horizon_s3.go checkpointArchiveKey     (shared S3)
+const checkpointArchiveDir = "checkpoints"
+
+// archivedCheckpointPath is the filesystem path of the per-size archive copy
+// that sits beside the latest cosigned-checkpoint at publicPath:
+// <dir>/checkpoints/<treeSize>.
+func archivedCheckpointPath(publicPath string, treeSize uint64) string {
+	return filepath.Join(filepath.Dir(publicPath), checkpointArchiveDir,
+		strconv.FormatUint(treeSize, 10))
+}
+
+// publishCheckpointFiles writes the cosigned head to BOTH the latest publicPath
+// (overwritten each publish) and its per-tree_size archive sibling (never
+// overwritten across sizes), each atomically. The archive durably retains every
+// cosigned head — with its witness cosignatures — so historical heads stay
+// fetchable PG-free after the latest checkpoint advances; this is the anchor a
+// cold-seq inclusion proof binds to (1.1a). Separated from the appender so the
+// dual-write is unit-testable without a live tessera backend.
+//
+// Both files carry the canonical wire shape (lowercase-hex) — the same contract
+// /v1/tree/head and gossip use — decoded by types.WireCosignedTreeHead.ToCosignedTreeHead.
+func publishCheckpointFiles(publicPath string, head types.CosignedTreeHead) error {
 	body, err := json.Marshal(types.FromCosignedTreeHead(head))
 	if err != nil {
 		return fmt.Errorf("tessera/embedded: marshal cosigned head: %w", err)
 	}
-	if err := atomicWriteFile(e.publicCheckpointPath, body); err != nil {
-		return fmt.Errorf("tessera/embedded: write cosigned checkpoint %s: %w",
-			e.publicCheckpointPath, err)
+	if err := atomicWriteFile(publicPath, body); err != nil {
+		return fmt.Errorf("tessera/embedded: write cosigned checkpoint %s: %w", publicPath, err)
+	}
+	archivePath := archivedCheckpointPath(publicPath, head.TreeSize)
+	if err := os.MkdirAll(filepath.Dir(archivePath), 0o755); err != nil {
+		return fmt.Errorf("tessera/embedded: mkdir checkpoint archive %s: %w",
+			filepath.Dir(archivePath), err)
+	}
+	if err := atomicWriteFile(archivePath, body); err != nil {
+		return fmt.Errorf("tessera/embedded: write archived checkpoint %s: %w", archivePath, err)
 	}
 	return nil
 }
