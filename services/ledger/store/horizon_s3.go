@@ -73,6 +73,24 @@ func (p *S3CheckpointPublisher) PublishCosignedCheckpoint(ctx context.Context, h
 	return nil
 }
 
+// ArchiveCheckpointAt writes ONLY the per-size archive copy (checkpoints/<size>) for
+// head — NOT the latest horizon. The backfill job (1.x) uses it to regenerate
+// pre-archive history without moving the horizon backward. Idempotent: the same head
+// re-archives to the same bytes at the same key.
+func (p *S3CheckpointPublisher) ArchiveCheckpointAt(ctx context.Context, head sdktypes.CosignedTreeHead) error {
+	if head.TreeSize == 0 {
+		return nil
+	}
+	body, err := json.Marshal(sdktypes.FromCosignedTreeHead(head))
+	if err != nil {
+		return fmt.Errorf("store/horizon-s3: marshal head %d: %w", head.TreeSize, err)
+	}
+	if err := p.obj.PutObject(ctx, checkpointArchiveKey(head.TreeSize), body); err != nil {
+		return fmt.Errorf("store/horizon-s3: archive checkpoint %d: %w", head.TreeSize, err)
+	}
+	return nil
+}
+
 // checkpointArchiveKey is the LOGICAL object key for the per-tree_size archived
 // cosigned head — the never-overwritten copy published beside the latest
 // cosigned-checkpoint. MUST match the writer + readers: tessera

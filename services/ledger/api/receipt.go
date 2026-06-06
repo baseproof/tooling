@@ -32,34 +32,15 @@ import (
 	"github.com/baseproof/baseproof/types"
 
 	"github.com/baseproof/tooling/services/ledger/apitypes"
+	"github.com/baseproof/tooling/services/ledger/store"
 )
 
 // apitypesHeadToSDK converts the ledger's apitypes cosigned head to the SDK's
 // types.CosignedTreeHead (the shape EncodeReceiptProof + the v2 verifier consume).
-// Each apitypes signature carries a JSON-encoded types.WitnessSignature — the same
-// mapping the bundle head adapter uses; an unparseable signature is skipped (the
-// quorum check fails closed downstream if too many drop).
+// Delegates to store.HeadToSDK — the single mapping the backfill also uses, so a
+// stored head maps to the SDK shape identically on both paths.
 func apitypesHeadToSDK(h *apitypes.CosignedTreeHead) types.CosignedTreeHead {
-	if h == nil {
-		return types.CosignedTreeHead{}
-	}
-	sigs := make([]types.WitnessSignature, 0, len(h.Signatures))
-	for _, s := range h.Signatures {
-		var ws types.WitnessSignature
-		if err := json.Unmarshal(s.Signature, &ws); err != nil {
-			continue
-		}
-		sigs = append(sigs, ws)
-	}
-	return types.CosignedTreeHead{
-		TreeHead: types.TreeHead{
-			RootHash:    h.RootHash,
-			SMTRoot:     h.SMTRoot,
-			ReceiptRoot: h.ReceiptRoot,
-			TreeSize:    h.TreeSize,
-		},
-		Signatures: sigs,
-	}
+	return store.HeadToSDK(h)
 }
 
 // ReceiptHeadResolver resolves the published checkpoint a receipt proof binds to.
