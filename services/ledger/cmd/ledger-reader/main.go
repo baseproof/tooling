@@ -223,27 +223,7 @@ func run(logger *slog.Logger) error {
 		CommitmentStore: commitmentStore, Logger: logger,
 	}
 
-	handlers := api.Handlers{
-		Submission:      nil, // No POST /v1/entries in read-only mode.
-		TreeHead:        api.NewTreeHeadHandler(treeDeps),
-		TreeInclusion:   api.NewTreeInclusionHandler(treeDeps),
-		TreeConsistency: api.NewTreeConsistencyHandler(treeDeps),
-		SMTProof:        api.NewSMTProofHandler(smtDeps),
-		SMTBatchProof:   api.NewSMTBatchProofHandler(smtDeps),
-		SMTRoot:         api.NewSMTRootHandler(smtDeps),
-		CosignatureOf:   api.NewQueryCosignatureOfHandler(queryDeps),
-		TargetRoot:      api.NewQueryTargetRootHandler(queryDeps),
-		SignerDID:       api.NewQuerySignerDIDHandler(queryDeps),
-		SchemaRef:       api.NewQuerySchemaRefHandler(queryDeps),
-		Scan:            api.NewQueryScanHandler(queryDeps),
-		Difficulty:      api.NewDifficultyHandler(queryDeps),
-		EntryBySequence: api.NewEntryBySequenceHandler(entryReadDeps),
-		EntryBatch:      api.NewEntryBatchHandler(entryReadDeps),
-		EntryRaw:        api.NewRawEntryHandler(entryReadDeps),
-		SMTLeaf:         api.NewSMTLeafHandler(smtDeps),
-		SMTLeafBatch:    api.NewSMTLeafBatchHandler(smtDeps),
-		CommitmentQuery: api.NewDerivationCommitmentQueryHandler(commitDeps),
-	}
+	handlers := readerHandlers(treeDeps, smtDeps, queryDeps, entryReadDeps, commitDeps, horizon, logger)
 
 	serverCfg := api.DefaultServerConfig()
 	serverCfg.Addr = cfg.ServerAddr
@@ -276,6 +256,49 @@ func run(logger *slog.Logger) error {
 	wg.Wait()
 	logger.Info("ledger-reader stopped cleanly")
 	return nil
+}
+
+// readerHandlers assembles the read-only ledger's HTTP handler set. Extracted
+// from run() so the wiring — notably the cosigned-horizon route, which a PG-off
+// read front MUST mount — is unit-testable without standing up PG / S3 / the
+// object store.
+//
+// The Horizon route is the load-bearing addition: server.go mounts
+// GET /v1/tree/horizon iff handlers.Horizon != nil, and an offline proof binds
+// to the published cosigned head this serves, so a read front that omits it
+// leaves clients with no anchor to fetch. It is built from the SAME
+// HorizonReader smtDeps already uses for as-of proof serving.
+func readerHandlers(
+	treeDeps *api.TreeDeps,
+	smtDeps *api.SMTDeps,
+	queryDeps *api.QueryDeps,
+	entryReadDeps *api.EntryReadDeps,
+	commitDeps *api.DerivationCommitmentDeps,
+	horizon api.HorizonReader,
+	logger *slog.Logger,
+) api.Handlers {
+	return api.Handlers{
+		Submission:      nil, // No POST /v1/entries in read-only mode.
+		TreeHead:        api.NewTreeHeadHandler(treeDeps),
+		TreeInclusion:   api.NewTreeInclusionHandler(treeDeps),
+		TreeConsistency: api.NewTreeConsistencyHandler(treeDeps),
+		Horizon:         api.NewCosignedCheckpointHandler(horizon, logger),
+		SMTProof:        api.NewSMTProofHandler(smtDeps),
+		SMTBatchProof:   api.NewSMTBatchProofHandler(smtDeps),
+		SMTRoot:         api.NewSMTRootHandler(smtDeps),
+		CosignatureOf:   api.NewQueryCosignatureOfHandler(queryDeps),
+		TargetRoot:      api.NewQueryTargetRootHandler(queryDeps),
+		SignerDID:       api.NewQuerySignerDIDHandler(queryDeps),
+		SchemaRef:       api.NewQuerySchemaRefHandler(queryDeps),
+		Scan:            api.NewQueryScanHandler(queryDeps),
+		Difficulty:      api.NewDifficultyHandler(queryDeps),
+		EntryBySequence: api.NewEntryBySequenceHandler(entryReadDeps),
+		EntryBatch:      api.NewEntryBatchHandler(entryReadDeps),
+		EntryRaw:        api.NewRawEntryHandler(entryReadDeps),
+		SMTLeaf:         api.NewSMTLeafHandler(smtDeps),
+		SMTLeafBatch:    api.NewSMTLeafBatchHandler(smtDeps),
+		CommitmentQuery: api.NewDerivationCommitmentQueryHandler(commitDeps),
+	}
 }
 
 // -------------------------------------------------------------------------------------------------
