@@ -364,7 +364,8 @@ func NewSMTRootHandler(deps *SMTDeps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
 		var root [32]byte
-		if deps.RootState != nil {
+		switch {
+		case deps.RootState != nil:
 			r, err := deps.RootState.ReadRoot(ctx)
 			if err != nil {
 				writeTypedError(ctx, w, apitypes.ErrorClassProofGenFailed,
@@ -373,7 +374,27 @@ func NewSMTRootHandler(deps *SMTDeps) http.HandlerFunc {
 				return
 			}
 			root = r
-		} else {
+		case deps.Horizon != nil:
+			// PG-off read front (e.g. ledger-reader): no live RootState wired. Serve
+			// the witness-cosigned SMTRoot from the published horizon — the
+			// trust-rooted value the light-client warning above directs callers to,
+			// and the only correct answer when the live tree is unseeded (a reader
+			// runs no builder, so deps.Tree.Root would return EmptyHash). Mirrors the
+			// horizon-anchor priority of NewSMTProofHandler.
+			head, _, err := deps.Horizon.ReadHorizon(ctx)
+			if err != nil {
+				if errors.Is(err, os.ErrNotExist) {
+					writeTypedError(ctx, w, apitypes.ErrorClassHorizonUnavailable,
+						http.StatusServiceUnavailable, "no cosigned checkpoint published yet")
+					return
+				}
+				writeTypedError(ctx, w, apitypes.ErrorClassReadProjectionFailed,
+					http.StatusInternalServerError, "horizon read failed")
+				deps.Logger.Error("smt root: horizon read", "error", err)
+				return
+			}
+			root = head.SMTRoot
+		default:
 			r, err := deps.Tree.Root(ctx)
 			if err != nil {
 				writeTypedError(ctx, w, apitypes.ErrorClassProofGenFailed,
