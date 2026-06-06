@@ -52,6 +52,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync/atomic"
 	"time"
 
 	"github.com/baseproof/baseproof/core/smt"
@@ -180,6 +181,27 @@ type CheckpointLoop struct {
 	// cycle it begins (or its reason changes) and at Debug while it persists, so a
 	// multi-minute blob/witness/merkle stall is ONE Info line, not one per tick.
 	lastHoldReason string
+
+	// metricCommitted / metricPublished mirror the latest committed head tree_size
+	// and the latest published (witness-cosigned) horizon tree_size for the
+	// Phase-2 horizon-lag gauge. Written from the single loop goroutine, read from
+	// the metric-scrape goroutine — hence atomic. lag = committed - published.
+	metricCommitted atomic.Uint64
+	metricPublished atomic.Uint64
+}
+
+// HorizonLag returns committed head tree_size minus the published (witness-
+// cosigned) horizon tree_size — how far the durable, witnessed horizon trails
+// the committed log. ~0 in steady state; a sustained positive value is the
+// Phase-2 "checkpoint is falling behind" signal (blob/witness/merkle stall, or
+// the checkpoint loop not keeping up at load).
+func (l *CheckpointLoop) HorizonLag() int64 {
+	c := l.metricCommitted.Load()
+	p := l.metricPublished.Load()
+	if c <= p {
+		return 0
+	}
+	return int64(c - p)
 }
 
 // NewCheckpointLoop wires the loop. interval <= 0 defaults to 1s. receipts may be
@@ -294,6 +316,7 @@ func (l *CheckpointLoop) CheckpointOnce(ctx context.Context) error {
 	// treeSize is the CT-native position the head binds; the +1 lives ONLY in
 	// store.TreeSizeForCommittedSeq (see store/smt_root_state.go — never re-derive).
 	treeSize := store.TreeSizeForCommittedSeq(cSeq)
+	l.metricCommitted.Store(treeSize) // horizon-lag gauge numerator (every cycle)
 
 	// Skip-if-unchanged BEFORE opening any span: an idle tick (nothing newly
 	// committed) must NOT emit a checkpoint.cycle span, or the always-on batch
@@ -486,6 +509,7 @@ func (l *CheckpointLoop) CheckpointOnce(ctx context.Context) error {
 
 	span.SetAttributes(attribute.Int("ledger.signatures", len(cosigned.Signatures)))
 	l.lastPublishedSize = treeSize
+	l.metricPublished.Store(treeSize) // horizon-lag gauge denominator (on publish)
 	l.lastHoldReason = ""
 	l.logger.InfoContext(ctx, "checkpoint published",
 		"tree_size", treeSize,

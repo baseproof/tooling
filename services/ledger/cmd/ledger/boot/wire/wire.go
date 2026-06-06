@@ -95,6 +95,7 @@ import (
 	"github.com/baseproof/tooling/services/ledger/reservation"
 	"github.com/baseproof/tooling/services/ledger/sequencer"
 	"github.com/baseproof/tooling/services/ledger/shipper"
+	"github.com/baseproof/tooling/services/ledger/observability"
 	"github.com/baseproof/tooling/services/ledger/store"
 	"github.com/baseproof/tooling/services/ledger/store/indexes"
 	"github.com/baseproof/tooling/services/ledger/tessera"
@@ -371,7 +372,7 @@ func Wire(ctx context.Context, cfg Config, d *deps.AppDeps) error {
 	detector := composeIntegrityDetector(d)
 	smtDetector := composeSMTDetector(d)
 
-	installLateBoundGauges(cfg, d, seq, ship)
+	installLateBoundGauges(cfg, d, seq, ship, checkpointLoop)
 
 	if err := composeServers(cfg, d, handlers); err != nil {
 		return fmt.Errorf("wire: servers: %w", err)
@@ -2057,6 +2058,7 @@ func installLateBoundGauges(
 	d *deps.AppDeps,
 	seq *sequencer.Sequencer,
 	ship *shipper.Shipper,
+	checkpointLoop *builder.CheckpointLoop,
 ) {
 	if !cfg.MetricsEnable || d.MeterProvider == nil {
 		return
@@ -2074,6 +2076,29 @@ func installLateBoundGauges(
 	}
 	if installed := shipper.InstallCounters(shipMeter, ship); installed {
 		d.Logger.Info("metrics: shipper counters installed")
+	}
+
+	// Phase-2 durability gauges (sustained-load watch surface).
+	if observability.RegisterFloat64Gauge(shipMeter, "baseproof_shipper_aimd_limit",
+		"AIMD congestion-control concurrency limit (floats below MaxInFlight under store pressure).",
+		ship.AIMDLimit) {
+		d.Logger.Info("metrics: shipper AIMD limit gauge installed", "metric", "baseproof_shipper_aimd_limit")
+	}
+	if d.WALCommitter != nil {
+		walMeter := mp.Meter("github.com/baseproof/tooling/services/ledger/wal")
+		if observability.RegisterInt64Gauge(walMeter, "baseproof_wal_backlog_total",
+			"Sequenced-but-not-shipped WAL depth (highest sequenced seq minus HWM).",
+			d.WALCommitter.Backlog) {
+			d.Logger.Info("metrics: WAL backlog gauge installed", "metric", "baseproof_wal_backlog_total")
+		}
+	}
+	if checkpointLoop != nil {
+		builderMeter := mp.Meter("github.com/baseproof/tooling/services/ledger/builder")
+		if observability.RegisterInt64Gauge(builderMeter, "baseproof_horizon_lag_total",
+			"Committed head tree_size minus the published witness-cosigned horizon tree_size.",
+			checkpointLoop.HorizonLag) {
+			d.Logger.Info("metrics: horizon lag gauge installed", "metric", "baseproof_horizon_lag_total")
+		}
 	}
 }
 

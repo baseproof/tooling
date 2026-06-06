@@ -215,6 +215,18 @@ func (s *Shipper) Metrics() MetricsSnapshot {
 	return s.metrics.Snapshot()
 }
 
+// AIMDLimit returns the AIMD limiter's current concurrency limit — the
+// congestion-control signal for the Phase-2 durability gauge. It floats below
+// MaxInFlight under store pressure and ramps back on success; a settled value
+// near the ceiling means the store is keeping up, a depressed value means the
+// shipper is backing off. Safe to call concurrently with Run.
+func (s *Shipper) AIMDLimit() float64 {
+	if s == nil || s.limiter == nil {
+		return 0
+	}
+	return s.limiter.currentLimit()
+}
+
 // Run starts the pipeline and blocks until ctx is cancelled. All
 // goroutines (workers + hwmAdvancer + scanner) shut down cleanly
 // before Run returns.
