@@ -143,12 +143,12 @@ func (h *tileBackendHorizon) ReadReceiptCommits(ctx context.Context, coveringSiz
 // rotationChainKey.
 func rotationChainObject() string { return "witness-rotations" }
 
-// ReadRotationChain reads the archived witness-rotation chain blob from the object
-// store — PG-free. A wrapped os.ErrNotExist when no chain was archived (a
-// never-rotated network). Satisfies store.RotationChainReader (the source
-// store.ArchiveRotationChainFetcher reconstructs the SDK's FetchWitnessRotationChain
-// seam from).
-func (h *tileBackendHorizon) ReadRotationChain(ctx context.Context) ([]byte, error) {
+// ReadRotationIndex reads the archived witness-rotation INDEX blob (the rotation log
+// positions) from the object store — PG-free. A wrapped os.ErrNotExist when none was
+// archived (a never-rotated network). Satisfies store.RotationIndexReader (the source
+// store.ArchiveRotationChainFetcher rebuilds the SDK's FetchWitnessRotationChain seam
+// from, anchoring each element's inclusion proof at the requested tree size).
+func (h *tileBackendHorizon) ReadRotationIndex(ctx context.Context) ([]byte, error) {
 	raw, err := h.backend.ReadTileByPath(ctx, rotationChainObject())
 	if err != nil {
 		return nil, err
