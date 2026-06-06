@@ -357,6 +357,15 @@ func Wire(ctx context.Context, cfg Config, d *deps.AppDeps) error {
 		if d.WALCommitter != nil {
 			checkpointLoop.SetEntryTraceReader(walEntryTrace{wal: d.WALCommitter})
 		}
+		// 1.2a: best-effort archive each published checkpoint's dense receipt-commitment
+		// set to the shared object store (PutObject — the S3/SeaweedFS standard
+		// interface) so receipt proofs reconstruct PG-free. Re-gathers the SAME set the
+		// cosigned ReceiptRoot was computed from; an object-store write error never
+		// stalls a checkpoint. Object-store deployments only (POSIX single-node co-locates PG).
+		if s3, ok := d.ByteStore.(*bytestore.S3); ok {
+			checkpointLoop.SetReceiptArchiver(store.NewReceiptArchiveWriter(
+				store.NewEntryIndexReceiptRanger(d.PgPool.DB, cfg.LogDID), s3))
+		}
 		d.Logger.Info("checkpoint loop enabled", "tile_dir", tileDir, "quorum_k", cfg.WitnessQuorumK)
 	}
 
