@@ -133,6 +133,16 @@ type ReceiptRanger interface {
 	ReceiptRoot(ctx context.Context, fromSeq, toSeq uint64) ([32]byte, error)
 }
 
+// EntryTraceReader resolves the W3C traceparent stored on the WAL Meta of the
+// entry at a committed seq (the admission trace captured at Submit). Used to LINK
+// the checkpoint.cycle span to a bounded sample of the entries it commits, so an
+// operator can pivot checkpoint ⇄ entry trace. Satisfied by an adapter over
+// *wal.Committer (HashAt → MetaState → Meta.TraceContext). Optional: nil (or a
+// "" result for an unsampled/old entry) ⇒ that link is simply skipped.
+type EntryTraceReader interface {
+	TraceContextAt(ctx context.Context, seq uint64) (string, error)
+}
+
 // CheckpointLoop produces the horizon as the cosignature over the latest durable
 // root. It replaces the legacy reconciler→publisher seam AND the builder's
 // pre-commit cosign: there is exactly one place a head is cosigned and published,
@@ -154,6 +164,12 @@ type CheckpointLoop struct {
 	// (cmd/ledger/boot/wire) so this core loop carries no metrics/gossip
 	// dependency; nil ⇒ no-op (tests, metric-free deployments).
 	onWitnessQuorumFailure func(context.Context)
+
+	// entryTrace, when non-nil, resolves committed entries' admission traceparents
+	// so the checkpoint.cycle span LINKs to a bounded sample of the entries it
+	// commits (N:1). Injected by the composition root over the WAL; nil ⇒ the
+	// checkpoint is still an always-on batch trace, just without entry links.
+	entryTrace EntryTraceReader
 
 	// lastPublishedSize is the tree_size of the most recently published horizon;
 	// 0 ⇒ nothing published yet. The skip-if-unchanged guard keys on THIS (the
@@ -209,6 +225,56 @@ func (l *CheckpointLoop) OnWitnessQuorumFailure(fn func(context.Context)) {
 	l.onWitnessQuorumFailure = fn
 }
 
+// SetEntryTraceReader injects the reader used to LINK the checkpoint.cycle span
+// to the entries it commits. Set before Run; not safe to change concurrently
+// with a running loop. nil disables entry links (the default).
+func (l *CheckpointLoop) SetEntryTraceReader(r EntryTraceReader) {
+	l.entryTrace = r
+}
+
+// maxCheckpointLinks bounds the number of entry links on a checkpoint.cycle span.
+// The checkpoint may commit thousands of entries; linking all of them would mean
+// an O(N) WAL read per cycle and would blow the SDK's per-span link cap. Instead
+// we link an EVENLY-SPACED sample (including both ends of the delta), giving
+// checkpoint ⇄ entry navigability at O(maxCheckpointLinks) reads, independent of
+// how many entries the cycle covers.
+const maxCheckpointLinks = 16
+
+// gatherCommittedTraceparents returns up to maxCheckpointLinks admission
+// traceparents sampled evenly across the committed delta [fromSeq, toSeq] (both
+// inclusive — the entries this checkpoint newly covers). Entries with no stored
+// trace context (unsampled / pre-V3) or that error are skipped. Returns nil when
+// no reader is wired. Bounded reads regardless of delta size.
+func (l *CheckpointLoop) gatherCommittedTraceparents(ctx context.Context, fromSeq, toSeq uint64) []string {
+	if l.entryTrace == nil || toSeq < fromSeq {
+		return nil
+	}
+	span := toSeq - fromSeq + 1 // count of seqs in the inclusive delta
+	n := span
+	if n > maxCheckpointLinks {
+		n = maxCheckpointLinks
+	}
+	seen := make(map[uint64]struct{}, n)
+	out := make([]string, 0, n)
+	for i := uint64(0); i < n; i++ {
+		// Evenly spaced; n==1 picks fromSeq, otherwise both ends are included.
+		seq := fromSeq
+		if n > 1 {
+			seq = fromSeq + (span-1)*i/(n-1)
+		}
+		if _, dup := seen[seq]; dup {
+			continue
+		}
+		seen[seq] = struct{}{}
+		tp, err := l.entryTrace.TraceContextAt(ctx, seq)
+		if err != nil || tp == "" {
+			continue
+		}
+		out = append(out, tp)
+	}
+	return out
+}
+
 // CheckpointOnce performs one cycle. Exported for tests and for an explicit
 // boot-time catch-up before serving.
 //
@@ -218,18 +284,7 @@ func (l *CheckpointLoop) OnWitnessQuorumFailure(fn func(context.Context)) {
 // next cycle. The only non-nil returns are genuine faults (a DB read failure, a
 // RootAtSize fault that is not the durability sentinel) that the caller logs.
 func (l *CheckpointLoop) CheckpointOnce(ctx context.Context) error {
-	// checkpoint.cycle — the N:1 batch/lifecycle span. A NEW ROOT (its own trace)
-	// marked AlwaysSampleAttr so it is ALWAYS recorded even under sparse per-entry
-	// sampling: the durability path must never go dark. Child spans (emit_tiles /
-	// cosign / publish) carry the cycle's ctx so deeper spans — and the outbound
-	// cosign→witness hop — nest under it.
 	tr := otel.Tracer(checkpointTracerName)
-	ctx, span := tr.Start(ctx, "checkpoint.cycle",
-		trace.WithNewRoot(),
-		trace.WithSpanKind(trace.SpanKindInternal),
-		trace.WithAttributes(sdklog.AlwaysSampleAttr),
-	)
-	defer span.End()
 
 	// ── Step 1: read the commit cursor — the input the whole cycle keys off ──
 	cSeq, cRoot, err := l.commit.ReadCommit(ctx)
@@ -239,30 +294,69 @@ func (l *CheckpointLoop) CheckpointOnce(ctx context.Context) error {
 	// treeSize is the CT-native position the head binds; the +1 lives ONLY in
 	// store.TreeSizeForCommittedSeq (see store/smt_root_state.go — never re-derive).
 	treeSize := store.TreeSizeForCommittedSeq(cSeq)
-	span.SetAttributes(
-		attribute.Int64("ledger.committed_seq", int64(cSeq)),
-		attribute.Int64("ledger.tree_size", int64(treeSize)),
-	)
-	l.logger.DebugContext(ctx, "checkpoint step: read commit cursor",
-		"committed_seq", cSeq,
-		"committed_root", fmt.Sprintf("%x", cRoot[:8]),
-		"tree_size", treeSize,
-		"last_published_size", l.lastPublishedSize,
-	)
 
-	// Skip-if-unchanged: the checkpoint clock is the COMMIT POSITION (tree_size),
-	// the CT-native position — NOT the SMT root. A commentary-class entry advances
-	// the log (it gets a Merkle leaf — builder/loop.go Step 5 — so tree_size and
-	// root_hash move) WITHOUT mutating the SMT root; keying this on the root would
-	// freeze the horizon across a commentary run AND, at the first entry, is
-	// indistinguishable from genesis. lastPublishedSize == 0 ⇒ nothing published yet.
+	// Skip-if-unchanged BEFORE opening any span: an idle tick (nothing newly
+	// committed) must NOT emit a checkpoint.cycle span, or the always-on batch
+	// trace floods the tracer at the loop cadence. The checkpoint clock is the
+	// COMMIT POSITION (tree_size), the CT-native position — NOT the SMT root (a
+	// commentary entry advances tree_size without moving the root; keying on the
+	// root would freeze the horizon across a commentary run AND, at the first
+	// entry, is indistinguishable from genesis). lastPublishedSize 0 ⇒ none yet.
 	if treeSize <= l.lastPublishedSize {
 		l.logger.DebugContext(ctx, "checkpoint step: skip — nothing new committed",
 			"tree_size", treeSize, "last_published_size", l.lastPublishedSize)
 		return nil
 	}
 
-	// ── Step 2: Merkle-durability + genesis gate ──
+	// ── Step 2: read the durable resume cursor (frontier) ── read here, BEFORE the
+	// span, so the cycle span can LINK to the entries this checkpoint newly covers
+	// (the delta (fSeq, cSeq]). The read is side-effect-free; the frontier is only
+	// ADVANCED after tiles are durable (Step 5). Drives both the incremental-emit
+	// fromRoot and the receipt delta's lower bound.
+	fSeq, fRoot, err := l.frontier.ReadFrontier(ctx)
+	if err != nil {
+		return fmt.Errorf("checkpoint: read frontier: %w", err)
+	}
+	// fromRoot == cRoot is an empty delta, so pass the empty-hash sentinel to force
+	// a full (idempotent) BuildTiles of the committed subtree.
+	fromRoot := fRoot
+	if fromRoot == cRoot {
+		fromRoot = [32]byte{}
+	}
+
+	// checkpoint.cycle — the N:1 batch span. A NEW ROOT (its own trace) marked
+	// AlwaysSampleAttr so it is ALWAYS recorded even under sparse per-entry
+	// sampling (the durability path must never go dark), and LINKED via the stored
+	// admission traceparents to a BOUNDED sample of the entries this checkpoint
+	// newly commits — so an operator can pivot checkpoint ⇄ entry without an O(N)
+	// read. Child spans (emit_tiles / cosign / publish) carry this ctx so deeper
+	// spans — and the outbound cosign→witness hop — nest under it. Working cycles
+	// only (idle ticks returned above).
+	links := l.gatherCommittedTraceparents(ctx, fSeq, cSeq)
+	ctx, span := sdklog.StartLinked(ctx, tr, "checkpoint.cycle", links,
+		trace.WithNewRoot(),
+		trace.WithSpanKind(trace.SpanKindInternal),
+		trace.WithAttributes(
+			sdklog.AlwaysSampleAttr,
+			attribute.Int64("ledger.committed_seq", int64(cSeq)),
+			attribute.Int64("ledger.tree_size", int64(treeSize)),
+			attribute.Int("ledger.linked_entries", len(links)),
+		),
+	)
+	defer span.End()
+	l.logger.DebugContext(ctx, "checkpoint step: read commit cursor",
+		"committed_seq", cSeq,
+		"committed_root", fmt.Sprintf("%x", cRoot[:8]),
+		"tree_size", treeSize,
+		"last_published_size", l.lastPublishedSize,
+	)
+	l.logger.DebugContext(ctx, "checkpoint step: read frontier",
+		"frontier_seq", fSeq,
+		"frontier_root", fmt.Sprintf("%x", fRoot[:8]),
+		"from_root", fmt.Sprintf("%x", fromRoot[:8]),
+	)
+
+	// ── Step 3: Merkle-durability + genesis gate ──
 	// The head binds RootAtSize(treeSize), so the Merkle tiles must cover treeSize.
 	// IntegratedSize is the inclusive durable upper bound. This single comparison
 	// ALSO resolves genesis: a genuinely empty log has IntegratedSize 0 (< the
@@ -279,27 +373,10 @@ func (l *CheckpointLoop) CheckpointOnce(ctx context.Context) error {
 	if treeSize > integrated {
 		// Empty log (integrated 0) OR Merkle integration lagging the commit — either
 		// way the head's RootHash is not yet derivable; hold the horizon.
+		span.SetAttributes(attribute.String("checkpoint.hold", "merkle_not_durable"))
 		return l.hold(ctx, "merkle_not_durable",
 			"tree_size", treeSize, "integrated_size", integrated, "committed_seq", cSeq)
 	}
-
-	// ── Step 3: read the durable resume cursor (frontier) ──
-	// Drives both the incremental-emit fromRoot and the receipt delta's lower bound.
-	fSeq, fRoot, err := l.frontier.ReadFrontier(ctx)
-	if err != nil {
-		return fmt.Errorf("checkpoint: read frontier: %w", err)
-	}
-	// fromRoot == cRoot is an empty delta, so pass the empty-hash sentinel to force
-	// a full (idempotent) BuildTiles of the committed subtree.
-	fromRoot := fRoot
-	if fromRoot == cRoot {
-		fromRoot = [32]byte{}
-	}
-	l.logger.DebugContext(ctx, "checkpoint step: read frontier",
-		"frontier_seq", fSeq,
-		"frontier_root", fmt.Sprintf("%x", fRoot[:8]),
-		"from_root", fmt.Sprintf("%x", fromRoot[:8]),
-	)
 
 	// ── Step 4: make cRoot's SMT tiles durable. Returns only on PUT-ack; a blob
 	//    outage HOLDS (horizon frozen, commit cursor unaffected). EmptyHash (a

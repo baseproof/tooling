@@ -98,6 +98,7 @@ import (
 	"github.com/baseproof/tooling/services/ledger/store"
 	"github.com/baseproof/tooling/services/ledger/store/indexes"
 	"github.com/baseproof/tooling/services/ledger/tessera"
+	"github.com/baseproof/tooling/services/ledger/wal"
 	"github.com/baseproof/tooling/services/ledger/witnessclient"
 )
 
@@ -176,6 +177,23 @@ type Config struct {
 	NetworkPeers   api.WireFederationGraph
 	NetworkMirrors api.WireMirrorManifest
 	NetworkAnchors api.WireAnchorChain
+}
+
+// walEntryTrace adapts the WAL committer to builder.EntryTraceReader: it resolves
+// an entry's admission traceparent at a committed seq (seq → hash → Meta.TraceContext)
+// so the checkpoint.cycle span can LINK to the entries it commits.
+type walEntryTrace struct{ wal *wal.Committer }
+
+func (w walEntryTrace) TraceContextAt(ctx context.Context, seq uint64) (string, error) {
+	hash, err := w.wal.HashAt(ctx, seq)
+	if err != nil {
+		return "", err
+	}
+	meta, err := w.wal.MetaState(ctx, hash)
+	if err != nil {
+		return "", err
+	}
+	return meta.TraceContext, nil
 }
 
 // Wire is the Phase B orchestrator.
@@ -326,6 +344,12 @@ func Wire(ctx context.Context, cfg Config, d *deps.AppDeps) error {
 		checkpointLoop.OnWitnessQuorumFailure(func(ctx context.Context) {
 			gossipnet.IncWitnessQuorumFailure(ctx, networkIDHex)
 		})
+		// Link the checkpoint.cycle span to a bounded sample of the entries it
+		// commits, resolving each entry's admission traceparent from the WAL Meta
+		// (seq → hash → Meta.TraceContext) — checkpoint ⇄ entry trace navigability.
+		if d.WALCommitter != nil {
+			checkpointLoop.SetEntryTraceReader(walEntryTrace{wal: d.WALCommitter})
+		}
 		d.Logger.Info("checkpoint loop enabled", "tile_dir", tileDir, "quorum_k", cfg.WitnessQuorumK)
 	}
 
