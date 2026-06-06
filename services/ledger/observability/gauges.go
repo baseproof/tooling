@@ -33,10 +33,13 @@ func RegisterFloat64Gauge(meter metric.Meter, name, desc string, provider func()
 	if meter == nil || provider == nil {
 		return false
 	}
+	// Deliberately NO WithUnit: these are bare-named counts/levels (backlog, horizon
+	// lag, AIMD limit). UCUM unit "1" makes the OTel→Prometheus exporter append a
+	// "_ratio" suffix (baseproof_wal_backlog_total_ratio …), which breaks bare-name
+	// scrapers (the e2e durability check) and mislabels a count as a ratio.
 	g, err := meter.Float64ObservableGauge(
 		name,
 		metric.WithDescription(desc),
-		metric.WithUnit("1"),
 	)
 	if err != nil {
 		return false
@@ -53,10 +56,11 @@ func RegisterInt64Gauge(meter metric.Meter, name, desc string, provider func() i
 	if meter == nil || provider == nil {
 		return false
 	}
+	// Deliberately NO WithUnit — see RegisterFloat64Gauge: unit "1" appends a
+	// "_ratio" suffix that breaks bare-name scrapers and mislabels a count as a ratio.
 	g, err := meter.Int64ObservableGauge(
 		name,
 		metric.WithDescription(desc),
-		metric.WithUnit("1"),
 	)
 	if err != nil {
 		return false

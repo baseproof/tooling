@@ -472,3 +472,80 @@ func TestCheckpoint_WitnessQuorumFailureHook(t *testing.T) {
 		}
 	})
 }
+
+// recordingReceipts is a ReceiptRanger that records the [from,to] of every
+// ReceiptRoot call (returning a deterministic non-zero root), so a test can assert
+// the receipt delta's lower bound.
+type recordingReceipts struct {
+	calls []struct{ from, to uint64 }
+}
+
+func (r *recordingReceipts) ReceiptRoot(_ context.Context, from, to uint64) ([32]byte, error) {
+	r.calls = append(r.calls, struct{ from, to uint64 }{from, to})
+	var h [32]byte
+	h[0], h[1] = byte(from), byte(to)
+	return h, nil
+}
+
+// TestCheckpoint_ReceiptDeltaSurvivesCosignHold pins fix A2: the receipt delta keys
+// off the last PUBLISHED tree_size, not the tile frontier — so a cosign HOLD (which
+// advances the frontier at Step 5 but never publishes) cannot orphan the held
+// delta's receipts. The checkpoint published AFTER the hold must commit a ReceiptRoot
+// whose range starts at lastPublishedSize, SPANNING the entries committed during the
+// hold (the range the receipt-proof handler reconstructs via CosignedSizeBelow).
+func TestCheckpoint_ReceiptDeltaSurvivesCosignHold(t *testing.T) {
+	commit := &fakeCommit{}
+	frontier := &fakeFrontier{root: smt.EmptyHash}
+	witness := &fakeWitness{}
+	pub := &fakePublisher{}
+	rec := &recordingReceipts{}
+	loop := NewCheckpointLoop(commit, frontier, newFakeTiles(),
+		&fakeRooter{integrated: ^uint64(0)}, pub, witness, rec, 0, nil)
+	ctx := context.Background()
+
+	// Cycle 1 — commit seq 99 (tree_size 100), cosign OK → publish. Genesis delta [0,99].
+	commit.advance(99, rootN(0x01))
+	if err := loop.CheckpointOnce(ctx); err != nil {
+		t.Fatalf("cycle 1: %v", err)
+	}
+
+	// Cycle 2 — commit seq 199 (tree_size 200), cosign HOLDS. The frontier advances
+	// to 199 (Step 5, pre-cosign); the horizon stays at 100 (never published).
+	commit.advance(199, rootN(0x02))
+	witness.err = errors.New("witness quorum unavailable")
+	if err := loop.CheckpointOnce(ctx); err != nil {
+		t.Fatalf("cycle 2 (hold must return nil): %v", err)
+	}
+
+	// Cycle 3 — commit seq 299 (tree_size 300), cosign recovers → publish.
+	commit.advance(299, rootN(0x03))
+	witness.err = nil
+	if err := loop.CheckpointOnce(ctx); err != nil {
+		t.Fatalf("cycle 3: %v", err)
+	}
+
+	// Two publishes (100 and 300); the 200 checkpoint was held.
+	if len(pub.published) != 2 {
+		t.Fatalf("published %d heads, want 2 (the 200 checkpoint held)", len(pub.published))
+	}
+	if pub.published[0].TreeSize != 100 || pub.published[1].TreeSize != 300 {
+		t.Fatalf("published sizes = [%d %d], want [100 300]", pub.published[0].TreeSize, pub.published[1].TreeSize)
+	}
+
+	// The post-hold (cSeq 299) receipt delta must start at the last PUBLISHED size 100,
+	// covering the held region [100,199]. The pre-A2 frontier-keyed logic would yield
+	// [200,299], orphaning [100,199] (the bug this fix closes).
+	var got struct{ from, to uint64 }
+	found := false
+	for _, c := range rec.calls {
+		if c.to == 299 {
+			got, found = c, true
+		}
+	}
+	if !found {
+		t.Fatalf("no ReceiptRoot call for cSeq 299; calls=%v", rec.calls)
+	}
+	if got.from != 100 {
+		t.Errorf("post-hold receipt delta = [%d,%d], want [100,299] (spans the held [100,199]); frontier-keyed would orphan it as [200,299]", got.from, got.to)
+	}
+}
