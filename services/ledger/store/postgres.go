@@ -70,6 +70,13 @@ type PoolConfig struct {
 	// or runaway query that escapes the application-side budget
 	// still gets cancelled by the DB. 0 disables the DB-side cap.
 	StatementTimeout time.Duration
+
+	// LazyConnect, when true, skips the eager boot-time Ping + warmup so the
+	// caller boots even if Postgres is unreachable. pgxpool connects lazily, so
+	// PG-backed queries then fail per-request (clean errors) and recover when PG
+	// returns. The read-only ledger sets this so its object-store-backed surface
+	// (proofs, horizon, SMT/log tiles) stays available during a PG outage.
+	LazyConnect bool
 }
 
 // InitPool creates and validates the connection pool.
@@ -113,21 +120,26 @@ func InitPool(ctx context.Context, cfg PoolConfig) (*Pool, error) {
 		return nil, fmt.Errorf("store: pool creation failed: %w", err)
 	}
 
-	if err := db.Ping(ctx); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("store: database unreachable: %w", err)
-	}
+	// LazyConnect (the read-only ledger) skips the eager connectivity check so
+	// boot tolerates an unreachable Postgres; pgxpool connects lazily and
+	// PG-backed queries fail per-request until PG returns.
+	if !cfg.LazyConnect {
+		if err := db.Ping(ctx); err != nil {
+			db.Close()
+			return nil, fmt.Errorf("store: database unreachable: %w", err)
+		}
 
-	// Boot-time warmup: pre-establish MinConns connections so
-	// admission p99 doesn't spike on the first cold requests.
-	// Bounded fan-out (MinConns is small, typically ≤16) and bounded
-	// budget (per-acquire ctx applies). Failures at warmup are NOT
-	// fatal — the pool stays valid; subsequent acquisitions will
-	// reconnect lazily. Log the failure and continue.
-	if cfg.MinConns > 0 {
-		warmCtx, warmCancel := context.WithTimeout(ctx, 10*time.Second)
-		defer warmCancel()
-		warmPool(warmCtx, db, int(cfg.MinConns))
+		// Boot-time warmup: pre-establish MinConns connections so
+		// admission p99 doesn't spike on the first cold requests.
+		// Bounded fan-out (MinConns is small, typically ≤16) and bounded
+		// budget (per-acquire ctx applies). Failures at warmup are NOT
+		// fatal — the pool stays valid; subsequent acquisitions will
+		// reconnect lazily. Log the failure and continue.
+		if cfg.MinConns > 0 {
+			warmCtx, warmCancel := context.WithTimeout(ctx, 10*time.Second)
+			defer warmCancel()
+			warmPool(warmCtx, db, int(cfg.MinConns))
+		}
 	}
 
 	return &Pool{DB: db, cfg: cfg}, nil

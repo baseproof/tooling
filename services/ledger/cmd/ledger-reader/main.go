@@ -76,6 +76,11 @@ func run(logger *slog.Logger) error {
 	if dsn == "" {
 		dsn = cfg.PostgresDSN
 	}
+	// PG-off read front: boot even when Postgres is unreachable (LazyConnect),
+	// so the object-store-backed surface (proofs, horizon, SMT/log tiles) stays
+	// available during a PG outage. PG-backed endpoints (/v1/entries value
+	// lookups, /v1/smt/leaf, /v1/query/*) then fail per-request and recover when
+	// PG returns. Only a malformed DSN is fatal here.
 	pool, err := store.InitPool(ctx, store.PoolConfig{
 		DSN:              dsn,
 		MaxConns:         int32(cfg.MaxConns),
@@ -83,12 +88,19 @@ func run(logger *slog.Logger) error {
 		MaxConnLifetime:  30 * time.Minute,
 		MaxConnIdleTime:  5 * time.Minute,
 		StatementTimeout: cfg.StatementTimeout,
+		LazyConnect:      true,
 	})
 	if err != nil {
 		return fmt.Errorf("postgres pool: %w", err)
 	}
 	defer pool.Close()
-	logger.Info("postgres read pool initialized", "replica", cfg.ReplicaDSN != "")
+	pingCtx, pingCancel := context.WithTimeout(ctx, 3*time.Second)
+	if pingErr := pool.DB.Ping(pingCtx); pingErr != nil {
+		logger.Warn("postgres unreachable at boot — serving object-store-backed surface only; PG-backed endpoints will error until PG recovers", "error", pingErr)
+	} else {
+		logger.Info("postgres read pool initialized", "replica", cfg.ReplicaDSN != "")
+	}
+	pingCancel()
 
 	// ── Tessera (read-only) ─────────────────────────────────────
 	// The reader binary reads tiles + checkpoint directly off the
