@@ -230,6 +230,16 @@ func run(logger *slog.Logger) error {
 		PublicURLer: entryBytes.(api.PublicURLer),
 		LogDID:      cfg.LogDID,
 		Logger:      logger,
+		// PG-off seq→hash: when the entry_index is unreachable, resolve the
+		// canonical hash from the entry tile (object store), bounded by the
+		// cosigned horizon, so /v1/entries/{seq}/raw still serves via redirect.
+		SeqHashFallback: func(ctx context.Context, seq uint64) ([32]byte, bool, error) {
+			head, _, herr := horizon.ReadHorizon(ctx)
+			if herr != nil {
+				return [32]byte{}, false, herr
+			}
+			return tessera.SeqHashFromEntryTile(ctx, tileReader, head.TreeSize, seq)
+		},
 	}
 	commitDeps := &api.DerivationCommitmentDeps{
 		CommitmentStore: commitmentStore, Logger: logger,
