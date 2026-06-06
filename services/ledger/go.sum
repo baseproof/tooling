@@ -64,14 +64,8 @@ github.com/aws/aws-sdk-go-v2/service/sts v1.42.0 h1:ks8KBcZPh3PYISr5dAiXCM5/Thcu
 github.com/aws/aws-sdk-go-v2/service/sts v1.42.0/go.mod h1:pFw33T0WLvXU3rw1WBkpMlkgIn54eCB5FYLhjDc9Foo=
 github.com/aws/smithy-go v1.25.0 h1:Sz/XJ64rwuiKtB6j98nDIPyYrV1nVNJ4YU74gttcl5U=
 github.com/aws/smithy-go v1.25.0/go.mod h1:YE2RhdIuDbA5E5bTdciG9KrW3+TiEONeUWCqxX9i1Fc=
-github.com/baseproof/baseproof v0.0.3-rc1 h1:xwCLxPvVwAd6J6/SZMEava29wM6SoLroFI2ROWh3TaE=
-github.com/baseproof/baseproof v0.0.3-rc1/go.mod h1:dofQ7zm9qOLDQEiwuFPORHOjkITeL/83YAnR4+TXFSc=
-github.com/baseproof/baseproof v0.0.3-rc1.0.20260605231634-ff7d34a7cdfb h1:fgG85PabGLb8aryZsB9vC8Byfy/ttXSD13o9YBgkLQg=
-github.com/baseproof/baseproof v0.0.3-rc1.0.20260605231634-ff7d34a7cdfb/go.mod h1:dofQ7zm9qOLDQEiwuFPORHOjkITeL/83YAnR4+TXFSc=
-github.com/baseproof/baseproof v0.0.3-rc1.0.20260605232443-2189899d57b6 h1:iZUFORgnxXpf1+TBQ5JDq61oqu3knpkXSx7FeSPpr2Y=
-github.com/baseproof/baseproof v0.0.3-rc1.0.20260605232443-2189899d57b6/go.mod h1:dofQ7zm9qOLDQEiwuFPORHOjkITeL/83YAnR4+TXFSc=
-github.com/baseproof/baseproof v0.0.3-rc2 h1:LQ5ZszWY1+r4r+xzXfOAf6mVHZyahQhmq8lTxNwQkx4=
-github.com/baseproof/baseproof v0.0.3-rc2/go.mod h1:dofQ7zm9qOLDQEiwuFPORHOjkITeL/83YAnR4+TXFSc=
+github.com/baseproof/baseproof v0.0.3-rc3 h1:8fJl8C+1TORJIYxVf22IF16ZYSHSZlWX+lrS+b00WZI=
+github.com/baseproof/baseproof v0.0.3-rc3/go.mod h1:dofQ7zm9qOLDQEiwuFPORHOjkITeL/83YAnR4+TXFSc=
 github.com/beorn7/perks v1.0.1 h1:VlbKKnNfV8bJzeqoa4cOKqO6bYr3WgKZxO8Z16+hsOM=
 github.com/beorn7/perks v1.0.1/go.mod h1:G2ZrVWU2WbWT9wwq4/hrbKbnv/1ERSJQ0ibhJ6rlkpw=
 github.com/bits-and-blooms/bitset v1.24.4 h1:95H15Og1clikBrKr/DuzMXkQzECs1M6hhoGXLwLQOZE=

@@ -97,18 +97,21 @@ func TestGather_SingleNetwork_EndToEnd(t *testing.T) {
 	// A single-leaf receipt tree at the entry position (the third cosigned root).
 	receiptCommit := smt.ReceiptCommitment{Position: pos, ReceiptHash: sha256.Sum256([]byte("receipt"))}
 	receiptRoot := smt.ReceiptRoot([]smt.ReceiptCommitment{receiptCommit})
-	receiptSection, err := sdkbundle.EncodeReceiptProof(&smt.ReceiptInclusionProof{
-		Commitment: receiptCommit, LeafIndex: 0, LeafCount: 1, AuditPath: nil,
-	})
-	if err != nil {
-		t.Fatalf("EncodeReceiptProof: %v", err)
-	}
 
 	// One cosigned checkpoint over all three roots. TreeSize 1 ⇒ RootHash == leaf,
 	// inclusion is the empty co-path.
 	head := cosignTreeHead(t, types.TreeHead{
 		RootHash: leafHash, SMTRoot: smtRoot, ReceiptRoot: receiptRoot, TreeSize: 1,
 	}, signers, nid)
+
+	// receipt_proof binds to its OWN covering-checkpoint head (fix B) — here the
+	// single checkpoint this fixture anchors on.
+	receiptSection, err := sdkbundle.EncodeReceiptProof(&smt.ReceiptInclusionProof{
+		Commitment: receiptCommit, LeafIndex: 0, LeafCount: 1, AuditPath: nil,
+	}, head)
+	if err != nil {
+		t.Fatalf("EncodeReceiptProof: %v", err)
+	}
 	inclusion := types.MerkleProof{LeafPosition: 0, LeafHash: leafHash, TreeSize: 1}
 	reader := &fakeLedgerReader{head: head, entryHex: hex.EncodeToString(entryBytes), inclusion: inclusion}
 

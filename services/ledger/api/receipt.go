@@ -29,9 +29,38 @@ import (
 
 	"github.com/baseproof/baseproof/core/smt"
 	"github.com/baseproof/baseproof/log/bundle"
+	"github.com/baseproof/baseproof/types"
 
 	"github.com/baseproof/tooling/services/ledger/apitypes"
 )
+
+// apitypesHeadToSDK converts the ledger's apitypes cosigned head to the SDK's
+// types.CosignedTreeHead (the shape EncodeReceiptProof + the v2 verifier consume).
+// Each apitypes signature carries a JSON-encoded types.WitnessSignature — the same
+// mapping the bundle head adapter uses; an unparseable signature is skipped (the
+// quorum check fails closed downstream if too many drop).
+func apitypesHeadToSDK(h *apitypes.CosignedTreeHead) types.CosignedTreeHead {
+	if h == nil {
+		return types.CosignedTreeHead{}
+	}
+	sigs := make([]types.WitnessSignature, 0, len(h.Signatures))
+	for _, s := range h.Signatures {
+		var ws types.WitnessSignature
+		if err := json.Unmarshal(s.Signature, &ws); err != nil {
+			continue
+		}
+		sigs = append(sigs, ws)
+	}
+	return types.CosignedTreeHead{
+		TreeHead: types.TreeHead{
+			RootHash:    h.RootHash,
+			SMTRoot:     h.SMTRoot,
+			ReceiptRoot: h.ReceiptRoot,
+			TreeSize:    h.TreeSize,
+		},
+		Signatures: sigs,
+	}
+}
 
 // ReceiptHeadResolver resolves the published checkpoint a receipt proof binds to.
 type ReceiptHeadResolver interface {
@@ -133,7 +162,11 @@ func NewReceiptProofHandler(deps *ReceiptDeps) http.HandlerFunc {
 			return
 		}
 
-		section, err := bundle.EncodeReceiptProof(proof)
+		// Embed the covering-checkpoint head IN the section: ReceiptRoot is a
+		// per-checkpoint delta, so the v2 verifier reconstructs the receipt against
+		// THIS head's ReceiptRoot (not the proof's horizon head). The gather passes
+		// the section through verbatim.
+		section, err := bundle.EncodeReceiptProof(proof, apitypesHeadToSDK(head))
 		if err != nil {
 			writeTypedError(ctx, w, apitypes.ErrorClassProofGenFailed,
 				http.StatusInternalServerError, "encode receipt proof")
