@@ -204,6 +204,9 @@ func run(logger *slog.Logger) error {
 	treeDeps := &api.TreeDeps{
 		TreeHeadStore: treeHeadStore, Inclusion: tesseraAdapter,
 		Consistency: tesseraAdapter, Logger: logger,
+		// PG-off: default the inclusion proof's tree size to the cosigned
+		// horizon when the live head (Postgres) is unavailable.
+		Horizon: horizon,
 	}
 	smtDeps := &api.SMTDeps{
 		Tree:        tree,

@@ -12,11 +12,13 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
+	"github.com/baseproof/baseproof/types"
 	"github.com/baseproof/tooling/services/ledger/apitypes"
 )
 
@@ -94,5 +96,76 @@ func TestTreeInclusion_TreeSizeInvalidRejected(t *testing.T) {
 		if rec.Code != http.StatusBadRequest {
 			t.Errorf("tree_size=%q: status = %d, want 400", bad, rec.Code)
 		}
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// PG-off read front (1.3e): when TreeHeadStore.Latest is unavailable, the
+// default/maximum provable size comes from the cosigned horizon (object
+// store) instead of Postgres — the inclusion surface stays up during an
+// outage. With NO horizon configured the same outage is a 503: that pair is
+// the +/- guard.
+// ─────────────────────────────────────────────────────────────────────
+
+// erroringHeadFetcher simulates Postgres being unavailable.
+type erroringHeadFetcher struct{}
+
+func (erroringHeadFetcher) Latest(_ context.Context) (*apitypes.CosignedTreeHead, error) {
+	return nil, errors.New("postgres unreachable")
+}
+func (erroringHeadFetcher) GetBySize(_ context.Context, _ uint64) (*apitypes.CosignedTreeHead, error) {
+	return nil, errors.New("postgres unreachable")
+}
+
+// servePGOffInclusion wires the handler with PG down (Latest errors) and an
+// optional cosigned horizon of horizonSize (0 ⇒ no horizon configured).
+func servePGOffInclusion(t *testing.T, horizonSize uint64, target string) (*httptest.ResponseRecorder, *captureInclusion) {
+	t.Helper()
+	cap := &captureInclusion{}
+	deps := &TreeDeps{TreeHeadStore: erroringHeadFetcher{}, Inclusion: cap}
+	if horizonSize > 0 {
+		deps.Horizon = fakeHorizon{head: &types.CosignedTreeHead{TreeHead: types.TreeHead{TreeSize: horizonSize}}}
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /v1/tree/inclusion/{seq}", NewTreeInclusionHandler(deps))
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, target, nil))
+	return rec, cap
+}
+
+// + case: with a horizon, the default proof size is the horizon size.
+func TestTreeInclusion_PGOff_DefaultsToHorizonSize(t *testing.T) {
+	rec, cap := servePGOffInclusion(t, 800, "/v1/tree/inclusion/42")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (horizon fallback); body=%s", rec.Code, rec.Body.String())
+	}
+	if cap.gotTreeSize != 800 {
+		t.Errorf("default tree_size = %d, want horizon size 800", cap.gotTreeSize)
+	}
+}
+
+// PG-off: ?tree_size=N is bounded by the horizon, not the unavailable head.
+func TestTreeInclusion_PGOff_HonorsTreeSizeWithinHorizon(t *testing.T) {
+	rec, cap := servePGOffInclusion(t, 800, "/v1/tree/inclusion/42?tree_size=500")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if cap.gotTreeSize != 500 {
+		t.Errorf("tree_size = %d, want pinned 500", cap.gotTreeSize)
+	}
+}
+
+func TestTreeInclusion_PGOff_TreeSizeBeyondHorizonRejected(t *testing.T) {
+	rec, _ := servePGOffInclusion(t, 800, "/v1/tree/inclusion/42?tree_size=900")
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (tree_size > horizon)", rec.Code)
+	}
+}
+
+// - case: PG down AND no horizon configured → 503 (nothing to fall back to).
+func TestTreeInclusion_PGOff_NoHorizon_Unavailable(t *testing.T) {
+	rec, _ := servePGOffInclusion(t, 0, "/v1/tree/inclusion/42")
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503 (PG down, no horizon)", rec.Code)
 	}
 }
