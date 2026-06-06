@@ -131,6 +131,11 @@ type Config struct {
 	// durable head lags and then catches up instead of wedging. Default 60s.
 	HealthyWindow time.Duration
 
+	// AIMDStep is the additive-increase step the limiter ramps by on each
+	// success (multiplicative-decrease halves on failure). Larger ⇒ faster
+	// ramp toward MaxInFlight. Default 0.5.
+	AIMDStep float64
+
 	// Logger. Defaults to slog.Default if nil.
 	Logger *slog.Logger
 }
@@ -192,6 +197,9 @@ func NewShipper(w WAL, bs Bytestore, cfg Config) *Shipper {
 	if cfg.HealthyWindow <= 0 {
 		cfg.HealthyWindow = 60 * time.Second
 	}
+	if cfg.AIMDStep <= 0 {
+		cfg.AIMDStep = 0.5
+	}
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
 	}
@@ -205,7 +213,7 @@ func NewShipper(w WAL, bs Bytestore, cfg Config) *Shipper {
 		// AIMD ceiling = the worker pool; floor 1. The limit floats below the
 		// ceiling under store pressure, so the worker count is a MAX, not a
 		// fixed burst.
-		limiter: newAIMDLimiter(1, cfg.MaxInFlight, 0.5),
+		limiter: newAIMDLimiter(1, cfg.MaxInFlight, cfg.AIMDStep),
 	}
 }
 
@@ -213,6 +221,18 @@ func NewShipper(w WAL, bs Bytestore, cfg Config) *Shipper {
 // Safe to call concurrently with Run.
 func (s *Shipper) Metrics() MetricsSnapshot {
 	return s.metrics.Snapshot()
+}
+
+// AIMDLimit returns the AIMD limiter's current concurrency limit — the
+// congestion-control signal for the Phase-2 durability gauge. It floats below
+// MaxInFlight under store pressure and ramps back on success; a settled value
+// near the ceiling means the store is keeping up, a depressed value means the
+// shipper is backing off. Safe to call concurrently with Run.
+func (s *Shipper) AIMDLimit() float64 {
+	if s == nil || s.limiter == nil {
+		return 0
+	}
+	return s.limiter.currentLimit()
 }
 
 // Run starts the pipeline and blocks until ctx is cancelled. All

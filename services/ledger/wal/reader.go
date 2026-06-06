@@ -222,6 +222,47 @@ func (c *Committer) HashAt(ctx context.Context, seq uint64) ([32]byte, error) {
 	return hash, nil
 }
 
+// Backlog returns the WAL's sequenced-but-not-shipped depth: the highest
+// sequenced seq minus the high-water mark. This is the shipper's true queue
+// depth — how far durable shipping trails sequencing — and the Phase-2 gauge
+// for "is the shipper keeping up under sustained load". 0 when nothing is
+// sequenced beyond the HWM. Reads one Badger snapshot; cheap enough to call on
+// every metric scrape.
+func (c *Committer) Backlog() int64 {
+	var hwm, highest uint64
+	_ = c.db.View(func(txn *badger.Txn) error {
+		if item, err := txn.Get(hwmKey()); err == nil {
+			_ = item.Value(func(val []byte) error {
+				if len(val) == 8 {
+					hwm = binary.BigEndian.Uint64(val)
+				}
+				return nil
+			})
+		}
+		opts := badger.DefaultIteratorOptions
+		opts.Reverse = true
+		opts.PrefetchValues = false
+		it := txn.NewIterator(opts)
+		defer it.Close()
+		// In reverse mode, Seek lands on the largest key <= the seek key. Seek to
+		// the end of the seq_index range (prefix + 0xFF×8) so we land on the
+		// largest actual seq_index key; verify the prefix byte before decoding.
+		seek := []byte{prefixSeqIndex, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff}
+		it.Seek(seek)
+		if it.Valid() {
+			k := it.Item().KeyCopy(nil)
+			if len(k) == 9 && k[0] == prefixSeqIndex {
+				highest = seqFromIndexKey(k)
+			}
+		}
+		return nil
+	})
+	if highest <= hwm {
+		return 0
+	}
+	return int64(highest - hwm)
+}
+
 // HWM returns the high-water mark — the highest contiguous SEQUENCE
 // NUMBER whose entry has been shipped. HWM is a seq value, not a
 // count: under the migration-0004 contract seqs are 0-indexed, so

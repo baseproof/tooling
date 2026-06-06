@@ -97,7 +97,11 @@ type Config struct {
 	DBMigrateMode store.MigrateMode
 
 	// WAL
-	WALPath string
+	WALPath            string
+	WALQueueSize       int           // 0 ⇒ committer default (4096)
+	WALBatchMaxEntries int           // 0 ⇒ committer default (256)
+	WALBatchMaxBytes   int           // 0 ⇒ committer default (5MiB)
+	WALBatchMaxLatency time.Duration // 0 ⇒ committer default (10ms)
 
 	// Bytestore (passed-through to bytestore.NewFromConfig)
 	BytestoreConfig bytestore.Config
@@ -316,7 +320,13 @@ func allocateWAL(cfg Config, d *deps.AppDeps) error {
 		return fmt.Errorf("wal open path=%q: %w", cfg.WALPath, err)
 	}
 	d.WALDB = walDB
-	walc := wal.NewCommitter(walDB, wal.CommitterConfig{Logger: d.Logger})
+	walc := wal.NewCommitter(walDB, wal.CommitterConfig{
+		QueueSize:       cfg.WALQueueSize,
+		BatchMaxEntries: cfg.WALBatchMaxEntries,
+		BatchMaxBytes:   cfg.WALBatchMaxBytes,
+		BatchMaxLatency: cfg.WALBatchMaxLatency,
+		Logger:          d.Logger,
+	})
 	d.WALCommitter = walc
 
 	// Order matters: register committer FIRST (closer ON TOP of the

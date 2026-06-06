@@ -79,6 +79,20 @@ func envDurationOr(key string, fallback time.Duration) time.Duration {
 	return d
 }
 
+// envFloatOr reads an env var as a float64; returns fallback on unset or
+// parse failure. Used for fractional tuning knobs (LEDGER_SHIPPER_AIMD_STEP).
+func envFloatOr(key string, fallback float64) float64 {
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback
+	}
+	f, err := strconv.ParseFloat(v, 64)
+	if err != nil {
+		return fallback
+	}
+	return f
+}
+
 // parseCSV splits a comma-separated env value into a slice of
 // trimmed non-empty entries. Empty input → nil. Used for
 // LEDGER_WITNESS_ENDPOINTS.

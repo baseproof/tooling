@@ -92,6 +92,7 @@ import (
 	"github.com/baseproof/tooling/services/ledger/internal/auditorregistry"
 	"github.com/baseproof/tooling/services/ledger/internal/clienttls"
 	"github.com/baseproof/tooling/services/ledger/lifecycle"
+	"github.com/baseproof/tooling/services/ledger/observability"
 	"github.com/baseproof/tooling/services/ledger/reservation"
 	"github.com/baseproof/tooling/services/ledger/sequencer"
 	"github.com/baseproof/tooling/services/ledger/shipper"
@@ -118,6 +119,12 @@ type Config struct {
 	SequencerMaxInFlight int
 	ShipperPollInterval  time.Duration
 	ShipperMaxInFlight   int
+	ShipperMaxAttempts   int
+	ShipperBackoffBase   time.Duration
+	ShipperBackoffMax    time.Duration
+	ShipperHealthyWindow time.Duration
+	ShipperAIMDStep      float64
+	CheckpointInterval   time.Duration
 	SMTNodeCacheSize     int
 
 	RecentEntryCacheSize     int
@@ -331,7 +338,7 @@ func Wire(ctx context.Context, cfg Config, d *deps.AppDeps) error {
 			// ReceiptRoot from entry_index metadata only — never the Badger WAL
 			// bytes, so a shipped+pruned delta entry can't stall the horizon.
 			store.NewEntryIndexReceiptRanger(d.PgPool.DB, cfg.LogDID),
-			0, // interval → 1s default
+			cfg.CheckpointInterval, // LEDGER_CHECKPOINT_INTERVAL (0 ⇒ 1s default)
 			d.Logger,
 		)
 		// Witness-quorum SRE signal (Backpressure-Stall trigger). The core loop
@@ -371,7 +378,7 @@ func Wire(ctx context.Context, cfg Config, d *deps.AppDeps) error {
 	detector := composeIntegrityDetector(d)
 	smtDetector := composeSMTDetector(d)
 
-	installLateBoundGauges(cfg, d, seq, ship)
+	installLateBoundGauges(cfg, d, seq, ship, checkpointLoop)
 
 	if err := composeServers(cfg, d, handlers); err != nil {
 		return fmt.Errorf("wire: servers: %w", err)
@@ -1800,9 +1807,14 @@ func composeSequencer(cfg Config, d *deps.AppDeps) *sequencer.Sequencer {
 
 func composeShipper(cfg Config, d *deps.AppDeps) *shipper.Shipper {
 	ship := shipper.NewShipper(d.WALCommitter, d.ByteStore, shipper.Config{
-		PollInterval: cfg.ShipperPollInterval,
-		MaxInFlight:  cfg.ShipperMaxInFlight,
-		Logger:       d.Logger,
+		PollInterval:  cfg.ShipperPollInterval,
+		MaxInFlight:   cfg.ShipperMaxInFlight,
+		MaxAttempts:   uint32(cfg.ShipperMaxAttempts),
+		BackoffBase:   cfg.ShipperBackoffBase,
+		BackoffMax:    cfg.ShipperBackoffMax,
+		HealthyWindow: cfg.ShipperHealthyWindow,
+		AIMDStep:      cfg.ShipperAIMDStep,
+		Logger:        d.Logger,
 	})
 	d.Logger.Info("shipper: configured",
 		"max_in_flight", cfg.ShipperMaxInFlight,
@@ -2057,6 +2069,7 @@ func installLateBoundGauges(
 	d *deps.AppDeps,
 	seq *sequencer.Sequencer,
 	ship *shipper.Shipper,
+	checkpointLoop *builder.CheckpointLoop,
 ) {
 	if !cfg.MetricsEnable || d.MeterProvider == nil {
 		return
@@ -2074,6 +2087,29 @@ func installLateBoundGauges(
 	}
 	if installed := shipper.InstallCounters(shipMeter, ship); installed {
 		d.Logger.Info("metrics: shipper counters installed")
+	}
+
+	// Phase-2 durability gauges (sustained-load watch surface).
+	if observability.RegisterFloat64Gauge(shipMeter, "baseproof_shipper_aimd_limit",
+		"AIMD congestion-control concurrency limit (floats below MaxInFlight under store pressure).",
+		ship.AIMDLimit) {
+		d.Logger.Info("metrics: shipper AIMD limit gauge installed", "metric", "baseproof_shipper_aimd_limit")
+	}
+	if d.WALCommitter != nil {
+		walMeter := mp.Meter("github.com/baseproof/tooling/services/ledger/wal")
+		if observability.RegisterInt64Gauge(walMeter, "baseproof_wal_backlog_total",
+			"Sequenced-but-not-shipped WAL depth (highest sequenced seq minus HWM).",
+			d.WALCommitter.Backlog) {
+			d.Logger.Info("metrics: WAL backlog gauge installed", "metric", "baseproof_wal_backlog_total")
+		}
+	}
+	if checkpointLoop != nil {
+		builderMeter := mp.Meter("github.com/baseproof/tooling/services/ledger/builder")
+		if observability.RegisterInt64Gauge(builderMeter, "baseproof_horizon_lag_total",
+			"Committed head tree_size minus the published witness-cosigned horizon tree_size.",
+			checkpointLoop.HorizonLag) {
+			d.Logger.Info("metrics: horizon lag gauge installed", "metric", "baseproof_horizon_lag_total")
+		}
 	}
 }
 
