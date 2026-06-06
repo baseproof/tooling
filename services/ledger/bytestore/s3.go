@@ -55,6 +55,8 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/aws/ratelimit"
+	"github.com/aws/aws-sdk-go-v2/aws/retry"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -239,6 +241,21 @@ func NewS3(ctx context.Context, cfg S3Config) (*S3, error) {
 		// test that proves no WARN is emitted on a real Get.
 		func(o *s3.Options) {
 			o.ResponseChecksumValidation = aws.ResponseChecksumValidationWhenRequired
+		},
+		// RETRY: the SDK's default retryer carries a client-side token-bucket
+		// rate limiter that DRAINS on sustained 5xx / throttling and then refuses
+		// every request — "failed to get rate limit token, retry quota exceeded,
+		// 0 available". That self-circuit-breaks the WHOLE client (uploads AND
+		// checkpoint publishes) while the store is merely overloaded, and it
+		// recovers only on restart. Disable that self-throttling limiter
+		// (ratelimit.None) and keep bounded, jittered backoff. Sustained back-
+		// pressure is shaped by the shipper's AIMD concurrency limiter, not by
+		// bricking the S3 client.
+		func(o *s3.Options) {
+			o.Retryer = retry.NewStandard(func(so *retry.StandardOptions) {
+				so.RateLimiter = ratelimit.None
+				so.MaxAttempts = 5
+			})
 		},
 	}
 	if cfg.Endpoint != "" {

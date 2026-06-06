@@ -59,10 +59,19 @@ import (
 	"sync"
 	"time"
 
+	sdklog "github.com/baseproof/baseproof/log"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/baseproof/tooling/services/ledger/chaos"
 	"github.com/baseproof/tooling/services/ledger/lifecycle"
 	"github.com/baseproof/tooling/services/ledger/wal"
 )
+
+// shipperTracerName is the OTel instrumentation scope for the shipper's spans.
+const shipperTracerName = "github.com/baseproof/tooling/services/ledger/shipper"
 
 // WAL is the WAL surface the Shipper depends on. *wal.Committer
 // satisfies it structurally; tests inject fakes.
@@ -115,6 +124,13 @@ type Config struct {
 	// BackoffMax caps the exponential backoff. Default 60s.
 	BackoffMax time.Duration
 
+	// HealthyWindow is how recently an upload must have SUCCEEDED for the store
+	// to count as "healthy". The failure path quarantines a poison entry
+	// (→ StateManual) only while the store is healthy; during an outage (no
+	// success within this window) every failure is retried relentlessly, so the
+	// durable head lags and then catches up instead of wedging. Default 60s.
+	HealthyWindow time.Duration
+
 	// Logger. Defaults to slog.Default if nil.
 	Logger *slog.Logger
 }
@@ -128,6 +144,13 @@ type Shipper struct {
 
 	completion chan uint64 // worker → hwmAdvancer
 	metrics    Metrics
+	tracer     trace.Tracer
+
+	// limiter is AIMD congestion control over uploads: it discovers the store's
+	// sustainable concurrency (backs off on failure, ramps on success) and
+	// supplies the store-health signal the failure path reads. MaxInFlight is its
+	// ceiling; it floors at 1 (always probe for recovery).
+	limiter *aimdLimiter
 
 	// inflight tracks seqs currently between scan dispatch and
 	// shipOne return. Without this guard, scan ticks at PollInterval
@@ -166,6 +189,9 @@ func NewShipper(w WAL, bs Bytestore, cfg Config) *Shipper {
 	if cfg.BackoffMax <= 0 {
 		cfg.BackoffMax = 60 * time.Second
 	}
+	if cfg.HealthyWindow <= 0 {
+		cfg.HealthyWindow = 60 * time.Second
+	}
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
 	}
@@ -174,7 +200,12 @@ func NewShipper(w WAL, bs Bytestore, cfg Config) *Shipper {
 		bytestore:  bs,
 		cfg:        cfg,
 		logger:     cfg.Logger,
+		tracer:     otel.Tracer(shipperTracerName),
 		completion: make(chan uint64, cfg.MaxInFlight*4),
+		// AIMD ceiling = the worker pool; floor 1. The limit floats below the
+		// ceiling under store pressure, so the worker count is a MAX, not a
+		// fixed burst.
+		limiter: newAIMDLimiter(1, cfg.MaxInFlight, 0.5),
 	}
 }
 
@@ -366,8 +397,26 @@ func (s *Shipper) shipOne(ctx context.Context, e wal.SequencedEntry) {
 	}
 	start := time.Now()
 
-	wire, err := s.wal.Read(ctx, e.Hash)
+	// Resume the entry's ADMISSION trace as a 1:1 continuation so the durable
+	// admission→ship path is one trace. The traceparent rides the WAL Meta
+	// (V3 record); MetaState is a cheap local read — the S3 PUT dominates, and
+	// the failure path reads meta again anyway.
+	var traceparent string
+	if meta, mErr := s.wal.MetaState(ctx, e.Hash); mErr == nil {
+		traceparent = meta.TraceContext
+	}
+	sctx, span := s.tracer.Start(
+		sdklog.CtxWithTraceparent(ctx, traceparent),
+		"shipper.ship",
+		trace.WithSpanKind(trace.SpanKindInternal),
+		trace.WithAttributes(attribute.Int64("ledger.seq", int64(e.Seq))),
+	)
+	defer span.End()
+
+	wire, err := s.wal.Read(sctx, e.Hash)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "wal read")
 		s.logger.Error("shipper: WAL read", "seq", e.Seq, "err", err)
 		s.recordFailure(ctx, e)
 		return
@@ -382,9 +431,20 @@ func (s *Shipper) shipOne(ctx context.Context, e wal.SequencedEntry) {
 	// and advances WAL state to Shipped.
 	chaos.Trigger("pre_shipper_upload")
 
-	if err := s.bytestore.WriteEntry(ctx, e.Seq, e.Hash, wire); err != nil {
+	// AIMD: take a concurrency slot before touching the store. The limit floats
+	// with the store's health (success ramps it, failure halves it), so a burst
+	// can never exceed what the store sustains — congestion control, not a fixed
+	// MaxInFlight. Parking here applies backpressure all the way up to the scanner.
+	if err := s.limiter.acquire(ctx); err != nil {
+		return // ctx cancelled; the entry stays StateSequenced for the next scan
+	}
+	werr := s.uploadWithSpan(sctx, e, wire)
+	s.limiter.release(werr == nil)
+	if werr != nil {
+		span.RecordError(werr)
+		span.SetStatus(codes.Error, "bytestore upload")
 		s.logger.Warn("shipper: bytestore upload failed",
-			"seq", e.Seq, "err", err)
+			"seq", e.Seq, "err", werr)
 		s.recordFailure(ctx, e)
 		return
 	}
@@ -423,6 +483,26 @@ func (s *Shipper) shipOne(ctx context.Context, e wal.SequencedEntry) {
 	}
 }
 
+// uploadWithSpan performs the bytestore upload under a granular "bytestore.put"
+// CLIENT span nested in the entry's ship span (which itself continues the
+// admission trace) — so a single entry's trace shows admission → ship → put.
+func (s *Shipper) uploadWithSpan(ctx context.Context, e wal.SequencedEntry, wire []byte) error {
+	ctx, span := s.tracer.Start(ctx, "bytestore.put",
+		trace.WithSpanKind(trace.SpanKindClient),
+		trace.WithAttributes(
+			attribute.Int64("ledger.seq", int64(e.Seq)),
+			attribute.Int("ledger.entry_bytes", len(wire)),
+		),
+	)
+	defer span.End()
+	err := s.bytestore.WriteEntry(ctx, e.Seq, e.Hash, wire)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+	}
+	return err
+}
+
 // recordFailure increments the retry counter or transitions the
 // entry to StateManual after MaxAttempts. When transitioning to
 // StateManual, signals the HWM advancer so it can advance past the
@@ -437,7 +517,14 @@ func (s *Shipper) recordFailure(ctx context.Context, e wal.SequencedEntry) {
 		s.logger.Error("shipper: read meta on failure", "seq", e.Seq, "err", err)
 		return
 	}
-	if meta.Attempts+1 >= s.cfg.MaxAttempts {
+	// RELENTLESS UNDER OUTAGE: quarantine (→ StateManual) only a POISON entry —
+	// one that keeps failing while the store is demonstrably HEALTHY (an upload
+	// succeeded within HealthyWindow). During a store outage (no recent success)
+	// the failure is the store's fault, not the entry's, so retry forever: the
+	// head LAGS and then CATCHES UP when the store recovers, never wedging.
+	// Quarantine remains the safety valve that keeps the advancer's hold set
+	// bounded for a genuine poison entry (a healthy store + one stuck entry).
+	if s.limiter.healthy(s.cfg.HealthyWindow) && meta.Attempts+1 >= s.cfg.MaxAttempts {
 		if err := s.wal.MarkManual(ctx, e.Hash); err != nil {
 			s.logger.Error("shipper: MarkManual", "seq", e.Seq, "err", err)
 			return

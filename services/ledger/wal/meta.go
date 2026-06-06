@@ -18,10 +18,18 @@ V2 (29 + 3 + R bytes, when len(Web3Receipts) > 0):
 	  [4 bytes uint32 per-receipt length BE]
 	  [N bytes envelope.SerializeWeb3VerificationReceipt(receipt) output]
 
-Detection: len(buf) > 29 ⇒ V2 trailer present. The 30th byte's
-version discriminator (currently only 0x02 is defined) is a hook
-for future trailer schema evolution without breaking the V1
-fast path.
+V3 (29 + 1 + 2 + T + 2 + R bytes, when TraceContext != ""):
+
+	[V1 29-byte prefix EXACTLY]
+	[1 byte trailer version = 0x03]
+	[2 bytes uint16 traceparent length BE][T bytes W3C traceparent]
+	[2 bytes uint16 receipt count BE][R bytes framed receipts — as V2]
+
+Detection: len(buf) > 29 ⇒ trailer present. The 30th byte's version
+discriminator (0x02 receipts-only; 0x03 traceparent + receipts) is a
+hook for trailer schema evolution without breaking the V1 fast path.
+A V3 record is emitted ONLY when TraceContext != "", so V1/V2 records
+stay byte-identical.
 
 Backwards compat:
   - Existing on-disk records (29 bytes) decode unchanged.
@@ -117,6 +125,15 @@ type Meta struct {
 	// path; pre-v1.7.0 records). Index-aligned with the entry's
 	// Signatures when populated.
 	Web3Receipts []types.Web3VerificationReceipt
+
+	// TraceContext is the W3C `traceparent` of the admission span,
+	// captured at first Submit (empty when the admission trace was
+	// not sampled, or tracing is off). Persisted so the asynchronous
+	// downstream stages (sequencer, shipper) can RESUME the same trace
+	// across the WAL boundary — turning admission→ship into one trace
+	// per entry. Read-modify-write transitions (Sequence/MarkShipped/…)
+	// preserve it automatically.
+	TraceContext string
 }
 
 // metaV1Size is the on-disk size of the fixed-width V1 prefix.
@@ -127,6 +144,14 @@ const metaV1Size = 1 + 8 + 4 + 8 + 8
 // V2-encoded record. Bumping this lets future encoders extend the
 // trailer schema without breaking the V1 fast path.
 const metaTrailerVersionV2 byte = 0x02
+
+// metaTrailerVersionV3 is the discriminator for a record that also
+// carries a TraceContext. Layout: V1 prefix, 0x03, [2-byte traceparent
+// length BE][traceparent bytes], then the same [2-byte receipt count]
+// [framed receipts] block as V2. A V3 record is emitted ONLY when
+// TraceContext != "" — so V1/V2 records remain byte-identical and the
+// idempotent-overwrite property is preserved per record.
+const metaTrailerVersionV3 byte = 0x03
 
 // ErrMetaCorrupt is returned by decodeMeta when the byte slice is
 // truncated or malformed.
@@ -156,33 +181,58 @@ func encodeMeta(m Meta) []byte {
 	// strictly positive at runtime.
 	binary.BigEndian.PutUint64(v1[21:29], uint64(m.LogTimeMicros))
 
-	if len(m.Web3Receipts) == 0 {
+	if len(m.Web3Receipts) == 0 && m.TraceContext == "" {
 		// V1 fast path — byte-identical to the legacy producer.
 		return v1
 	}
 
-	// V2 trailer. Per the receipt-schema invariant in the v1.7.0
-	// SDK commit message: "K ≤ len(Clients) ≤ N" — every receipt's
-	// internal ExecutorQuorum.Clients slice is variable-length, but
-	// SerializeWeb3VerificationReceipt produces a self-describing
-	// wire-form per receipt. We length-prefix each receipt at this
-	// layer so the decoder can iterate without round-tripping
-	// through SDK structure validation per element.
+	// Per the receipt-schema invariant in the v1.7.0 SDK commit message:
+	// "K ≤ len(Clients) ≤ N" — every receipt's internal
+	// ExecutorQuorum.Clients slice is variable-length, but
+	// SerializeWeb3VerificationReceipt produces a self-describing wire-form
+	// per receipt. We length-prefix each receipt at this layer so the decoder
+	// can iterate without round-tripping through SDK structure validation per
+	// element.
 	if len(m.Web3Receipts) > 0xFFFF {
-		// Defensive — envelope.MaxSignaturesPerEntry is 64, so a
-		// receipts slice can never legitimately exceed that. The
-		// uint16 count field caps at 65535; if a future SDK lifts
-		// the cap above that the format needs a version bump.
+		// Defensive — envelope.MaxSignaturesPerEntry is 64, so a receipts slice
+		// can never legitimately exceed that. The uint16 count field caps at
+		// 65535; if a future SDK lifts the cap above that the format needs a
+		// version bump.
 		panic(fmt.Sprintf("wal/meta: encodeMeta receipts count %d exceeds uint16 max", len(m.Web3Receipts)))
 	}
-	out := make([]byte, 0, metaV1Size+3+128*len(m.Web3Receipts))
+
+	if m.TraceContext == "" {
+		// V2 trailer — receipts only; byte-identical to the legacy producer.
+		out := make([]byte, 0, metaV1Size+3+128*len(m.Web3Receipts))
+		out = append(out, v1...)
+		out = append(out, metaTrailerVersionV2)
+		return appendReceiptBlock(out, m.Web3Receipts)
+	}
+
+	// V3 trailer — traceparent (+ optional receipts). A W3C traceparent is a
+	// short fixed-shape ASCII string (~55 bytes); uint16 length is ample.
+	tp := []byte(m.TraceContext)
+	if len(tp) > 0xFFFF {
+		panic(fmt.Sprintf("wal/meta: encodeMeta traceparent length %d exceeds uint16 max", len(tp)))
+	}
+	out := make([]byte, 0, metaV1Size+1+2+len(tp)+3+128*len(m.Web3Receipts))
 	out = append(out, v1...)
-	out = append(out, metaTrailerVersionV2)
+	out = append(out, metaTrailerVersionV3)
+	var tpLen [2]byte
+	binary.BigEndian.PutUint16(tpLen[:], uint16(len(tp)))
+	out = append(out, tpLen[:]...)
+	out = append(out, tp...)
+	return appendReceiptBlock(out, m.Web3Receipts)
+}
+
+// appendReceiptBlock appends the shared V2/V3 receipt block to out:
+// [2-byte count BE] followed by, per receipt, [4-byte length BE][body].
+func appendReceiptBlock(out []byte, receipts []types.Web3VerificationReceipt) []byte {
 	var countBuf [2]byte
-	binary.BigEndian.PutUint16(countBuf[:], uint16(len(m.Web3Receipts)))
+	binary.BigEndian.PutUint16(countBuf[:], uint16(len(receipts)))
 	out = append(out, countBuf[:]...)
-	for i := range m.Web3Receipts {
-		body, err := envelope.SerializeWeb3VerificationReceipt(m.Web3Receipts[i])
+	for i := range receipts {
+		body, err := envelope.SerializeWeb3VerificationReceipt(receipts[i])
 		if err != nil {
 			panic(fmt.Sprintf("wal/meta: SerializeWeb3VerificationReceipt receipts[%d]: %v", i, err))
 		}
@@ -192,6 +242,36 @@ func encodeMeta(m Meta) []byte {
 		out = append(out, body...)
 	}
 	return out
+}
+
+// decodeReceiptBlock parses the shared V2/V3 receipt block beginning at off,
+// returning the receipts and the offset just past them.
+func decodeReceiptBlock(buf []byte, off int) ([]types.Web3VerificationReceipt, int, error) {
+	if off+2 > len(buf) {
+		return nil, 0, fmt.Errorf("%w: receipt count truncated at off=%d", ErrMetaCorrupt, off)
+	}
+	count := binary.BigEndian.Uint16(buf[off : off+2])
+	off += 2
+	receipts := make([]types.Web3VerificationReceipt, count)
+	for i := uint16(0); i < count; i++ {
+		if off+4 > len(buf) {
+			return nil, 0, fmt.Errorf("%w: receipt[%d] length-prefix truncated at off=%d",
+				ErrMetaCorrupt, i, off)
+		}
+		recLen := binary.BigEndian.Uint32(buf[off : off+4])
+		off += 4
+		if uint64(off)+uint64(recLen) > uint64(len(buf)) {
+			return nil, 0, fmt.Errorf("%w: receipt[%d] payload (len=%d) extends past buffer (off=%d, total=%d)",
+				ErrMetaCorrupt, i, recLen, off, len(buf))
+		}
+		rec, _, err := envelope.DeserializeWeb3VerificationReceipt(buf[off : off+int(recLen)])
+		if err != nil {
+			return nil, 0, fmt.Errorf("%w: receipt[%d] deserialize: %v", ErrMetaCorrupt, i, err)
+		}
+		receipts[i] = rec
+		off += int(recLen)
+	}
+	return receipts, off, nil
 }
 
 // decodeMeta parses a V1 or V2 meta record.
@@ -210,44 +290,48 @@ func decodeMeta(buf []byte) (Meta, error) {
 	}
 	m.LogTimeMicros = int64(binary.BigEndian.Uint64(buf[21:29]))
 	if len(buf) == metaV1Size {
-		// V1 record (or V2 with empty receipts — both encode the
+		// V1 record (or V2/V3 with empty trailer payload — all encode the
 		// same 29 bytes by design).
 		return m, nil
 	}
-	// V2 trailer.
-	if len(buf) < metaV1Size+3 {
-		return Meta{}, fmt.Errorf("%w: trailer header short read %d",
-			ErrMetaCorrupt, len(buf))
+	// Trailer present — dispatch on the version discriminator at offset 29.
+	if len(buf) < metaV1Size+1 {
+		return Meta{}, fmt.Errorf("%w: trailer header short read %d", ErrMetaCorrupt, len(buf))
 	}
-	if v := buf[metaV1Size]; v != metaTrailerVersionV2 {
-		return Meta{}, fmt.Errorf("%w: unknown trailer version 0x%02x",
-			ErrMetaCorrupt, v)
-	}
-	count := binary.BigEndian.Uint16(buf[metaV1Size+1 : metaV1Size+3])
-	off := metaV1Size + 3
-	m.Web3Receipts = make([]types.Web3VerificationReceipt, count)
-	for i := uint16(0); i < count; i++ {
-		if off+4 > len(buf) {
-			return Meta{}, fmt.Errorf("%w: receipt[%d] length-prefix truncated at off=%d",
-				ErrMetaCorrupt, i, off)
-		}
-		recLen := binary.BigEndian.Uint32(buf[off : off+4])
-		off += 4
-		if uint64(off)+uint64(recLen) > uint64(len(buf)) {
-			return Meta{}, fmt.Errorf("%w: receipt[%d] payload (len=%d) extends past buffer (off=%d, total=%d)",
-				ErrMetaCorrupt, i, recLen, off, len(buf))
-		}
-		rec, _, err := envelope.DeserializeWeb3VerificationReceipt(buf[off : off+int(recLen)])
+	off := metaV1Size + 1
+	switch v := buf[metaV1Size]; v {
+	case metaTrailerVersionV2:
+		// V2 — receipts only.
+		receipts, end, err := decodeReceiptBlock(buf, off)
 		if err != nil {
-			return Meta{}, fmt.Errorf("%w: receipt[%d] deserialize: %v",
-				ErrMetaCorrupt, i, err)
+			return Meta{}, err
 		}
-		m.Web3Receipts[i] = rec
-		off += int(recLen)
+		m.Web3Receipts = receipts
+		off = end
+	case metaTrailerVersionV3:
+		// V3 — traceparent then receipts.
+		if off+2 > len(buf) {
+			return Meta{}, fmt.Errorf("%w: traceparent length truncated at off=%d", ErrMetaCorrupt, off)
+		}
+		tpLen := int(binary.BigEndian.Uint16(buf[off : off+2]))
+		off += 2
+		if off+tpLen > len(buf) {
+			return Meta{}, fmt.Errorf("%w: traceparent (len=%d) extends past buffer (off=%d, total=%d)",
+				ErrMetaCorrupt, tpLen, off, len(buf))
+		}
+		m.TraceContext = string(buf[off : off+tpLen])
+		off += tpLen
+		receipts, end, err := decodeReceiptBlock(buf, off)
+		if err != nil {
+			return Meta{}, err
+		}
+		m.Web3Receipts = receipts
+		off = end
+	default:
+		return Meta{}, fmt.Errorf("%w: unknown trailer version 0x%02x", ErrMetaCorrupt, v)
 	}
 	if off != len(buf) {
-		return Meta{}, fmt.Errorf("%w: trailing %d bytes after %d receipts",
-			ErrMetaCorrupt, len(buf)-off, count)
+		return Meta{}, fmt.Errorf("%w: trailing %d bytes after trailer", ErrMetaCorrupt, len(buf)-off)
 	}
 	return m, nil
 }

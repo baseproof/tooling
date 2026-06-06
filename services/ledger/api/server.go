@@ -65,6 +65,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	sdklog "github.com/baseproof/baseproof/log"
+
 	"github.com/baseproof/tooling/services/ledger/api/middleware"
 )
 
@@ -647,7 +649,13 @@ func NewServer(
 	// Every request gets a correlation ID. Wraps the entire mux
 	// (after route registration) so health checks, write paths,
 	// and read paths all carry the same X-Request-ID surface.
-	root := middleware.WithRequestID(mux)
+	// OTel SERVER span wraps the mux directly: it EXTRACTS the caller's
+	// traceparent (continuing one cross-component trace) and starts the
+	// admission span that the handlers' wal.Submit captures into the WAL for the
+	// async downstream stages to resume. Placed INSIDE WithRequestID so the mux
+	// sets r.Pattern in place for the span's low-cardinality route name (outer
+	// middleware that clones the request via WithContext would hide it).
+	root := middleware.WithRequestID(sdklog.NewOTelHandler(mux))
 
 	// D3 — Request duration histogram. Outermost wrap so
 	// authn + every other middleware is included in the
