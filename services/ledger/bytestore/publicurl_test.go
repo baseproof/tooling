@@ -31,6 +31,7 @@ package bytestore
 import (
 	"crypto/sha256"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -53,7 +54,7 @@ func TestPublicURLMapper_CanonicalShape(t *testing.T) {
 	if err != nil {
 		t.Fatalf("PublicURL: %v", err)
 	}
-	want := "https://cdn.example.com/log/entries/000000000000abcd/" +
+	want := fmt.Sprintf("https://cdn.example.com/log/entries/%02x/000000000000abcd/", hash[0]) +
 		hexEncode(hash[:])
 	if got != want {
 		t.Errorf("PublicURL = %q\n want = %q", got, want)

@@ -262,7 +262,7 @@ func runBackendConformance(ctx context.Context, t *testing.T, backend Backend) {
 		// redirect MUST be able to verify (without fetching) that the
 		// URL points at the bytes the ledger promised. We achieve
 		// this by including the hash hex in the object path
-		// (layoutKey: <prefix>/<seq:016x>/<hash_hex>). If the URL
+		// (layoutKey: <prefix>/<shard>/<seq:016x>/<hash_hex>). If the URL
 		// doesn't contain the hex, the redirect path is broken.
 		wire := []byte("hash-suffix invariant — checked at the URL surface")
 		hash := sha256.Sum256(wire)

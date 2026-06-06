@@ -34,7 +34,7 @@ OBJECT KEY SHAPE:
 
 	All adapters use the same path layout via layoutKey:
 
-	  <prefix>/<seq:016x>/<hash_hex>
+	  <prefix>/<shard>/<seq:016x>/<hash_hex>
 
 	Hash in the path is what makes the 302 redirect path safe: the
 	consumer can verify statically that the URL points at the bytes
@@ -127,19 +127,34 @@ type Backend interface {
 }
 
 // layoutKey returns the canonical object name for an entry. ALL
-// adapters MUST use this function so a bucket written by one
-// adapter is readable by any other.
+// adapters (and the public-URL mapper) MUST use this function so a
+// bucket written by one adapter is readable by any other and the 302
+// redirect target matches the write path byte-for-byte.
 //
 // The shape is:
 //
-//	<prefix>/<seq:016x>/<hash_hex>
+//	<prefix>/<shard>/<seq:016x>/<hash_hex>
 //
-// Zero-padded hex sequence sorts lexically the same way it sorts
-// numerically — useful for ad-hoc gsutil/aws ls inspection. The
-// hash suffix is what makes the 302 redirect safe (consumers can
-// statically verify the URL points at the promised hash).
+// where <shard> is the first byte of the content hash (two hex chars,
+// 256 values). It LEADS the key so writes spread uniformly across S3/GCS
+// partitions: object stores rate-limit PER PREFIX (AWS S3 ~3,500 PUT/s
+// per prefix) and partition on key ranges, so a monotonic <seq>-leading
+// key hot-spots a single partition under a sustained backfill burst —
+// auto-partition-splitting lags 30–60 min, so the burst throttles (503
+// SlowDown) before the store adapts. The hash is uniform (SHA), so 256
+// shards give ~256× the single-prefix ceiling with no config or skew.
+//
+// The seq is retained AFTER the shard for in-shard ordering (ad-hoc
+// gsutil/aws ls inspection within a shard). The hash suffix keeps the
+// 302 redirect safe — a consumer can statically verify the URL points at
+// the promised hash.
+//
+// NOTE: changing this layout is a breaking change for any already-written
+// bucket (the read path recomputes the key from (seq, hash), so old
+// objects become unreadable). Safe pre-pilot (no durable data yet); a
+// migration is required once a bucket holds entries under the old layout.
 func layoutKey(prefix string, seq uint64, hash [32]byte) string {
-	return fmt.Sprintf("%s/%016x/%s", prefix, seq, hex.EncodeToString(hash[:]))
+	return fmt.Sprintf("%s/%02x/%016x/%s", prefix, hash[0], seq, hex.EncodeToString(hash[:]))
 }
 
 // namespacedKey prepends a per-log namespace segment to a RAW substrate key (an

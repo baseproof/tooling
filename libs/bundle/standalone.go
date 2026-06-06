@@ -172,6 +172,12 @@ func (g *StandaloneLedgerGather) FetchEntry(ctx context.Context, seq uint64) ([]
 	if err != nil {
 		return nil, time.Time{}, fmt.Errorf("bundle/standalone: FetchEntry %d: %w", seq, err)
 	}
+	// The ledger client returns (nil, nil) on a 404 (entry not at that seq, or its
+	// shipped bytes are unreachable at the public bytestore URL). Surface a clean
+	// error rather than dereferencing nil.
+	if e == nil {
+		return nil, time.Time{}, fmt.Errorf("bundle/standalone: FetchEntry %d: entry not found (404)", seq)
+	}
 	canonical, err := hex.DecodeString(e.CanonicalHex)
 	if err != nil {
 		return nil, time.Time{}, fmt.Errorf("bundle/standalone: entry %d canonical_hex: %w", seq, err)

@@ -176,7 +176,7 @@ func TestS3_ObjectName_UsesLayoutKey(t *testing.T) {
 	store := &S3{objectPrefix: "entries"}
 	hash := sha256.Sum256([]byte("k"))
 	got := store.keyOf(42, hash)
-	want := fmt.Sprintf("entries/%016x/%x", uint64(42), hash[:])
+	want := fmt.Sprintf("entries/%02x/%016x/%x", hash[0], uint64(42), hash[:])
 	if got != want {
 		t.Errorf("keyOf: got %q, want %q", got, want)
 	}
