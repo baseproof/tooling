@@ -138,6 +138,24 @@ func (h *tileBackendHorizon) ReadReceiptCommits(ctx context.Context, coveringSiz
 	return raw, nil
 }
 
+// rotationChainObject is the storage key for the archived witness-rotation chain
+// (1.2b) — a single key (the chain is small). MUST match store/rotation_archive.go
+// rotationChainKey.
+func rotationChainObject() string { return "witness-rotations" }
+
+// ReadRotationChain reads the archived witness-rotation chain blob from the object
+// store — PG-free. A wrapped os.ErrNotExist when no chain was archived (a
+// never-rotated network). Satisfies store.RotationChainReader (the source
+// store.ArchiveRotationChainFetcher reconstructs the SDK's FetchWitnessRotationChain
+// seam from).
+func (h *tileBackendHorizon) ReadRotationChain(ctx context.Context) ([]byte, error) {
+	raw, err := h.backend.ReadTileByPath(ctx, rotationChainObject())
+	if err != nil {
+		return nil, err
+	}
+	return raw, nil
+}
+
 // ReadCheckpointAt reads the archived cosigned head at the given tree size from
 // the object store — PG-free. Returns a wrapped os.ErrNotExist when that size was
 // never archived (pre-archive history, or a size that was never a cosigned head).

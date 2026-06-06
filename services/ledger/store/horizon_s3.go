@@ -139,6 +139,21 @@ func (r *S3HorizonReader) ReadReceiptCommits(ctx context.Context, coveringSize u
 	return raw, nil
 }
 
+// ReadRotationChain reads the archived witness-rotation chain blob from the shared
+// object store — PG-free. A never-rotated network (no chain archived) → os.ErrNotExist.
+// Satisfies RotationChainReader (the source ArchiveRotationChainFetcher reconstructs
+// the SDK's FetchWitnessRotationChain seam from).
+func (r *S3HorizonReader) ReadRotationChain(ctx context.Context) ([]byte, error) {
+	raw, err := r.obj.GetObject(ctx, rotationChainKey())
+	if errors.Is(err, bytestore.ErrNotFound) {
+		return nil, os.ErrNotExist // never rotated
+	}
+	if err != nil {
+		return nil, err
+	}
+	return raw, nil
+}
+
 // ReadCheckpointAt reads the archived cosigned head at the given tree size from
 // the shared object store — PG-free. A size never archived → os.ErrNotExist.
 // Satisfies api.CheckpointArchiveReader structurally (the S3 deployment's
