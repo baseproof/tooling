@@ -55,7 +55,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/baseproof/baseproof/core/smt"
 	sdklog "github.com/baseproof/baseproof/log"
 	"github.com/baseproof/baseproof/types"
 	"go.opentelemetry.io/otel"
@@ -442,13 +441,15 @@ func (l *CheckpointLoop) CheckpointOnce(ctx context.Context) error {
 	l.logger.DebugContext(ctx, "checkpoint step: root at size",
 		"tree_size", treeSize, "root_hash", fmt.Sprintf("%x", rootHash[:8]))
 
-	// ── Step 7: receipt root over the entries this checkpoint newly covers ──
-	receiptRoot, rcErr := l.receiptRootForCheckpoint(ctx, fRoot, fSeq, cSeq)
+	// ── Step 7: receipt root over the entries newly covered since the last PUBLISH
+	//    (the delta [lastPublishedSize, cSeq]) — keyed off the cosigned ladder, not
+	//    the tile frontier, so a cosign hold can't orphan the held delta's receipts. ──
+	receiptRoot, rcErr := l.receiptRootForCheckpoint(ctx, cSeq)
 	if rcErr != nil {
-		return fmt.Errorf("checkpoint: receipt root [%d..%d]: %w", fSeq, cSeq, rcErr)
+		return fmt.Errorf("checkpoint: receipt root [%d..%d]: %w", l.lastPublishedSize, cSeq, rcErr)
 	}
 	l.logger.DebugContext(ctx, "checkpoint step: receipt root",
-		"from_seq", fSeq, "to_seq", cSeq,
+		"from_seq", l.lastPublishedSize, "to_seq", cSeq,
 		"receipt_root", fmt.Sprintf("%x", receiptRoot[:8]))
 
 	head := types.TreeHead{
@@ -542,21 +543,27 @@ func (l *CheckpointLoop) hold(ctx context.Context, reason string, attrs ...any) 
 }
 
 // receiptRootForCheckpoint computes the ReceiptRoot over the entries this
-// checkpoint newly covers. The lower bound is the prior durable frontier: on the
-// genesis→first transition (frontier still at the empty root) the delta is the
-// whole committed range [0, cSeq]; thereafter it is (fSeq, cSeq] i.e.
-// [fSeq+1, cSeq]. nil ranger ⇒ the empty ReceiptRoot (the cosign payload accepts
-// a zero ReceiptRoot as "no off-chain receipts").
-func (l *CheckpointLoop) receiptRootForCheckpoint(ctx context.Context, fRoot [32]byte, fSeq, cSeq uint64) ([32]byte, error) {
+// checkpoint newly covers, as the delta [lastPublishedSize, cSeq].
+//
+// The lower bound is the last PUBLISHED (witness-cosigned) tree_size — NOT the
+// tile-durability frontier. The frontier advances at Step 5 (before cosign), so a
+// cosign HOLD leaves it ahead of the horizon; keying the receipt delta off it then
+// (a) ORPHANS the held checkpoint's receipts (its delta root is never published)
+// and (b) desyncs from the receipt-proof handler, which keys its range off the
+// cosigned ladder (CosignedSizeBelow). The last published checkpoint at tree_size
+// lastPublishedSize covers seqs [0, lastPublishedSize-1], so the entries not yet in
+// a published checkpoint are [lastPublishedSize, cSeq] — exactly the handler's
+// reconstruction range, and across a hold this delta SPANS the held region (no
+// orphaning). lastPublishedSize 0 ⇒ genesis ⇒ the whole committed range [0, cSeq].
+// nil ranger ⇒ the empty ReceiptRoot (the cosign payload accepts a zero ReceiptRoot
+// as "no off-chain receipts").
+func (l *CheckpointLoop) receiptRootForCheckpoint(ctx context.Context, cSeq uint64) ([32]byte, error) {
 	if l.receipts == nil {
 		return [32]byte{}, nil
 	}
-	fromSeq := uint64(0)
-	if fRoot != smt.EmptyHash {
-		fromSeq = fSeq + 1
-	}
+	fromSeq := l.lastPublishedSize
 	if fromSeq > cSeq {
-		// Nothing new (e.g. a re-publish of the same frontier root) — empty set.
+		// Nothing new since the last publish (e.g. a re-tick at the same size).
 		return [32]byte{}, nil
 	}
 	return l.receipts.ReceiptRoot(ctx, fromSeq, cSeq)
