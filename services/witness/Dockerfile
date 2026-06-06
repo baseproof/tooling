@@ -5,8 +5,10 @@
 # so a strict-pull deployment can mint witness keys + the network bootstrap from
 # the SAME published image — no source checkout needed.
 #
-# Build context is THIS module's dir (services/witness):
-#   docker build -t witness:local services/witness
+# CROSS-MODULE BUILD: the witness depends on the sibling `libs` module via a
+# `replace => ../../libs` directive in go.mod (libs/tracing), so the build
+# CONTEXT is the REPO ROOT (not services/witness). Build from the repo root:
+#   docker build -f services/witness/Dockerfile -t witness:local .
 #
 # Run the daemon (non-root; mount the key readable by uid 65532):
 #   docker run --rm -v $(pwd)/.run:/keys:ro -p 8081:8081 witness:local \
@@ -18,8 +20,8 @@
 #     -out-dir=/out -out-bootstrap=/out/network-bootstrap.json -witnesses=5
 #
 # Behind a TLS-inspecting egress proxy, pass the trust bundle (no-op when absent):
-#   docker build --secret id=ca_bundle,src=/etc/ssl/certs/ca-certificates.crt \
-#     -t witness:local services/witness
+#   docker build -f services/witness/Dockerfile \
+#     --secret id=ca_bundle,src=/etc/ssl/certs/ca-certificates.crt -t witness:local .
 FROM --platform=$BUILDPLATFORM golang:1.25-alpine AS builder
 # Cross-compile from the native build platform to TARGETOS/TARGETARCH (set by
 # buildx) — no QEMU-emulated compilation. CGO is off, so this is a pure
@@ -28,7 +30,16 @@ ARG TARGETOS TARGETARCH
 
 WORKDIR /src
 
-COPY go.mod go.sum ./
+# The sibling libs module is the `replace => ../../libs` target; copy it first so
+# the cross-module require resolves, then the service module.
+COPY libs/ ./libs/
+COPY services/witness/ ./services/witness/
+
+WORKDIR /src/services/witness
+
+# Build the witness module standalone (its go.mod + local replace), not under
+# the repo workspace.
+ENV GOWORK=off
 
 # Deps are public, so no VCS auth. The optional ca_bundle secret trusts a
 # TLS-inspecting proxy's CA; cache mounts speed re-builds without bloating the
@@ -40,8 +51,6 @@ RUN --mount=type=secret,id=ca_bundle \
       cat /run/secrets/ca_bundle >> /etc/ssl/certs/ca-certificates.crt; \
     fi; \
     go mod download
-
-COPY . ./
 
 # VERSION is stamped into main.version. Defaults to "docker" when the build arg
 # is omitted so an unstamped image is still identifiable.

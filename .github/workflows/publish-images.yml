@@ -47,10 +47,12 @@ jobs:
           - service: auditor
             dockerfile: services/auditor/Dockerfile
             context: .
-          # The witness is self-contained; its context is the module dir.
+          # The witness is ALSO a CROSS-MODULE build (it depends on the sibling
+          # libs module via `replace => ../../libs` for libs/tracing), so its
+          # context is the repo root — same as the auditor.
           - service: witness
             dockerfile: services/witness/Dockerfile
-            context: services/witness
+            context: .
     steps:
       - name: Checkout
         uses: actions/checkout@v4
