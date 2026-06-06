@@ -169,3 +169,50 @@ func TestTreeInclusion_PGOff_NoHorizon_Unavailable(t *testing.T) {
 		t.Fatalf("status = %d, want 503 (PG down, no horizon)", rec.Code)
 	}
 }
+
+// ─────────────────────────────────────────────────────────────────────
+// Negative-answer audit (1.3f): a leaf is provable only inside the tree that
+// commits it. seq beyond the (cosigned) tree size is a GENUINE negative (404);
+// a proof-generation failure for an IN-RANGE seq is a tile/object-store read
+// error and must surface as 500 — never a 404 a consumer could mistake for
+// cryptographic proof the leaf is absent.
+// ─────────────────────────────────────────────────────────────────────
+
+// seq == tree size is out of range (leaves are 0..size-1) → 404, BEFORE any
+// proof generation is attempted.
+func TestTreeInclusion_SeqBeyondTree_404(t *testing.T) {
+	rec, cap := serveInclusion(t, 100, "/v1/tree/inclusion/100")
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404 (seq beyond tree); body=%s", rec.Code, rec.Body.String())
+	}
+	if cap.gotTreeSize != 0 {
+		t.Errorf("RawInclusionProof was called (treeSize=%d) for an out-of-range seq; want a 404 before proof generation", cap.gotTreeSize)
+	}
+}
+
+// erroringInclusion fails proof generation (e.g. a tile/object-store read error).
+type erroringInclusion struct{}
+
+func (erroringInclusion) RawInclusionProof(_, _ uint64) (any, error) {
+	return nil, errors.New("tile backend: read timeout")
+}
+
+// The load-bearing guard: an in-range proof error must be 500, NOT a 404.
+func TestTreeInclusion_ProofError_500_NotFalse404(t *testing.T) {
+	deps := &TreeDeps{
+		TreeHeadStore: fakeHeadFetcher{size: 1000},
+		Inclusion:     erroringInclusion{},
+		Logger:        quietLogger(),
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /v1/tree/inclusion/{seq}", NewTreeInclusionHandler(deps))
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/tree/inclusion/42", nil))
+
+	if rec.Code == http.StatusNotFound {
+		t.Fatal("in-range proof error returned 404 — a transport error must NOT masquerade as cryptographic absence")
+	}
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500 (honest read failure)", rec.Code)
+	}
+}

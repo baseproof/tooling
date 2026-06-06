@@ -206,11 +206,27 @@ func NewTreeInclusionHandler(deps *TreeDeps) http.HandlerFunc {
 			return
 		}
 
-		proof, err := deps.Inclusion.RawInclusionProof(seq, treeSize)
-		if err != nil {
+		// Negative-answer audit (PG-off read front): a leaf is provable iff the
+		// tree of size treeSize commits it, i.e. seq < treeSize (leaves are
+		// 0-indexed). seq beyond the tree is a GENUINE cryptographic negative →
+		// 404. Past that bound a RawInclusionProof failure is a tile/object-store
+		// READ error, not absence: surface it as 500. Returning 404 there would
+		// let a transient backend hiccup masquerade as proof the leaf does not
+		// exist — on a PG-off front the object store is the sole backend, so this
+		// distinction is load-bearing.
+		if seq >= treeSize {
 			writeTypedError(ctx, w, apitypes.ErrorClassProofGenFailed,
 				http.StatusNotFound,
-				fmt.Sprintf("inclusion proof: %s", err))
+				fmt.Sprintf("seq %d not in tree of size %d", seq, treeSize))
+			return
+		}
+
+		proof, err := deps.Inclusion.RawInclusionProof(seq, treeSize)
+		if err != nil {
+			deps.Logger.Error("inclusion proof", "seq", seq, "tree_size", treeSize, "error", err)
+			writeTypedError(ctx, w, apitypes.ErrorClassProofGenFailed,
+				http.StatusInternalServerError,
+				"inclusion proof generation failed")
 			return
 		}
 
