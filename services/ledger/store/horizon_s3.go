@@ -83,6 +83,15 @@ func checkpointArchiveKey(size uint64) string {
 	return "checkpoints/" + strconv.FormatUint(size, 10)
 }
 
+// receiptArchiveKey is the LOGICAL object key for the per-checkpoint dense
+// receipt-commitment archive (1.2a) — the bytes ArchiveReceiptRanger reconstructs
+// ReceiptRoot + inclusion proofs from, PG-free. Parallel to checkpointArchiveKey;
+// the *bytestore.S3 adapter prepends the per-log namespace, so two logs sharing a
+// bucket never collide.
+func receiptArchiveKey(coveringSize uint64) string {
+	return "receipts/" + strconv.FormatUint(coveringSize, 10)
+}
+
 // S3HorizonReader reads the published horizon from the shared object store. It
 // satisfies api.HorizonReader structurally: ReadHorizon returns the parsed head
 // AND the exact published bytes (so the proof handler bundles the bytes a client
@@ -112,6 +121,22 @@ func (r *S3HorizonReader) ReadHorizon(ctx context.Context) (*sdktypes.CosignedTr
 		return nil, nil, fmt.Errorf("store/horizon-s3: decode cosigned checkpoint: %w", cErr)
 	}
 	return &head, raw, nil
+}
+
+// ReadReceiptCommits reads the archived dense receipt-commitment blob for the
+// checkpoint at coveringSize from the shared object store — PG-free. A checkpoint
+// whose receipts were never archived → os.ErrNotExist. Satisfies ReceiptCommitReader
+// (the source ArchiveReceiptRanger reconstructs receipt proofs from). Returns the
+// raw bytes verbatim; DecodeReceiptCommits validates framing.
+func (r *S3HorizonReader) ReadReceiptCommits(ctx context.Context, coveringSize uint64) ([]byte, error) {
+	raw, err := r.obj.GetObject(ctx, receiptArchiveKey(coveringSize))
+	if errors.Is(err, bytestore.ErrNotFound) {
+		return nil, os.ErrNotExist // checkpoint's receipts never archived
+	}
+	if err != nil {
+		return nil, err
+	}
+	return raw, nil
 }
 
 // ReadCheckpointAt reads the archived cosigned head at the given tree size from

@@ -118,6 +118,26 @@ type CheckpointArchiveReader interface {
 	ReadCheckpointAt(ctx context.Context, size uint64) (head *types.CosignedTreeHead, raw []byte, err error)
 }
 
+// receiptArchiveObject is the storage key for the per-checkpoint dense
+// receipt-commitment archive (1.2a) — MUST match store/horizon_s3.go
+// receiptArchiveKey and the builder's best-effort write.
+func receiptArchiveObject(coveringSize uint64) string {
+	return "receipts/" + strconv.FormatUint(coveringSize, 10)
+}
+
+// ReadReceiptCommits reads the archived dense receipt-commitment blob for the
+// checkpoint at coveringSize from the object store — PG-free. A wrapped
+// os.ErrNotExist when that checkpoint's receipts were never archived. Satisfies
+// store.ReceiptCommitReader (the source store.ArchiveReceiptRanger reconstructs
+// receipt proofs from); the ledger's wiring composes it behind FallbackReceiptProver.
+func (h *tileBackendHorizon) ReadReceiptCommits(ctx context.Context, coveringSize uint64) ([]byte, error) {
+	raw, err := h.backend.ReadTileByPath(ctx, receiptArchiveObject(coveringSize))
+	if err != nil {
+		return nil, err
+	}
+	return raw, nil
+}
+
 // ReadCheckpointAt reads the archived cosigned head at the given tree size from
 // the object store — PG-free. Returns a wrapped os.ErrNotExist when that size was
 // never archived (pre-archive history, or a size that was never a cosigned head).

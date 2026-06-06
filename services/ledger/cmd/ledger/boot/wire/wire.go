@@ -922,6 +922,21 @@ func composeHandlers(
 		gossipFeedH = d.GossipBundle.FeedHandler
 	}
 
+	// 1.2a: receipt proofs default to the PG ranger (entry_index). When the
+	// object-store archive is available (same horizon reader the cold-seq checkpoint
+	// archive uses, now also exposing ReadReceiptCommits), wrap it so receipts serve
+	// PG-free as a graceful fallback — entry_index GC / PG-off — without masking a
+	// genuine "no receipt for this seq".
+	pgReceipts := store.NewEntryIndexReceiptRanger(d.PgPool.DB, cfg.LogDID)
+	var receiptProver api.ReceiptProver = pgReceipts
+	if rcr, ok := horizonReader.(store.ReceiptCommitReader); ok {
+		receiptProver = &api.FallbackReceiptProver{
+			Primary:  pgReceipts,
+			Fallback: store.NewArchiveReceiptRanger(rcr, cfg.LogDID),
+			Logger:   d.Logger,
+		}
+	}
+
 	return api.Handlers{
 		Submission:      submitHandler,
 		BatchSubmission: batchSubmitHandler,
@@ -933,7 +948,7 @@ func composeHandlers(
 		SMTRoot:         api.NewSMTRootHandler(smtDeps),
 		ReceiptProof: api.NewReceiptProofHandler(&api.ReceiptDeps{
 			Heads:    d.TreeHeadStore,
-			Receipts: store.NewEntryIndexReceiptRanger(d.PgPool.DB, cfg.LogDID),
+			Receipts: receiptProver,
 			MinSigs:  cfg.WitnessQuorumK,
 			Logger:   d.Logger,
 		}),
