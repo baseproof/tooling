@@ -156,6 +156,10 @@ func NewReceiptProofHandler(deps *ReceiptDeps) http.HandlerFunc {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
+		// Content-deterministic: the proof binds to the entry's FIRST covering
+		// checkpoint (a fixed, witness-cosigned head), so it never changes for this
+		// seq — cacheable forever, the read-cost-bounding hot-path cache (2.3).
+		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"receipt_proof": section, // v2 receipt_proof section — drop straight into a proof
 			"checkpoint":    head,    // the cosigned head it binds to (root_hash + smt_root + receipt_root)
