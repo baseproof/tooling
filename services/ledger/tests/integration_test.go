@@ -539,7 +539,7 @@ func TestQuery_CosignatureOf_Multiple(t *testing.T) {
 	for i := uint64(1); i <= 5; i++ {
 		insertTestEntry(t, pool, i, makeEntry(t, envelope.ControlHeader{SignerDID: "did:example:w" + itoa(int(i)), CosignatureOf: ptrTo(tp)}, nil), testLogDID)
 	}
-	results, err := qapi.QueryByCosignatureOf(tp)
+	results, err := qapi.QueryByCosignatureOf(tp, 0, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -555,7 +555,7 @@ func TestQuery_CosignatureOf_Multiple(t *testing.T) {
 
 func TestQuery_CosignatureOf_Empty(t *testing.T) {
 	pool := skipIfNoPostgres(t)
-	results, _ := indexes.NewPostgresQueryAPI(context.Background(), pool, testEntryBytes, testLogDID).QueryByCosignatureOf(pos(999))
+	results, _ := indexes.NewPostgresQueryAPI(context.Background(), pool, testEntryBytes, testLogDID).QueryByCosignatureOf(pos(999), 0, 0)
 	if len(results) != 0 {
 		t.Fatal("should be empty")
 	}
@@ -568,7 +568,7 @@ func TestQuery_TargetRoot_Multiple(t *testing.T) {
 	for i := uint64(2); i <= 4; i++ {
 		insertTestEntry(t, pool, i, makeEntry(t, envelope.ControlHeader{SignerDID: "did:example:a", TargetRoot: ptrTo(pos(1)), AuthorityPath: sameSigner()}, []byte{byte(i)}), testLogDID)
 	}
-	results, _ := qapi.QueryByTargetRoot(pos(1))
+	results, _ := qapi.QueryByTargetRoot(pos(1), 0, 0)
 	if len(results) != 3 {
 		t.Fatalf("expected 3, got %d", len(results))
 	}
@@ -576,7 +576,7 @@ func TestQuery_TargetRoot_Multiple(t *testing.T) {
 
 func TestQuery_TargetRoot_Empty(t *testing.T) {
 	pool := skipIfNoPostgres(t)
-	results, _ := indexes.NewPostgresQueryAPI(context.Background(), pool, testEntryBytes, testLogDID).QueryByTargetRoot(pos(888))
+	results, _ := indexes.NewPostgresQueryAPI(context.Background(), pool, testEntryBytes, testLogDID).QueryByTargetRoot(pos(888), 0, 0)
 	if len(results) != 0 {
 		t.Fatal("should be empty")
 	}
@@ -590,7 +590,7 @@ func TestQuery_SignerDID_Filtered(t *testing.T) {
 	for i := uint64(4); i <= 6; i++ {
 		insertTestEntry(t, pool, i, makeEntry(t, envelope.ControlHeader{SignerDID: "did:example:bob"}, []byte{byte(i)}), testLogDID)
 	}
-	results, _ := indexes.NewPostgresQueryAPI(context.Background(), pool, testEntryBytes, testLogDID).QueryBySignerDID("did:example:alice")
+	results, _ := indexes.NewPostgresQueryAPI(context.Background(), pool, testEntryBytes, testLogDID).QueryBySignerDID("did:example:alice", 0, 0)
 	if len(results) != 3 {
 		t.Fatalf("expected 3 alice, got %d", len(results))
 	}
@@ -599,7 +599,7 @@ func TestQuery_SignerDID_Filtered(t *testing.T) {
 func TestQuery_SignerDID_Isolation(t *testing.T) {
 	pool := skipIfNoPostgres(t)
 	insertTestEntry(t, pool, 1, makeEntry(t, envelope.ControlHeader{SignerDID: "did:example:unique"}, nil), testLogDID)
-	results, _ := indexes.NewPostgresQueryAPI(context.Background(), pool, testEntryBytes, testLogDID).QueryBySignerDID("did:example:nonexistent")
+	results, _ := indexes.NewPostgresQueryAPI(context.Background(), pool, testEntryBytes, testLogDID).QueryBySignerDID("did:example:nonexistent", 0, 0)
 	if len(results) != 0 {
 		t.Fatal("nonexistent signer should return empty")
 	}
@@ -615,6 +615,52 @@ func TestQuery_SchemaRef_Filtered(t *testing.T) {
 	results, _ := indexes.NewPostgresQueryAPI(context.Background(), pool, testEntryBytes, testLogDID).QueryBySchemaRef(sa)
 	if len(results) != 3 {
 		t.Fatalf("expected 3 for schemaA, got %d", len(results))
+	}
+}
+
+// TestQuery_SignerDID_Pagination pins the 2.3 read-cost bound: the count
+// parameter caps the page (the LIMIT pushed to Postgres) and the startSeq
+// cursor seeks to the next page. Five entries (seqs 1..5) are walked in
+// pages of two, then drained, then fetched unbounded to prove count<=0
+// clamps to the hard cap rather than truncating to a default page.
+func TestQuery_SignerDID_Pagination(t *testing.T) {
+	pool := skipIfNoPostgres(t)
+	qapi := indexes.NewPostgresQueryAPI(context.Background(), pool, testEntryBytes, testLogDID)
+	const signer = "did:example:paginate"
+	for i := uint64(1); i <= 5; i++ {
+		insertTestEntry(t, pool, i, makeEntry(t, envelope.ControlHeader{SignerDID: signer}, []byte{byte(i)}), testLogDID)
+	}
+
+	// Page 1: count bounds the result to 2 (the LIMIT is load-bearing).
+	p1, err := qapi.QueryBySignerDID(signer, 0, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(p1) != 2 {
+		t.Fatalf("page 1 size: want 2, got %d", len(p1))
+	}
+	if p1[0].Position.Sequence != 1 || p1[1].Position.Sequence != 2 {
+		t.Fatalf("page 1 seqs: want [1 2], got [%d %d]", p1[0].Position.Sequence, p1[1].Position.Sequence)
+	}
+
+	// Page 2: the start cursor (last seq + 1) seeks past the first page.
+	p2, _ := qapi.QueryBySignerDID(signer, p1[len(p1)-1].Position.Sequence+1, 2)
+	if len(p2) != 2 || p2[0].Position.Sequence != 3 || p2[1].Position.Sequence != 4 {
+		t.Fatalf("page 2 seqs: want [3 4], got %d entries", len(p2))
+	}
+
+	// Page 3: the final partial page (one entry remains).
+	p3, _ := qapi.QueryBySignerDID(signer, p2[len(p2)-1].Position.Sequence+1, 2)
+	if len(p3) != 1 || p3[0].Position.Sequence != 5 {
+		t.Fatalf("page 3 seqs: want [5], got %d entries", len(p3))
+	}
+
+	// count<=0 clamps to MaxScanCount (the documented hard ceiling), so an
+	// unbounded request returns every matching entry — NOT a default-100
+	// truncation. With 5 entries the whole set comes back.
+	all, _ := qapi.QueryBySignerDID(signer, 0, 0)
+	if len(all) != 5 {
+		t.Fatalf("unbounded page: want 5, got %d", len(all))
 	}
 }
 
@@ -1187,8 +1233,8 @@ func TestOps_ThreeLogIsolation(t *testing.T) {
 	insertTestEntry(t, pool, 1, makeEntry(t, envelope.ControlHeader{SignerDID: "did:example:log-a"}, nil), testLogDID)
 	insertTestEntry(t, pool, 2, makeEntry(t, envelope.ControlHeader{SignerDID: "did:example:log-b"}, nil), testLogDID)
 	qapi := indexes.NewPostgresQueryAPI(context.Background(), pool, testEntryBytes, testLogDID)
-	ra, _ := qapi.QueryBySignerDID("did:example:log-a")
-	rb, _ := qapi.QueryBySignerDID("did:example:log-b")
+	ra, _ := qapi.QueryBySignerDID("did:example:log-a", 0, 0)
+	rb, _ := qapi.QueryBySignerDID("did:example:log-b", 0, 0)
 	if len(ra) != 1 || len(rb) != 1 {
 		t.Fatal("each signer should have 1")
 	}
