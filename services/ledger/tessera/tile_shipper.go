@@ -29,6 +29,7 @@ package tessera
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strconv"
@@ -37,6 +38,8 @@ import (
 
 	"github.com/baseproof/baseproof/types"
 	"github.com/transparency-dev/tessera/api/layout"
+
+	"github.com/baseproof/tooling/services/ledger/bytestore"
 )
 
 // tileShipCursorKey is the object key holding the highest tree size fully shipped
@@ -129,18 +132,37 @@ type TileShipper struct {
 	cursor uint64 // highest tree size fully shipped (and persisted)
 }
 
-// NewTileShipper builds a shipper and resumes from the durable cursor: a restart
-// re-ships only the delta, never a 10B-tile cold walk. An unreadable/absent
-// cursor starts at 0 (a fresh log, or a one-time bulk sync after enabling the
-// shipper on an existing log — every Put is idempotent, so a re-ship is safe).
-func NewTileShipper(ctx context.Context, src TileBackend, obj ObjectStore, logger *slog.Logger) *TileShipper {
+// NewTileShipper builds a shipper and resumes from the durable cursor so a
+// restart re-ships only the delta, never a whole-tree cold walk.
+//
+// The cursor read is fail-safe by design, which matters for EVERY new network as
+// it grows:
+//   - absent (bytestore.ErrNotFound) ⇒ cursor 0. This is the fresh-log case: the
+//     tree is also empty here, so shipping is incremental from leaf 1 and the
+//     cursor keeps pace with the head forever — a new network can never trigger a
+//     bulk ship under normal operation.
+//   - present ⇒ resume at the stored size.
+//   - a TRANSIENT object-store fault or a CORRUPT cursor ⇒ ERROR (boot fails).
+//     Treating either as "no cursor" would silently reset to 0 and bulk re-ship
+//     the entire tree on the next publish — a self-inflicted outage if an
+//     established writer restarts during an S3 blip. Failing boot lets the
+//     supervisor retry against the real cursor instead.
+func NewTileShipper(ctx context.Context, src TileBackend, obj ObjectStore, logger *slog.Logger) (*TileShipper, error) {
 	s := &TileShipper{src: src, obj: obj, logger: logger}
-	if raw, err := obj.GetObject(ctx, tileShipCursorKey); err == nil {
-		if v, perr := strconv.ParseUint(strings.TrimSpace(string(raw)), 10, 64); perr == nil {
-			s.cursor = v
+	raw, err := obj.GetObject(ctx, tileShipCursorKey)
+	switch {
+	case err == nil:
+		v, perr := strconv.ParseUint(strings.TrimSpace(string(raw)), 10, 64)
+		if perr != nil {
+			return nil, fmt.Errorf("tessera/ship: corrupt ship cursor %q: %w", raw, perr)
 		}
+		s.cursor = v
+	case errors.Is(err, bytestore.ErrNotFound):
+		s.cursor = 0 // fresh log — incremental from leaf 1.
+	default:
+		return nil, fmt.Errorf("tessera/ship: read ship cursor (refusing to reset to 0 and bulk re-ship): %w", err)
 	}
-	return s
+	return s, nil
 }
 
 // ShipUpTo ships every tile the object store needs to serve proofs and entry

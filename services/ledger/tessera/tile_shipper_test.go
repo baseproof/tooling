@@ -50,6 +50,17 @@ func newFakeTileSource() *fakeTileSource { return &fakeTileSource{miss: map[stri
 // path without noise.
 func discardLogger() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
 
+// mustShipper constructs a shipper, failing the test on the (cursor-read) error —
+// the happy path where the cursor is absent (fresh) or present.
+func mustShipper(t *testing.T, ctx context.Context, src TileBackend, obj ObjectStore, logger *slog.Logger) *TileShipper {
+	t.Helper()
+	s, err := NewTileShipper(ctx, src, obj, logger)
+	if err != nil {
+		t.Fatalf("NewTileShipper: %v", err)
+	}
+	return s
+}
+
 func (f *fakeTileSource) ReadTileByPath(_ context.Context, path string) ([]byte, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -171,7 +182,7 @@ func TestTileShipper_ShipsDeltaAndPersistsCursor(t *testing.T) {
 	ctx := context.Background()
 	src := newFakeTileSource()
 	obj := newFakeObjectStore()
-	s := NewTileShipper(ctx, src, obj, discardLogger()) // also drives the success-path log
+	s := mustShipper(t, ctx, src, obj, discardLogger()) // also drives the success-path log
 
 	if err := s.ShipUpTo(ctx, 256); err != nil {
 		t.Fatalf("ShipUpTo(256): %v", err)
@@ -218,7 +229,7 @@ func TestTileShipper_ResumesFromPersistedCursor(t *testing.T) {
 		t.Fatal(err)
 	}
 	src := newFakeTileSource()
-	s := NewTileShipper(ctx, src, obj, nil)
+	s := mustShipper(t, ctx, src, obj, nil)
 	if got := s.shipped(); got != 256 {
 		t.Fatalf("resumed cursor = %d, want 256", got)
 	}
@@ -231,11 +242,89 @@ func TestTileShipper_ResumesFromPersistedCursor(t *testing.T) {
 	}
 }
 
+func TestNewTileShipper_FreshLogStartsAtZero(t *testing.T) {
+	// Absent cursor (bytestore.ErrNotFound) ⇒ a fresh log: cursor 0, no error. The
+	// tree is empty here too, so the first publish ships a tiny delta — a new
+	// network is incremental from leaf 1.
+	s, err := NewTileShipper(context.Background(), newFakeTileSource(), newFakeObjectStore(), nil)
+	if err != nil {
+		t.Fatalf("fresh-log NewTileShipper: %v", err)
+	}
+	if got := s.shipped(); got != 0 {
+		t.Fatalf("fresh-log cursor = %d, want 0", got)
+	}
+}
+
+func TestNewTileShipper_TransientCursorReadFailsClosed(t *testing.T) {
+	// A transient object-store fault on the cursor read MUST fail boot — never be
+	// silently treated as "no cursor", which would reset to 0 and bulk re-ship the
+	// whole tree on the next publish (a self-inflicted outage on an established
+	// writer's restart). This is the safeguard that keeps a *growing* new network
+	// from ever bulk-shipping.
+	obj := newFakeObjectStore()
+	obj.getErr = errors.New("s3 throttled")
+	if _, err := NewTileShipper(context.Background(), newFakeTileSource(), obj, nil); err == nil {
+		t.Fatal("NewTileShipper on a transient cursor-read fault = nil err, want error (no silent reset)")
+	}
+}
+
+func TestNewTileShipper_CorruptCursorFails(t *testing.T) {
+	ctx := context.Background()
+	obj := newFakeObjectStore()
+	if err := obj.PutObject(ctx, tileShipCursorKey, []byte("not-a-number")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewTileShipper(ctx, newFakeTileSource(), obj, nil); err == nil {
+		t.Fatal("NewTileShipper with a corrupt cursor = nil err, want error")
+	}
+}
+
+// TestTileShipper_NewNetworkLifecycleStaysIncremental drives the actual lifecycle
+// of a NEW network — many cosigned publishes, each a few entries past the last,
+// from leaf 1 — and pins that the cursor keeps pace with the head so total ship
+// work is LINEAR in the tree size, never O(tree × publishes). This is the
+// property that guarantees a new network can never bulk-ship.
+func TestTileShipper_NewNetworkLifecycleStaysIncremental(t *testing.T) {
+	ctx := context.Background()
+	src := newFakeTileSource()
+	obj := newFakeObjectStore()
+	s := mustShipper(t, ctx, src, obj, nil)
+
+	// 50 publishes of 37 entries each — straddles many tile boundaries.
+	const step, publishes = 37, 50
+	var maxPerPublish int
+	for p := 1; p <= publishes; p++ {
+		before := src.readCount()
+		size := uint64(p * step)
+		if err := s.ShipUpTo(ctx, size); err != nil {
+			t.Fatalf("ShipUpTo(%d): %v", size, err)
+		}
+		if d := src.readCount() - before; d > maxPerPublish {
+			maxPerPublish = d
+		}
+		if s.shipped() != size {
+			t.Fatalf("after publish %d: cursor %d, want %d", p, s.shipped(), size)
+		}
+	}
+	// The no-bulk guarantee: each publish ships a bounded handful of tiles — the
+	// frontier at ~log256(N) levels plus the few tiles a 37-entry step completes —
+	// independent of how large the tree has grown. A bulk ship would be ~`full`
+	// objects (the whole tree) in ONE publish; here the worst publish is a small
+	// constant, so a new network's publish latency never grows with its size.
+	full := len(tilesToShip(0, uint64(step*publishes)))
+	if maxPerPublish > 16 {
+		t.Fatalf("a single publish shipped %d tiles — not incremental (a new network must never bulk-ship)", maxPerPublish)
+	}
+	if maxPerPublish >= full {
+		t.Fatalf("worst publish shipped %d tiles ≈ the whole %d-tile tree — that is a bulk ship, not incremental", maxPerPublish, full)
+	}
+}
+
 func TestTileShipper_FailClosedOnReadError(t *testing.T) {
 	ctx := context.Background()
 	src := newFakeTileSource()
 	obj := newFakeObjectStore()
-	s := NewTileShipper(ctx, src, obj, nil)
+	s := mustShipper(t, ctx, src, obj, nil)
 
 	// Make the size-1 frontier hash tile unreadable.
 	src.miss[(tileRef{level: 0, index: 0, width: 1}).path()] = true
@@ -259,7 +348,7 @@ func TestTileShipper_FailClosedOnPutError(t *testing.T) {
 	src := newFakeTileSource()
 	obj := newFakeObjectStore()
 	obj.putErr = errors.New("object store unavailable") // every Put fails
-	s := NewTileShipper(ctx, src, obj, nil)
+	s := mustShipper(t, ctx, src, obj, nil)
 
 	if err := s.ShipUpTo(ctx, 1); err == nil {
 		t.Fatal("ShipUpTo with a failing object store returned nil, want error")
@@ -276,7 +365,7 @@ func TestTileShipper_FailClosedOnCursorPersistError(t *testing.T) {
 	src := newFakeTileSource()
 	obj := newFakeObjectStore()
 	obj.putErrKey = tileShipCursorKey // tiles ship fine; only the cursor write fails
-	s := NewTileShipper(ctx, src, obj, nil)
+	s := mustShipper(t, ctx, src, obj, nil)
 
 	if err := s.ShipUpTo(ctx, 1); err == nil {
 		t.Fatal("ShipUpTo with a failing cursor write returned nil, want error")
@@ -313,7 +402,7 @@ func TestShippingPublisher_ShipsBeforePublish(t *testing.T) {
 	ctx := context.Background()
 	src := newFakeTileSource()
 	obj := newFakeObjectStore()
-	shipper := NewTileShipper(ctx, src, obj, nil)
+	shipper := mustShipper(t, ctx, src, obj, nil)
 	inner := &recordingPublisher{shipper: shipper}
 	pub := NewShippingPublisher(inner, shipper)
 
@@ -333,7 +422,7 @@ func TestShippingPublisher_ShipErrorWithholdsPublish(t *testing.T) {
 	ctx := context.Background()
 	src := newFakeTileSource()
 	obj := newFakeObjectStore()
-	shipper := NewTileShipper(ctx, src, obj, nil)
+	shipper := mustShipper(t, ctx, src, obj, nil)
 	inner := &recordingPublisher{shipper: shipper}
 	pub := NewShippingPublisher(inner, shipper)
 
@@ -352,7 +441,7 @@ func TestShippingPublisher_PropagatesInnerError(t *testing.T) {
 	ctx := context.Background()
 	src := newFakeTileSource()
 	obj := newFakeObjectStore()
-	shipper := NewTileShipper(ctx, src, obj, nil)
+	shipper := mustShipper(t, ctx, src, obj, nil)
 	innerErr := errors.New("checkpoint publish failed")
 	inner := &recordingPublisher{shipper: shipper, err: innerErr}
 	pub := NewShippingPublisher(inner, shipper)
@@ -411,7 +500,7 @@ func TestTileShipper_ObjectBackendServesProofsAtScale(t *testing.T) {
 		t.Fatalf("NewPOSIXTileBackend: %v", err)
 	}
 	obj := newFakeObjectStore()
-	shipper := NewTileShipper(ctx, posix, obj, nil)
+	shipper := mustShipper(t, ctx, posix, obj, nil)
 	if err := shipper.ShipUpTo(ctx, head.TreeSize); err != nil {
 		t.Fatalf("ShipUpTo(%d): %v", head.TreeSize, err)
 	}
