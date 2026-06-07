@@ -1,27 +1,24 @@
 /*
 FILE PATH: store/indexes/signer_did.go
 
-QueryBySignerDID — all entries signed by a specific DID.
+QueryBySignerDID — one read-page of entries signed by a specific DID.
 Postgres provides sequence numbers + metadata. EntryReader provides bytes.
 */
 package indexes
 
 import (
-	"fmt"
-
 	"github.com/baseproof/baseproof/types"
 )
 
-// QueryBySignerDID returns entries signed by the given DID.
-func (q *PostgresQueryAPI) QueryBySignerDID(did string) ([]types.EntryWithMetadata, error) {
-	ctx := q.ctx
-	rows, err := q.db.Query(ctx, `
-		SELECT sequence_number, log_time, canonical_hash
-		FROM entry_index WHERE signer_did = $1 ORDER BY sequence_number ASC`,
-		did,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("store/indexes/signer_did: %w", err)
-	}
-	return q.scanAndHydrate(ctx, rows)
+// signerDIDQuery is the keyset query for QueryBySignerDID. See runIndexQuery
+// for the projection + cursor contract; the LIMIT clause is appended there.
+const signerDIDQuery = `SELECT sequence_number, log_time, canonical_hash
+	FROM entry_index WHERE signer_did = $1 AND sequence_number >= $2 ORDER BY sequence_number ASC`
+
+// QueryBySignerDID returns one read-page of entries signed by the given DID,
+// starting at sequence startSeq (inclusive) and capped at count (clamped to
+// [1, MaxScanCount]). Callers walk pages by advancing startSeq past the last
+// returned sequence_number.
+func (q *PostgresQueryAPI) QueryBySignerDID(did string, startSeq uint64, count int) ([]types.EntryWithMetadata, error) {
+	return q.runIndexQuery(q.ctx, signerDIDQuery, did, startSeq, clampPageCount(count))
 }

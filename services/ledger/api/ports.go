@@ -158,10 +158,17 @@ type DerivationCommitmentFetcher interface {
 // shim. Threading ctx through these is a separate refactor.
 type QueryAPI interface {
 	ScanFromPosition(from uint64, count int) ([]types.EntryWithMetadata, error)
-	QueryByCosignatureOf(pos types.LogPosition) ([]types.EntryWithMetadata, error)
-	QueryByTargetRoot(pos types.LogPosition) ([]types.EntryWithMetadata, error)
-	QueryBySignerDID(did string) ([]types.EntryWithMetadata, error)
-	QueryBySchemaRef(pos types.LogPosition) ([]types.EntryWithMetadata, error)
+	// The control-header field queries take a keyset page: startSeq is the
+	// inclusive sequence cursor (0 = first page) and count the page size,
+	// clamped by the impl to [1, MaxScanCount] — the read-cost bound (2.3).
+	// Callers walk pages by advancing startSeq past the last returned
+	// sequence_number. The schema_ref endpoint uses the paged
+	// QueryBySchemaRefPage; the unbounded QueryBySchemaRef is reserved for the
+	// custody/admission resolvers that consume the concrete type directly.
+	QueryByCosignatureOf(pos types.LogPosition, startSeq uint64, count int) ([]types.EntryWithMetadata, error)
+	QueryByTargetRoot(pos types.LogPosition, startSeq uint64, count int) ([]types.EntryWithMetadata, error)
+	QueryBySignerDID(did string, startSeq uint64, count int) ([]types.EntryWithMetadata, error)
+	QueryBySchemaRefPage(pos types.LogPosition, startSeq uint64, count int) ([]types.EntryWithMetadata, error)
 	// QueryByDelegateDID returns live entries whose
 	// Header.DelegateDID matches the given DID, ordered by
 	// sequence_number DESC. Backs the L2 read API endpoint

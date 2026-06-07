@@ -88,6 +88,14 @@ type CommitterConfig struct {
 	// on-disk WAL file exists.
 	DisableSync bool
 
+	// RetentionBuffer is the WAL retention GC safety margin, in SEQUENCES:
+	// GCBelowRetention deletes a shipped entry's WAL records only once its seq is
+	// below HWM-RetentionBuffer, keeping the most-recent RetentionBuffer shipped
+	// entries on disk for late readers + boot reconciliation. 0 (the default)
+	// DISABLES the GC — the WAL retains every entry. Production sets it to bound the
+	// WAL footprint (cmd/ledger config).
+	RetentionBuffer uint64
+
 	// Logger. Defaults to slog.Default if nil.
 	Logger *slog.Logger
 }

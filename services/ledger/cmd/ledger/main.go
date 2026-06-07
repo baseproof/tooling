@@ -358,6 +358,7 @@ func allocConfigFromCfg(cfg *Config, migrateMode store.MigrateMode) alloc.Config
 		WALBatchMaxEntries:        cfg.WALBatchMaxEntries,
 		WALBatchMaxBytes:          cfg.WALBatchMaxBytes,
 		WALBatchMaxLatency:        cfg.WALBatchMaxLatency,
+		WALRetentionBuffer:        cfg.WALRetentionBuffer,
 		BytestoreConfig:           cfg.toBytestoreConfig(),
 		TesseraStorageDir:         cfg.TesseraStorageDir,
 		TesseraSignerKeyFile:      cfg.TesseraSignerKeyFile,

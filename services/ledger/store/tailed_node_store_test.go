@@ -57,3 +57,40 @@ func TestTailedNodeStore_TailThenTilesReadThroughAndPrune(t *testing.T) {
 		t.Fatal("Get(pruned node) nil; should read through to durable tiles")
 	}
 }
+
+// TestTailedNodeStore_TailSnapshot: Tail() returns the dirty set as an INDEPENDENT
+// copy (mutating it never touches the store) and tracks Put/PruneTiled — so the
+// reconciler can hand it to BuildDirtyTiles while the builder keeps writing.
+func TestTailedNodeStore_TailSnapshot(t *testing.T) {
+	ctx := context.Background()
+	tn := NewTailedNodeStore(smt.NewInMemoryNodeStore())
+	h1, _ := tn.Put(leaf(1))
+	h2, _ := tn.Put(leaf(2))
+
+	snap := tn.Tail()
+	if len(snap) != 2 {
+		t.Fatalf("Tail() len = %d, want 2", len(snap))
+	}
+	if _, ok := snap[h1]; !ok {
+		t.Fatal("Tail() missing h1")
+	}
+	if _, ok := snap[h2]; !ok {
+		t.Fatal("Tail() missing h2")
+	}
+
+	// COPY: deleting from the snapshot must not evict from the store.
+	delete(snap, h1)
+	if tn.TailLen() != 2 {
+		t.Fatalf("store TailLen = %d after snapshot mutation, want 2 — Tail() is not a copy", tn.TailLen())
+	}
+	if got, _ := tn.Get(h1); got == nil {
+		t.Fatal("h1 evicted from the store by mutating the snapshot")
+	}
+
+	// Tail() shrinks as nodes become durable (the dirty set the next emit recurses).
+	_, _ = tn.Put(leaf(1)) // ensure h1 is durable-checkable; prune evicts it
+	tn.PruneTiled(ctx, func(_ context.Context, id [32]byte) (bool, error) { return id == h1, nil })
+	if got := tn.Tail(); len(got) != 1 {
+		t.Fatalf("Tail() after prune = %d, want 1", len(got))
+	}
+}

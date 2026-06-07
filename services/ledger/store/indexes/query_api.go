@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/baseproof/baseproof/types"
@@ -136,4 +137,49 @@ func (q *PostgresQueryAPI) scanAndHydrate(ctx context.Context, rows interface {
 		}
 	}
 	return results, nil
+}
+
+// clampPageCount bounds an HTTP read-page request to [1, MaxScanCount]. A
+// non-positive count (the ?count= param omitted, or a malformed value parsed
+// to 0) defaults to MaxScanCount — the documented hard per-request ceiling —
+// so the public /v1/query/* read path is ALWAYS bounded even when the caller
+// asks for "everything". The unbounded full scan the custody/admission
+// resolvers need is a SEPARATE path (QueryBySchemaRef) that never flows
+// through this clamp.
+func clampPageCount(count int) int {
+	if count <= 0 || count > MaxScanCount {
+		return MaxScanCount
+	}
+	return count
+}
+
+// runIndexQuery is the shared keyset query backing the control-header index
+// endpoints. baseSQL is a per-method static query of the exact form
+//
+//	SELECT sequence_number, log_time, canonical_hash
+//	FROM entry_index WHERE <col> = $1 AND sequence_number >= $2
+//	ORDER BY sequence_number ASC
+//
+// key binds $1 (a []byte serialized LogPosition or a string DID); startSeq
+// binds $2, the INCLUSIVE keyset cursor a caller advances to walk pages
+// (sequence numbers are 0-indexed, so the first page starts at 0). When
+// limit > 0 a `LIMIT $3` clause caps the page — the read-cost bound; when
+// limit <= 0 no LIMIT is appended and every matching row is returned (the
+// unbounded full scan). The 0017 covering index (<col>, sequence_number)
+// INCLUDE (log_time, canonical_hash) serves the WHERE, the ORDER BY, and the
+// projection index-only and pre-sorted, so a page is O(page), not O(matches).
+func (q *PostgresQueryAPI) runIndexQuery(ctx context.Context, baseSQL string, key any, startSeq uint64, limit int) ([]types.EntryWithMetadata, error) {
+	var (
+		rows pgx.Rows
+		err  error
+	)
+	if limit > 0 {
+		rows, err = q.db.Query(ctx, baseSQL+" LIMIT $3", key, startSeq, limit)
+	} else {
+		rows, err = q.db.Query(ctx, baseSQL, key, startSeq)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("store/indexes: index query: %w", err)
+	}
+	return q.scanAndHydrate(ctx, rows)
 }

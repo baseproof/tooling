@@ -509,7 +509,8 @@ func NewQueryCosignatureOfHandler(deps *QueryDeps) http.HandlerFunc {
 				http.StatusBadRequest, err.Error())
 			return
 		}
-		entries, err := deps.QueryAPI.QueryByCosignatureOf(pos)
+		startSeq, count := parsePageParams(r)
+		entries, err := deps.QueryAPI.QueryByCosignatureOf(pos, startSeq, count)
 		if err != nil {
 			deps.Logger.Error("query cosignature_of", "error", err)
 			writeTypedError(ctx, w, apitypes.ErrorClassDBQueryFailed,
@@ -530,7 +531,8 @@ func NewQueryTargetRootHandler(deps *QueryDeps) http.HandlerFunc {
 				http.StatusBadRequest, err.Error())
 			return
 		}
-		entries, err := deps.QueryAPI.QueryByTargetRoot(pos)
+		startSeq, count := parsePageParams(r)
+		entries, err := deps.QueryAPI.QueryByTargetRoot(pos, startSeq, count)
 		if err != nil {
 			deps.Logger.Error("query target_root", "error", err)
 			writeTypedError(ctx, w, apitypes.ErrorClassDBQueryFailed,
@@ -552,7 +554,8 @@ func NewQuerySignerDIDHandler(deps *QueryDeps) http.HandlerFunc {
 				http.StatusBadRequest, "signer DID required")
 			return
 		}
-		entries, err := deps.QueryAPI.QueryBySignerDID(did)
+		startSeq, count := parsePageParams(r)
+		entries, err := deps.QueryAPI.QueryBySignerDID(did, startSeq, count)
 		if err != nil {
 			deps.Logger.Error("query signer_did", "error", err)
 			writeTypedError(ctx, w, apitypes.ErrorClassDBQueryFailed,
@@ -606,7 +609,8 @@ func NewQuerySchemaRefHandler(deps *QueryDeps) http.HandlerFunc {
 				http.StatusBadRequest, err.Error())
 			return
 		}
-		entries, err := deps.QueryAPI.QueryBySchemaRef(pos)
+		startSeq, count := parsePageParams(r)
+		entries, err := deps.QueryAPI.QueryBySchemaRefPage(pos, startSeq, count)
 		if err != nil {
 			deps.Logger.Error("query schema_ref", "error", err)
 			writeTypedError(ctx, w, apitypes.ErrorClassDBQueryFailed,
@@ -702,6 +706,27 @@ func parseLogPosition(s string) (types.LogPosition, error) {
 		return types.LogPosition{}, fmt.Errorf("invalid sequence in log position: %w", err)
 	}
 	return types.LogPosition{LogDID: s[:idx], Sequence: seq}, nil
+}
+
+// parsePageParams extracts the optional keyset-pagination params shared by the
+// control-header query handlers: ?start= (inclusive sequence cursor, default 0
+// = first page) and ?count= (page size; the concrete QueryAPI clamps it to
+// [1, MaxScanCount]). Malformed values fall back to the defaults — the params
+// are additive, so a param-less request keeps the pre-pagination behavior of
+// returning the first (now hard-capped) page from sequence 0. Callers walk
+// pages by passing ?start=<last returned sequence_number + 1>.
+func parsePageParams(r *http.Request) (startSeq uint64, count int) {
+	if s := r.URL.Query().Get("start"); s != "" {
+		if v, err := strconv.ParseUint(s, 10, 64); err == nil {
+			startSeq = v
+		}
+	}
+	if c := r.URL.Query().Get("count"); c != "" {
+		if v, err := strconv.Atoi(c); err == nil {
+			count = v
+		}
+	}
+	return startSeq, count
 }
 
 // writeEntriesJSON is the shared success envelope for the five header-field

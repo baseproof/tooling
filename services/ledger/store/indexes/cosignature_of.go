@@ -2,29 +2,25 @@
 FILE PATH: store/indexes/cosignature_of.go
 
 QueryByCosignatureOf — certification-required per governance spec.
-Returns all entries whose Cosignature_Of field matches the given position.
+Returns one read-page of entries whose Cosignature_Of field matches the
+given position.
 */
 package indexes
 
 import (
-	"fmt"
-
 	"github.com/baseproof/baseproof/types"
 
 	"github.com/baseproof/tooling/services/ledger/store"
 )
 
-// QueryByCosignatureOf returns entries whose Cosignature_Of matches pos.
-func (q *PostgresQueryAPI) QueryByCosignatureOf(pos types.LogPosition) ([]types.EntryWithMetadata, error) {
-	ctx := q.ctx
-	posBytes := store.SerializeLogPosition(pos)
-	rows, err := q.db.Query(ctx, `
-		SELECT sequence_number, log_time, canonical_hash
-		FROM entry_index WHERE cosignature_of = $1 ORDER BY sequence_number ASC`,
-		posBytes,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("store/indexes/cosignature_of: %w", err)
-	}
-	return q.scanAndHydrate(ctx, rows)
+// cosignatureOfQuery is the keyset query for QueryByCosignatureOf. See
+// runIndexQuery for the projection + cursor contract; LIMIT is appended there.
+const cosignatureOfQuery = `SELECT sequence_number, log_time, canonical_hash
+	FROM entry_index WHERE cosignature_of = $1 AND sequence_number >= $2 ORDER BY sequence_number ASC`
+
+// QueryByCosignatureOf returns one read-page of entries whose Cosignature_Of
+// matches pos, from sequence startSeq (inclusive), capped at count
+// ([1, MaxScanCount]).
+func (q *PostgresQueryAPI) QueryByCosignatureOf(pos types.LogPosition, startSeq uint64, count int) ([]types.EntryWithMetadata, error) {
+	return q.runIndexQuery(q.ctx, cosignatureOfQuery, store.SerializeLogPosition(pos), startSeq, clampPageCount(count))
 }

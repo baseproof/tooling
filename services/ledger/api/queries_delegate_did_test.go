@@ -40,19 +40,19 @@ func (s *stubQueryAPI) ScanFromPosition(_ uint64, _ int) ([]types.EntryWithMetad
 	return nil, nil
 }
 
-func (s *stubQueryAPI) QueryByCosignatureOf(_ types.LogPosition) ([]types.EntryWithMetadata, error) {
+func (s *stubQueryAPI) QueryByCosignatureOf(_ types.LogPosition, _ uint64, _ int) ([]types.EntryWithMetadata, error) {
 	return nil, nil
 }
 
-func (s *stubQueryAPI) QueryByTargetRoot(_ types.LogPosition) ([]types.EntryWithMetadata, error) {
+func (s *stubQueryAPI) QueryByTargetRoot(_ types.LogPosition, _ uint64, _ int) ([]types.EntryWithMetadata, error) {
 	return nil, nil
 }
 
-func (s *stubQueryAPI) QueryBySignerDID(_ string) ([]types.EntryWithMetadata, error) {
+func (s *stubQueryAPI) QueryBySignerDID(_ string, _ uint64, _ int) ([]types.EntryWithMetadata, error) {
 	return nil, nil
 }
 
-func (s *stubQueryAPI) QueryBySchemaRef(_ types.LogPosition) ([]types.EntryWithMetadata, error) {
+func (s *stubQueryAPI) QueryBySchemaRefPage(_ types.LogPosition, _ uint64, _ int) ([]types.EntryWithMetadata, error) {
 	return nil, nil
 }
 
