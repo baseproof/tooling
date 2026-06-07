@@ -2044,6 +2044,27 @@ func startGoroutines(
 		})
 	}
 
+	// 2.1: periodic WAL retention GC — reclaims shipped entries below the retention
+	// buffer so the WAL footprint stays bounded. A no-op when RetentionBuffer is 0.
+	if d.WALCommitter != nil {
+		lifecycle.SafeRunInWG(ctx, &d.WG, "wal-retention-gc", d.Logger, nil, func() error {
+			ticker := time.NewTicker(5 * time.Minute)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return nil
+				case <-ticker.C:
+					if n, err := d.WALCommitter.GCBelowRetention(ctx); err != nil {
+						d.Logger.Warn("wal retention GC", "error", err)
+					} else if n > 0 {
+						d.Logger.Info("wal retention GC reclaimed", "entries", n, "disk_bytes", d.WALCommitter.DiskBytes())
+					}
+				}
+			}
+		})
+	}
+
 	startAuditTelemetry(ctx, d, detector, smtDetector)
 }
 
@@ -2125,6 +2146,13 @@ func installLateBoundGauges(
 			"Sequenced-but-not-shipped WAL depth (highest sequenced seq minus HWM).",
 			d.WALCommitter.Backlog) {
 			d.Logger.Info("metrics: WAL backlog gauge installed", "metric", "baseproof_wal_backlog_total")
+		}
+		// 2.1: WAL on-disk size — flat post-ship once retention GC reclaims shipped
+		// entries below the buffer; unbounded growth otherwise.
+		if observability.RegisterInt64Gauge(walMeter, "baseproof_wal_disk_bytes",
+			"WAL on-disk size in bytes (Badger LSM + value-log).",
+			d.WALCommitter.DiskBytes) {
+			d.Logger.Info("metrics: WAL disk-bytes gauge installed", "metric", "baseproof_wal_disk_bytes")
 		}
 	}
 	if checkpointLoop != nil {

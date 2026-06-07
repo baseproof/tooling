@@ -102,6 +102,7 @@ type Config struct {
 	WALBatchMaxEntries int           // 0 ⇒ committer default (256)
 	WALBatchMaxBytes   int           // 0 ⇒ committer default (5MiB)
 	WALBatchMaxLatency time.Duration // 0 ⇒ committer default (10ms)
+	WALRetentionBuffer uint64        // 0 ⇒ retention GC off (keep whole WAL)
 
 	// Bytestore (passed-through to bytestore.NewFromConfig)
 	BytestoreConfig bytestore.Config
@@ -325,6 +326,7 @@ func allocateWAL(cfg Config, d *deps.AppDeps) error {
 		BatchMaxEntries: cfg.WALBatchMaxEntries,
 		BatchMaxBytes:   cfg.WALBatchMaxBytes,
 		BatchMaxLatency: cfg.WALBatchMaxLatency,
+		RetentionBuffer: cfg.WALRetentionBuffer,
 		Logger:          d.Logger,
 	})
 	d.WALCommitter = walc

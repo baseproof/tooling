@@ -294,6 +294,7 @@ type Config struct {
 	WALBatchMaxEntries   int
 	WALBatchMaxBytes     int
 	WALBatchMaxLatency   time.Duration
+	WALRetentionBuffer   uint64 // LEDGER_WAL_RETENTION_BUFFER: shipped-entry GC margin (0 ⇒ GC off)
 	// Tessera embedding — in-process upstream Tessera.
 	// TesseraStorageDir is the POSIX directory the embedded
 	// Tessera POSIX driver writes tiles, entry bundles, and the
@@ -696,6 +697,7 @@ func loadConfig() (*Config, error) {
 		WALQueueSize:         envIntOr("LEDGER_WAL_QUEUE_SIZE", 0),
 		WALBatchMaxEntries:   envIntOr("LEDGER_WAL_BATCH_MAX_ENTRIES", 0),
 		WALBatchMaxBytes:     envIntOr("LEDGER_WAL_BATCH_MAX_BYTES", 0),
+		WALRetentionBuffer:   uint64(envInt64Or("LEDGER_WAL_RETENTION_BUFFER", 0)),
 		WALBatchMaxLatency:   envDurationOr("LEDGER_WAL_BATCH_MAX_LATENCY", 0),
 
 		// Pool size: env override OR derived from MaxInFlight (set
