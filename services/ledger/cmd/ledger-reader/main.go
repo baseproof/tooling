@@ -102,27 +102,14 @@ func run(logger *slog.Logger) error {
 	}
 	pingCancel()
 
-	// ── Tessera (read-only) ─────────────────────────────────────
-	// The reader binary reads tiles + checkpoint directly off the
-	// POSIX directory the writer ledger's embedded Tessera writes
-	// to (shared volume in k8s, same host in single-node
-	// deployments). ReadOnlyAppender's AppendLeaf returns
-	// ErrReadOnly — a loud rejection if any future code path
-	// mistakenly tries to write from the reader.
-	tileBackend, err := tessera.NewPOSIXTileBackend(cfg.TesseraStorageDir)
-	if err != nil {
-		return fmt.Errorf("tessera posix tile backend: %w", err)
-	}
-	tileReader := tessera.NewTileReader(tileBackend, cfg.TileCacheSize)
-	roAppender := tessera.NewReadOnlyAppender(tileBackend)
-	tesseraAdapter := tessera.NewTesseraAdapter(ctx, roAppender, tileReader, logger)
-	logger.Info("tessera initialized (read-only)", "storage_dir", cfg.TesseraStorageDir)
-
 	// ── Entry byte store ──────────────────────────────────────────────
-	// Reader points at the same backend + prefix the writer ledger
-	// uses, so byte hydration on GET requests returns the same bytes
-	// the writer admitted. Backend selected via LEDGER_BYTE_STORE_BACKEND
-	// (gcs|s3); the factory enforces per-backend required fields.
+	// Reader points at the same backend + prefix the writer ledger uses, so
+	// byte hydration on GET requests returns the same bytes the writer
+	// admitted. Backend selected via LEDGER_BYTE_STORE_BACKEND (gcs|s3); the
+	// factory enforces per-backend required fields. Resolved BEFORE the tile
+	// backends below because the byte-store backend SELECTS the tile substrate:
+	// an object store (S3/GCS) serves tessera log tiles, SMT tiles, and the
+	// cosigned horizon to a PG-free read front with NO shared filesystem.
 	switch cfg.ByteStoreBackend {
 	case "":
 		return fmt.Errorf("LEDGER_BYTE_STORE_BACKEND required (gcs|s3)")
@@ -154,27 +141,49 @@ func run(logger *slog.Logger) error {
 		"cache_size", cfg.ByteStoreCacheSize,
 	)
 
-	// ── SMT (read-only, de-polluted) ───────────────────────────────────
+	// ── Tessera log tiles + SMT tiles + cosigned horizon (read-only) ───
 	//
-	// The stateless read tier: the SMT node DAG is read from content-addressed
-	// tiles (shared S3/SeaweedFS when the byte store is S3 — every reader pod
-	// reads the same objects; else the local POSIX tile dir), NOT jellyfish_nodes.
-	// Proofs are served as-of the published cosigned horizon, so no live-root
-	// seeding. smt_leaves (PG) still backs /v1/smt/leaf value lookups.
+	// The stateless read tier. When the byte store is an OBJECT store (S3/GCS),
+	// inclusion proofs (tessera log tiles), SMT proofs, and the cosigned horizon
+	// are ALL reconstructed from that shared store — the writer ships its log
+	// tiles there (tessera/tile_shipper.go), so a reader pod needs no filesystem
+	// shared with the writer and Postgres only for value lookups. Otherwise the
+	// reader reads the writer's POSIX tile dir directly (single-node / k8s shared
+	// volume). Proofs are served as-of the published cosigned horizon;
+	// smt_leaves (PG) still backs /v1/smt/leaf value lookups.
 	leafStore := store.NewPostgresLeafStore(pool.DB)
+	var tileBackend tessera.TileBackend
+	var tesseraAppender tessera.AppenderBackend
 	var smtTiles store.SMTTileStore
 	var horizon api.HorizonReader
 	if s3, ok := entryBytes.(*bytestore.S3); ok {
+		tileBackend = tessera.NewObjectTileBackend(s3)
 		smtTiles = store.NewS3SMTTileStore(s3)
 		horizon = store.NewS3HorizonReader(s3)
+		// No POSIX checkpoint file in an object-store deployment: the proof
+		// adapter's tree head/size come from the published cosigned horizon
+		// (horizon_appender.go); the proofs themselves come from the tiles.
+		tesseraAppender = newHorizonAppenderBackend(horizon)
+		logger.Info("tessera initialized (read-only, object store)", "byte_store", cfg.ByteStoreBackend)
 	} else {
+		posix, perr := tessera.NewPOSIXTileBackend(cfg.TesseraStorageDir)
+		if perr != nil {
+			return fmt.Errorf("tessera posix tile backend: %w", perr)
+		}
 		tileDir := strings.TrimSpace(os.Getenv("LEDGER_SMT_TILE_EMIT_DIR"))
 		if tileDir == "" {
 			tileDir = "/var/lib/ledger/tiles"
 		}
+		tileBackend = posix
 		smtTiles = store.NewPosixSMTTileStore(tileDir)
-		horizon = api.NewTileBackendHorizon(tileBackend)
+		horizon = api.NewTileBackendHorizon(posix)
+		// ReadOnlyAppender's AppendLeaf returns ErrReadOnly — a loud rejection
+		// if any future code path mistakenly tries to write from the reader.
+		tesseraAppender = tessera.NewReadOnlyAppender(posix)
+		logger.Info("tessera initialized (read-only, POSIX)", "storage_dir", cfg.TesseraStorageDir)
 	}
+	tileReader := tessera.NewTileReader(tileBackend, cfg.TileCacheSize)
+	tesseraAdapter := tessera.NewTesseraAdapter(ctx, tesseraAppender, tileReader, logger)
 	nodeStore := smt.NewTiledNodeStore(ctx, smtTiles, smt.NewTileCache(cfg.SMTCacheSize))
 	tree := smt.NewTree(leafStore, nodeStore)
 
@@ -252,6 +261,14 @@ func run(logger *slog.Logger) error {
 
 	serverCfg := api.DefaultServerConfig()
 	serverCfg.Addr = cfg.ServerAddr
+	// Serve open HTTPS like the writer when TLS material is configured
+	// (LEDGER_TLS_CERT_FILE / LEDGER_TLS_KEY_FILE): the read front terminates TLS
+	// in-binary with the same server cert, so proof tooling verifies it against
+	// the run CA exactly as it does the writer — one transport, one client
+	// posture. Absent both, it stays plain HTTP (local dev / sidecar).
+	serverCfg.TLSCertFile = cfg.TLSCertFile
+	serverCfg.TLSKeyFile = cfg.TLSKeyFile
+	tlsEnabled := cfg.TLSCertFile != "" && cfg.TLSKeyFile != ""
 	server := api.NewServer(serverCfg, store.NewPostgresSessionLookup(pool.DB), handlers, logger)
 
 	// ── Start + shutdown ───────────────────────────────────────────────
@@ -260,14 +277,18 @@ func run(logger *slog.Logger) error {
 	// supervisor goroutines beyond the HTTP server), so panics are
 	// caught + logged and the goroutine exits; the signal-driven
 	// shutdown path still drives the cleanup.
+	serve := server.ListenAndServe
+	if tlsEnabled {
+		serve = server.ListenAndServeTLS
+	}
 	var wg sync.WaitGroup
 	lifecycle.SafeRunInWG(ctx, &wg, "http-server", logger, nil, func() error {
-		if err := server.ListenAndServe(); err != nil {
+		if err := serve(); err != nil {
 			logger.Error("http server exited", "error", err)
 		}
 		return nil
 	})
-	logger.Info("HTTP server started (read-only)", "addr", cfg.ServerAddr)
+	logger.Info("HTTP server started (read-only)", "addr", cfg.ServerAddr, "tls", tlsEnabled)
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
@@ -352,6 +373,12 @@ type readerConfig struct {
 	MaxDifficulty     int
 	HashFunction      string
 
+	// TLS. When both are set the read front serves HTTPS (ListenAndServeTLS)
+	// with the writer's server cert — proof tooling pins it against the run CA
+	// exactly as it does the writer. Both empty ⇒ plain HTTP (local dev/sidecar).
+	TLSCertFile string
+	TLSKeyFile  string
+
 	// Byte store. Reader and writer must agree on backend + bucket
 	// + prefix so reads return the same bytes
 	// the writer admitted. Backend selection mirrors the writer
@@ -374,14 +401,17 @@ type readerConfig struct {
 
 func loadConfig() readerConfig {
 	return readerConfig{
-		LogDID:            envOr("BASEPROOF_LOG_DID", "did:baseproof:ledger:001"),
-		PostgresDSN:       envOr("BASEPROOF_POSTGRES_DSN", "postgres://baseproof:baseproof@localhost:5432/baseproof?sslmode=disable"),
-		ReplicaDSN:        envOr("BASEPROOF_REPLICA_DSN", ""),
+		// Prefer the writer's LEDGER_* names so the read front is a drop-in with
+		// the SAME env (only the DSN points elsewhere / at a dead host for PG-off);
+		// the BASEPROOF_* names remain as a fallback so existing deploys keep working.
+		LogDID:            envOr("LEDGER_LOG_DID", envOr("BASEPROOF_LOG_DID", "did:baseproof:ledger:001")),
+		PostgresDSN:       envOr("LEDGER_DATABASE_URL", envOr("BASEPROOF_POSTGRES_DSN", "postgres://baseproof:baseproof@localhost:5432/baseproof?sslmode=disable")),
+		ReplicaDSN:        envOr("LEDGER_REPLICA_DSN", envOr("BASEPROOF_REPLICA_DSN", "")),
 		MaxConns:          20,
 		MinConns:          5,
 		StatementTimeout:  parsePgStatementTimeout(),
-		ServerAddr:        envOr("BASEPROOF_SERVER_ADDR", ":8081"),
-		TesseraStorageDir: envOr("BASEPROOF_TESSERA_STORAGE_DIR", "/var/lib/baseproof/tessera"),
+		ServerAddr:        envOr("LEDGER_ADDR", envOr("BASEPROOF_SERVER_ADDR", ":8081")),
+		TesseraStorageDir: envOr("LEDGER_TESSERA_STORAGE_DIR", envOr("BASEPROOF_TESSERA_STORAGE_DIR", "/var/lib/baseproof/tessera")),
 		TileCacheSize:     10000,
 		WarmTopLevels:     32,
 		SMTCacheSize:      100000,
@@ -389,6 +419,8 @@ func loadConfig() readerConfig {
 		MinDifficulty:     8,
 		MaxDifficulty:     24,
 		HashFunction:      "sha256",
+		TLSCertFile:       os.Getenv("LEDGER_TLS_CERT_FILE"),
+		TLSKeyFile:        os.Getenv("LEDGER_TLS_KEY_FILE"),
 
 		ByteStoreBackend:   os.Getenv("LEDGER_BYTE_STORE_BACKEND"),
 		ByteStorePrefix:    envOr("LEDGER_BYTE_STORE_PREFIX", "entries"),

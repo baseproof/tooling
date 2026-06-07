@@ -327,6 +327,16 @@ func Wire(ctx context.Context, cfg Config, d *deps.AppDeps) error {
 		var checkpointPub builder.CheckpointPublisher = tesseraAdapter
 		if s3, ok := d.ByteStore.(*bytestore.S3); ok {
 			checkpointPub = store.NewS3CheckpointPublisher(s3)
+			// Ship tessera log tiles + entry bundles to the shared object store
+			// BEFORE each cosigned checkpoint is published, so PG-free read-front
+			// pods reconstruct inclusion proofs and /raw seq→hash from S3 alone —
+			// no filesystem shared with the writer. d.TileBackend is the writer's
+			// POSIX tile source; the shipper is incremental (durable size cursor),
+			// a handful of objects per publish, never a tree walk (scales to the
+			// 10B-entry / 500-TPS target). Fail-closed: a ship error withholds the
+			// horizon, so a reader never sees a head whose tiles aren't durable.
+			shipper := tessera.NewTileShipper(ctx, d.TileBackend, s3, d.Logger)
+			checkpointPub = tessera.NewShippingPublisher(checkpointPub, shipper)
 		}
 		checkpointLoop = builder.NewCheckpointLoop(
 			store.NewSMTCommitCursor(store.NewSMTRootStateStore(d.PgPool.DB)),
