@@ -172,3 +172,33 @@ func TestDiskBytes(t *testing.T) {
 		t.Fatal("DiskBytes negative")
 	}
 }
+
+// TestGCDue pins the work-driven scheduling trigger: GC is due once the shipped
+// HWM has advanced a full RetentionBuffer past the last reclaim, and a zero
+// buffer disables it. This is the decision that bounds the WAL footprint without
+// a load-tuned wall-clock — high write rate trips it often (small reclaims),
+// idle never trips it (the WAL holds its margin).
+func TestGCDue(t *testing.T) {
+	cases := []struct {
+		name                    string
+		hwm, lastReclaimed, buf uint64
+		want                    bool
+	}{
+		{"buffer 0 disables", 1_000_000, 0, 0, false},
+		{"fresh, under buffer", 49, 0, 50, false},
+		{"fresh, exactly buffer", 50, 0, 50, true},
+		{"fresh, over buffer", 1_000_000_000, 0, 1, true},
+		{"advanced under buffer since last", 120, 100, 50, false},
+		{"advanced exactly buffer since last", 150, 100, 50, true},
+		{"advanced over buffer since last", 9000, 100, 50, true},
+		{"no advance since last", 100, 100, 50, false},
+		{"10B-scale buffer crossing", 10_000_001_000, 10_000_000_000, 1000, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := GCDue(tc.hwm, tc.lastReclaimed, tc.buf); got != tc.want {
+				t.Fatalf("GCDue(%d, %d, %d) = %v, want %v", tc.hwm, tc.lastReclaimed, tc.buf, got, tc.want)
+			}
+		})
+	}
+}
