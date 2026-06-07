@@ -133,6 +133,7 @@ override.tf.json
 /ledger
 /ledger-reader
 /rebuild-tiles
+/rebuild-projection
 /seed-session
 /submit-stamp
 /init-network
