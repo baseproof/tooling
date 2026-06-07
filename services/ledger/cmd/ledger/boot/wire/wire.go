@@ -335,7 +335,10 @@ func Wire(ctx context.Context, cfg Config, d *deps.AppDeps) error {
 			// a handful of objects per publish, never a tree walk (scales to the
 			// 10B-entry / 500-TPS target). Fail-closed: a ship error withholds the
 			// horizon, so a reader never sees a head whose tiles aren't durable.
-			shipper := tessera.NewTileShipper(ctx, d.TileBackend, s3, d.Logger)
+			shipper, serr := tessera.NewTileShipper(ctx, d.TileBackend, s3, d.Logger)
+			if serr != nil {
+				return fmt.Errorf("tessera tile shipper: %w", serr)
+			}
 			checkpointPub = tessera.NewShippingPublisher(checkpointPub, shipper)
 		}
 		checkpointLoop = builder.NewCheckpointLoop(
