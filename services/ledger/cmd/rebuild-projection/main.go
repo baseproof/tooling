@@ -46,7 +46,11 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/baseproof/baseproof/types"
+
 	"github.com/baseproof/tooling/services/ledger/bytestore"
+	"github.com/baseproof/tooling/services/ledger/store"
+	optessera "github.com/baseproof/tooling/services/ledger/tessera"
 )
 
 func main() {
@@ -64,11 +68,12 @@ func main() {
 		bsPathStyle = flag.Bool("bytestore-path-style", false, "S3 path-style addressing (true for SeaweedFS/MinIO; false for AWS S3)")
 		batchSize   = flag.Int("batch-size", 500, "entries processed per atomic commit; bounds memory + lock-hold time")
 		verbose     = flag.Bool("verbose", false, "log every batch commit at INFO level (default: warn-only)")
+		tilesFromBS = flag.Bool("tiles-from-bytestore", false, "read Tessera tiles from the object store the writer ships them to (rebuild-from-object-store / DR path) instead of --tile-dir; the published head is taken from the cosigned horizon")
 	)
 	flag.Parse()
 	missing := []string{}
-	if *tileDir == "" {
-		missing = append(missing, "--tile-dir")
+	if *tileDir == "" && !*tilesFromBS {
+		missing = append(missing, "--tile-dir (or --tiles-from-bytestore)")
 	}
 	if *pgDSN == "" {
 		missing = append(missing, "--pg-dsn")
@@ -132,14 +137,22 @@ func main() {
 		"batch_size", *batchSize,
 	)
 
+	tileBackend, head, err := resolveTileSource(ctx, *tilesFromBS, *tileDir, bs)
+	if err != nil {
+		logger.Error("resolve tile source", "tiles_from_bytestore", *tilesFromBS, "err", err)
+		os.Exit(1)
+	}
+	logger.Info("rebuild-projection: head resolved", "tree_size", head.TreeSize, "tiles_from_bytestore", *tilesFromBS)
+
 	start := time.Now()
 	stats, err := Rebuild(ctx, RebuildDeps{
-		TileDir:   *tileDir,
-		Bytestore: bs,
-		Pool:      pool,
-		LogDID:    *logDID,
-		BatchSize: *batchSize,
-		Logger:    logger,
+		TileBackend: tileBackend,
+		Head:        head,
+		Bytestore:   bs,
+		Pool:        pool,
+		LogDID:      *logDID,
+		BatchSize:   *batchSize,
+		Logger:      logger,
 	})
 	if err != nil {
 		logger.Error("rebuild failed",
@@ -155,4 +168,40 @@ func main() {
 	fmt.Printf("  leaves_written: %d\n", stats.LeavesWritten)
 	fmt.Printf("  root:           %x\n", stats.Root)
 	fmt.Printf("  duration:       %s\n", stats.Duration.Round(time.Millisecond))
+}
+
+// resolveTileSource builds the tile backend + the published head for the rebuild.
+// Default: the local Tessera POSIX dir + its signed checkpoint. With
+// --tiles-from-bytestore: the shared object store the writer ships tiles to (no
+// local filesystem) + the cosigned horizon for the head (the shipper writes
+// tiles, not the tessera checkpoint, to the store). This is the
+// rebuild-from-object-store / DR backbone — a wiped node reconstructs Postgres
+// from the object store alone.
+func resolveTileSource(ctx context.Context, fromBytestore bool, tileDir string, bs bytestore.Backend) (optessera.TileBackend, types.TreeHead, error) {
+	if fromBytestore {
+		// "S3" here is the object-store abstraction (S3 protocol — SeaweedFS /
+		// MinIO / AWS), not an AWS hard-tie; *bytestore.S3 is that implementation.
+		s3, ok := bs.(*bytestore.S3)
+		if !ok {
+			return nil, types.TreeHead{}, fmt.Errorf("--tiles-from-bytestore requires an S3-protocol object store, got %T", bs)
+		}
+		ch, _, err := store.NewS3HorizonReader(s3).ReadHorizon(ctx)
+		if err != nil {
+			return nil, types.TreeHead{}, fmt.Errorf("read cosigned horizon: %w", err)
+		}
+		return optessera.NewObjectTileBackend(s3), ch.TreeHead, nil
+	}
+	backend, err := optessera.NewPOSIXTileBackend(tileDir)
+	if err != nil {
+		return nil, types.TreeHead{}, fmt.Errorf("open posix tile backend: %w", err)
+	}
+	cpBytes, err := backend.ReadCheckpoint(ctx)
+	if err != nil {
+		return nil, types.TreeHead{}, fmt.Errorf("read checkpoint: %w", err)
+	}
+	head, err := optessera.ParseCheckpoint(cpBytes)
+	if err != nil {
+		return nil, types.TreeHead{}, fmt.Errorf("parse checkpoint: %w", err)
+	}
+	return backend, head, nil
 }

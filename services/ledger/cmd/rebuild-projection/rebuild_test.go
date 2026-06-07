@@ -44,6 +44,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"sync"
 	"testing"
 	"time"
 
@@ -148,14 +149,30 @@ func TestRebuild_DeterministicProjectionFromTiles(t *testing.T) {
 	// entries before we start the rebuild.
 	waitForCheckpoint(t, ctx, embedded, uint64(N))
 
+	// The POSIX tile backend + the published head (from the signed checkpoint)
+	// the rebuild walks against.
+	posixBackend, err := optessera.NewPOSIXTileBackend(tileDir)
+	if err != nil {
+		t.Fatalf("NewPOSIXTileBackend: %v", err)
+	}
+	cpBytes, err := posixBackend.ReadCheckpoint(ctx)
+	if err != nil {
+		t.Fatalf("ReadCheckpoint: %v", err)
+	}
+	head, err := optessera.ParseCheckpoint(cpBytes)
+	if err != nil {
+		t.Fatalf("ParseCheckpoint: %v", err)
+	}
+
 	// ── First Rebuild → populates PG fully.
 	stats1, err := Rebuild(ctx, RebuildDeps{
-		TileDir:   tileDir,
-		Bytestore: bs,
-		Pool:      pool,
-		LogDID:    testRebuildLogDID,
-		BatchSize: 16,
-		Logger:    logger,
+		TileBackend: posixBackend,
+		Head:        head,
+		Bytestore:   bs,
+		Pool:        pool,
+		LogDID:      testRebuildLogDID,
+		BatchSize:   16,
+		Logger:      logger,
 	})
 	if err != nil {
 		t.Fatalf("Rebuild #1: %v", err)
@@ -175,12 +192,13 @@ func TestRebuild_DeterministicProjectionFromTiles(t *testing.T) {
 	// ── Wipe + rebuild → must produce bit-exact identical snapshot.
 	resetProjectionTables(t, ctx, pool)
 	stats2, err := Rebuild(ctx, RebuildDeps{
-		TileDir:   tileDir,
-		Bytestore: bs,
-		Pool:      pool,
-		LogDID:    testRebuildLogDID,
-		BatchSize: 16,
-		Logger:    logger,
+		TileBackend: posixBackend,
+		Head:        head,
+		Bytestore:   bs,
+		Pool:        pool,
+		LogDID:      testRebuildLogDID,
+		BatchSize:   16,
+		Logger:      logger,
 	})
 	if err != nil {
 		t.Fatalf("Rebuild #2: %v", err)
@@ -197,6 +215,66 @@ func TestRebuild_DeterministicProjectionFromTiles(t *testing.T) {
 
 	// Snapshots must match bit-exact.
 	assertProjectionsEqual(t, snap1, snap2)
+
+	// ── Rebuild from the OBJECT STORE → bit-exact identical projection (the DR /
+	//    rebuild-from-object-store path). Ship the SAME tiles to an in-memory
+	//    object store, then rebuild from there with no POSIX dir — the result must
+	//    equal the POSIX rebuild. This is what a wiped node does: reconstruct PG
+	//    from the object store alone.
+	obj := newMemObjStore()
+	shipper, err := optessera.NewTileShipper(ctx, posixBackend, obj, nil)
+	if err != nil {
+		t.Fatalf("NewTileShipper: %v", err)
+	}
+	if err := shipper.ShipUpTo(ctx, head.TreeSize); err != nil {
+		t.Fatalf("ShipUpTo(%d): %v", head.TreeSize, err)
+	}
+	resetProjectionTables(t, ctx, pool)
+	stats3, err := Rebuild(ctx, RebuildDeps{
+		TileBackend: optessera.NewObjectTileBackend(obj),
+		Head:        head,
+		Bytestore:   bs,
+		Pool:        pool,
+		LogDID:      testRebuildLogDID,
+		BatchSize:   16,
+		Logger:      logger,
+	})
+	if err != nil {
+		t.Fatalf("Rebuild #3 (object store): %v", err)
+	}
+	if stats3.Root != stats1.Root || stats3.TreeSize != stats1.TreeSize {
+		t.Fatalf("object-store rebuild differs from POSIX:\n  posix:  %+v\n  object: %+v", stats1, stats3)
+	}
+	assertProjectionsEqual(t, snap1, snapshotProjection(t, ctx, pool))
+	t.Logf("Rebuild #3 ✓ from OBJECT STORE: tree_size=%d root=%x… matches the POSIX rebuild", stats3.TreeSize, stats3.Root[:8])
+}
+
+// memObjStore is an in-memory tessera.ObjectStore for the object-store rebuild
+// path: the shipper writes tiles + the cursor, the ObjectTileBackend reads them
+// back. GetObject returns bytestore.ErrNotFound on a miss (the shipper's
+// cursor-load contract).
+type memObjStore struct {
+	mu sync.Mutex
+	m  map[string][]byte
+}
+
+func newMemObjStore() *memObjStore { return &memObjStore{m: map[string][]byte{}} }
+
+func (o *memObjStore) PutObject(_ context.Context, key string, data []byte) error {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.m[key] = append([]byte(nil), data...)
+	return nil
+}
+
+func (o *memObjStore) GetObject(_ context.Context, key string) ([]byte, error) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	b, ok := o.m[key]
+	if !ok {
+		return nil, bytestore.ErrNotFound
+	}
+	return append([]byte(nil), b...), nil
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
