@@ -1,19 +1,26 @@
 /*
 FILE PATH: store/tile_emitter.go
 
-BuildTilesEmitter — makes every SMT tile reachable from a committed root durable
-in an SMTTileStore. Satisfies the reconciler's TileEmitter.
+BuildTilesEmitter — makes every SMT tile reachable from a committed root durable in
+an SMTTileStore. Satisfies the reconciler's TileEmitter.
 
-First cut: smt.BuildTiles(committedRoot) — the full-subtree, idempotent,
-content-addressed regeneration path the SDK blesses for "initial backfill /
-periodic regeneration" — Put-ing only tiles the store does not already hold
-(Exists prunes, bounding PUTs to the missing set). A Put returns only on a
-backend ack, so EmitDurable returning nil means the committed root's tiles are
-durable — the gate the reconciler requires before advancing the frontier.
+Two paths behind one interface, selected by the node substrate:
 
-The incremental successor (BuildDirtyTiles over the fromRoot→committedRoot delta,
-work ∝ the gap, not the whole tree) drops in behind the same interface for the
-10B regime; fromRoot is carried for it and ignored here.
+  - Incremental (production): when the substrate exposes its un-tiled tail
+    (*TailedNodeStore via Tail()), smt.BuildDirtyTiles walks ONLY the tiles the
+    checkpoint changed — work ∝ the delta, not the whole tree. The tail is the dirty
+    set (committed-but-not-tiled); the tile store's Exists is the EXACT `known` oracle
+    (an Exists error → not-known → re-emit, NEVER skip — a false positive would strand
+    a needed tile). This is the 10B-regime path: a full walk per checkpoint, on the
+    EmitDurable→cosign horizon-critical path, is catastrophic.
+
+  - Full (fallback / oracle): a plain NodeStore (first-tiling of a backfilled tree,
+    tests) falls back to smt.BuildTiles — the full-subtree walk BuildDirtyTiles is
+    validated against; their durable union serves byte-identical proofs.
+
+Both paths Put only tiles the store does not already hold (Exists prunes), so
+EmitDurable returning nil means the committed root's tiles are durable — the gate the
+reconciler requires before advancing the frontier.
 */
 package store
 
@@ -30,10 +37,17 @@ type BuildTilesEmitter struct {
 	tiles SMTTileStore
 }
 
-// NewBuildTilesEmitter wires the emitter. nodes is the substrate the committed
-// root's nodes are read from (the TailedNodeStore in-memory tail today; the
-// Jellyfish node DAG no longer lives in PG); tiles is the durable object-store
-// tile sink the reconciler folds that tail into.
+// tailSnapshotter is the optional capability a NodeStore exposes to drive incremental
+// tiling: its un-tiled tail is the dirty set BuildDirtyTiles recurses over. The
+// production substrate (*TailedNodeStore) implements it; a plain NodeStore does not.
+type tailSnapshotter interface {
+	Tail() map[[32]byte]smt.Node
+}
+
+// NewBuildTilesEmitter wires the emitter. nodes is the substrate the committed root's
+// nodes are read from (the *TailedNodeStore in-memory tail + tile read-through in
+// production; the Jellyfish node DAG no longer lives in PG); tiles is the durable
+// object-store tile sink the reconciler folds that tail into.
 func NewBuildTilesEmitter(nodes smt.NodeStore, tiles SMTTileStore) *BuildTilesEmitter {
 	return &BuildTilesEmitter{nodes: nodes, tiles: tiles}
 }
@@ -43,14 +57,14 @@ func (e *BuildTilesEmitter) EmitDurable(ctx context.Context, _ [32]byte, committ
 	if committedRoot == smt.EmptyHash {
 		return nil // empty tree → no tiles
 	}
-	tileSet, err := smt.BuildTiles(e.nodes, committedRoot, smt.TileHeight)
+	tileSet, err := e.buildTiles(ctx, committedRoot)
 	if err != nil {
-		return fmt.Errorf("store/tile-emitter: build tiles at %x: %w", committedRoot[:8], err)
+		return err
 	}
 	for id, tile := range tileSet {
-		// Content-addressed: an already-present tile carries identical bytes, so
-		// skip it (bounds PUTs to the missing set — the incremental property even
-		// the full-build path keeps).
+		// Content-addressed: an already-present tile carries identical bytes, so skip
+		// it (bounds PUTs to the missing set). The incremental path already excluded
+		// known tiles; this also guards the full-build path + a concurrent re-emit.
 		if ok, eerr := e.tiles.Exists(ctx, id); eerr == nil && ok {
 			continue
 		}
@@ -63,4 +77,30 @@ func (e *BuildTilesEmitter) EmitDurable(ctx context.Context, _ [32]byte, committ
 		}
 	}
 	return nil
+}
+
+// buildTiles selects the incremental dirty-set walk when the node substrate exposes
+// its un-tiled tail (production: *TailedNodeStore — work ∝ the checkpoint delta), else
+// the full-subtree walk (the correctness oracle BuildDirtyTiles is validated against).
+func (e *BuildTilesEmitter) buildTiles(ctx context.Context, committedRoot [32]byte) (map[[32]byte]smt.SMTTile, error) {
+	tailed, ok := e.nodes.(tailSnapshotter)
+	if !ok {
+		tiles, err := smt.BuildTiles(e.nodes, committedRoot, smt.TileHeight)
+		if err != nil {
+			return nil, fmt.Errorf("store/tile-emitter: build tiles at %x: %w", committedRoot[:8], err)
+		}
+		return tiles, nil
+	}
+	// known reports EXACT tile-root durability. The SDK requires exactness: a false
+	// negative re-emits harmlessly, a false positive strands a needed tile — so an
+	// Exists error maps to NOT-known (re-emit), never to known.
+	known := func(top [32]byte) bool {
+		present, eerr := e.tiles.Exists(ctx, top)
+		return eerr == nil && present
+	}
+	tiles, err := smt.BuildDirtyTiles(e.nodes, tailed.Tail(), committedRoot, smt.TileHeight, known)
+	if err != nil {
+		return nil, fmt.Errorf("store/tile-emitter: build dirty tiles at %x: %w", committedRoot[:8], err)
+	}
+	return tiles, nil
 }

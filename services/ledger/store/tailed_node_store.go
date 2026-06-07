@@ -109,3 +109,20 @@ func (s *TailedNodeStore) TailLen() int {
 	defer s.mu.RUnlock()
 	return len(s.tail)
 }
+
+// Tail returns a SNAPSHOT (copy) of the un-tiled node set — the dirty set
+// smt.BuildDirtyTiles recurses over to emit only a checkpoint's changed tiles.
+// "Committed-but-not-tiled" IS exactly the set of nodes whose tiles still need
+// emitting (the retention invariant partitions every committed node into tail OR
+// durably-tiled), so it is the correct `dirty` argument. A copy under the read lock,
+// so the reconciler walks a stable set while the single writer keeps Put-ing the next
+// batch; mutating the returned map never touches the store.
+func (s *TailedNodeStore) Tail() map[[32]byte]smt.Node {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make(map[[32]byte]smt.Node, len(s.tail))
+	for h, n := range s.tail {
+		out[h] = n
+	}
+	return out
+}
