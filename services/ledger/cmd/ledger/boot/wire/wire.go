@@ -2057,21 +2057,44 @@ func startGoroutines(
 		})
 	}
 
-	// 2.1: periodic WAL retention GC — reclaims shipped entries below the retention
-	// buffer so the WAL footprint stays bounded. A no-op when RetentionBuffer is 0.
-	if d.WALCommitter != nil {
+	// 2.1: WAL retention GC — reclaims SHIPPED entries below the retention buffer so
+	// the WAL footprint stays bounded. WORK-DRIVEN, not wall-clock: a short poll of
+	// the O(1) shipped-HWM runs GC only once a full RetentionBuffer has aged past
+	// the last reclaim (wal.GCDue), so the cadence tracks shipping throughput and
+	// each reclaim stays ~one buffer — the footprint is bounded at any write rate
+	// with nothing tuned to load (a 5-min wall-clock would instead let the WAL grow
+	// 5min×TPS between reclaims). The poll is configurable; the goroutine is skipped
+	// entirely when GC is disabled (buffer 0).
+	if d.WALCommitter != nil && d.WALCommitter.RetentionBuffer() > 0 {
+		buffer := d.WALCommitter.RetentionBuffer()
+		poll := 30 * time.Second
+		if v := strings.TrimSpace(os.Getenv("LEDGER_WAL_RETENTION_INTERVAL")); v != "" {
+			if dur, err := time.ParseDuration(v); err == nil && dur > 0 {
+				poll = dur
+			}
+		}
 		lifecycle.SafeRunInWG(ctx, &d.WG, "wal-retention-gc", d.Logger, nil, func() error {
-			ticker := time.NewTicker(5 * time.Minute)
+			ticker := time.NewTicker(poll)
 			defer ticker.Stop()
+			var lastReclaimedHWM uint64
 			for {
 				select {
 				case <-ctx.Done():
 					return nil
 				case <-ticker.C:
+					hwm, err := d.WALCommitter.HWM(ctx)
+					if err != nil {
+						d.Logger.Warn("wal retention GC: read shipped HWM", "error", err)
+						continue
+					}
+					if !wal.GCDue(hwm, lastReclaimedHWM, buffer) {
+						continue // < one buffer has aged out since the last reclaim
+					}
 					if n, err := d.WALCommitter.GCBelowRetention(ctx); err != nil {
 						d.Logger.Warn("wal retention GC", "error", err)
 					} else if n > 0 {
-						d.Logger.Info("wal retention GC reclaimed", "entries", n, "disk_bytes", d.WALCommitter.DiskBytes())
+						lastReclaimedHWM = hwm
+						d.Logger.Info("wal retention GC reclaimed", "entries", n, "disk_bytes", d.WALCommitter.DiskBytes(), "shipped_hwm", hwm)
 					}
 				}
 			}

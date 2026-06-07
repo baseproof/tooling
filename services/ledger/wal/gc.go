@@ -87,6 +87,26 @@ func (c *Committer) GCBelowRetention(ctx context.Context) (int, error) {
 	return reclaimed, nil
 }
 
+// RetentionBuffer returns the configured GC margin in sequences (0 ⇒ GC disabled).
+// The scheduler reads it to gate + size the work-driven trigger (GCDue).
+func (c *Committer) RetentionBuffer() uint64 { return c.cfg.RetentionBuffer }
+
+// GCDue reports whether retention GC should run now: the contiguously-SHIPPED
+// high-water mark has advanced at least one RetentionBuffer past the last reclaim
+// point. This is the WORK-DRIVEN trigger that replaces a wall-clock interval —
+// GC cadence then tracks shipping throughput (high write rate ⇒ frequent small
+// reclaims; an idle log stops triggering and simply holds its ~RetentionBuffer
+// margin), so the WAL footprint stays bounded at ≈ unshipped-backlog +
+// O(RetentionBuffer) at any scale, with nothing tuned to load. A zero buffer
+// disables GC. Pure + side-effect-free so the scheduling decision is unit-tested
+// without standing up a WAL.
+func GCDue(shippedHWM, lastReclaimedHWM, retentionBuffer uint64) bool {
+	if retentionBuffer == 0 {
+		return false
+	}
+	return shippedHWM >= lastReclaimedHWM+retentionBuffer
+}
+
 // gcVictim is one (seq, hash) pair eligible for deletion.
 type gcVictim struct {
 	seq  uint64
