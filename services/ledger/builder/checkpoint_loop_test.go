@@ -144,7 +144,7 @@ func (zeroReceipts) ReceiptRoot(context.Context, uint64, uint64) ([32]byte, erro
 func rootN(n byte) [32]byte { var r [32]byte; r[0] = n; return r }
 
 // fakeReceiptArchiver records the archive call and can be forced to fail (to prove
-// archiving is best-effort — a write error must not fail the checkpoint).
+// archiving is fail-closed — a write error withholds the horizon).
 type fakeReceiptArchiver struct {
 	calls []struct{ coveringSize, fromSeq, toSeq uint64 }
 	err   error
@@ -206,34 +206,49 @@ func TestCheckpoint_PublishesDurableRoot(t *testing.T) {
 	}
 }
 
-// TestCheckpoint_ArchivesReceiptCommits_BestEffort: after a successful publish the
-// loop invokes the receipt archiver with (coveringSize=tree_size, fromSeq=prev
-// published size, toSeq=cSeq), and an archiver error is SWALLOWED (best-effort) —
-// the checkpoint still succeeds and the horizon still advances (cf. 1.1a).
-func TestCheckpoint_ArchivesReceiptCommits_BestEffort(t *testing.T) {
-	cRoot := rootN(0x11)
-	commit := &fakeCommit{seq: 41, root: cRoot}
+// TestCheckpoint_ArchivesReceiptCommits_BeforePublish: the loop invokes the receipt
+// archiver with (coveringSize=tree_size, fromSeq=prev published size, toSeq=cSeq) and,
+// on success, publishes — the receipt set is durable BEFORE the horizon advances so a
+// PG-off reader can always reconstruct the receipt for any entry the head covers.
+func TestCheckpoint_ArchivesReceiptCommits_BeforePublish(t *testing.T) {
+	commit := &fakeCommit{seq: 41, root: rootN(0x11)}
 	frontier := &fakeFrontier{root: smt.EmptyHash}
-	tiles := newFakeTiles()
-	witness := &fakeWitness{}
 	pub := &fakePublisher{}
-	loop := newLoop(commit, frontier, tiles, witness, pub)
+	loop := newLoop(commit, frontier, newFakeTiles(), &fakeWitness{}, pub)
 
-	arch := &fakeReceiptArchiver{err: errors.New("object store down")}
+	arch := &fakeReceiptArchiver{}
 	loop.SetReceiptArchiver(arch)
 
-	// Best-effort: an archiver error must NOT fail the checkpoint.
 	if err := loop.CheckpointOnce(context.Background()); err != nil {
-		t.Fatalf("CheckpointOnce must succeed despite archive error: %v", err)
-	}
-	if len(pub.published) != 1 {
-		t.Fatalf("publish must still happen, got %d", len(pub.published))
+		t.Fatalf("CheckpointOnce: %v", err)
 	}
 	if len(arch.calls) != 1 {
 		t.Fatalf("want 1 archive call, got %d", len(arch.calls))
 	}
 	if c := arch.calls[0]; c.coveringSize != 42 || c.fromSeq != 0 || c.toSeq != 41 {
 		t.Fatalf("archive call = (cover=%d, from=%d, to=%d), want (42,0,41)", c.coveringSize, c.fromSeq, c.toSeq)
+	}
+	if len(pub.published) != 1 {
+		t.Fatalf("publish must happen after a successful archive, got %d", len(pub.published))
+	}
+}
+
+// TestCheckpoint_ReceiptArchiveFailure_WithholdsHorizon: a receipt-archive error is
+// FAIL-CLOSED — it fails the checkpoint and the horizon does NOT advance, because a
+// PG-off read front has no PG fallback for the receipt leg.
+func TestCheckpoint_ReceiptArchiveFailure_WithholdsHorizon(t *testing.T) {
+	commit := &fakeCommit{seq: 41, root: rootN(0x11)}
+	frontier := &fakeFrontier{root: smt.EmptyHash}
+	pub := &fakePublisher{}
+	loop := newLoop(commit, frontier, newFakeTiles(), &fakeWitness{}, pub)
+
+	loop.SetReceiptArchiver(&fakeReceiptArchiver{err: errors.New("object store down")})
+
+	if err := loop.CheckpointOnce(context.Background()); err == nil {
+		t.Fatal("CheckpointOnce must fail when the receipt archive fails (fail-closed)")
+	}
+	if len(pub.published) != 0 {
+		t.Fatalf("horizon must NOT advance on a receipt-archive failure, published %d", len(pub.published))
 	}
 }
 

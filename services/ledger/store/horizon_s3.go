@@ -42,11 +42,17 @@ const cosignedCheckpointKey = "cosigned-checkpoint"
 // S3CheckpointPublisher publishes the cosigned-checkpoint horizon to a shared
 // object store. Satisfies CheckpointPublisher (used by the reconciler's
 // HorizonPublisher).
-type S3CheckpointPublisher struct{ obj objectPutGetter }
+type S3CheckpointPublisher struct {
+	obj objectPutGetter
+	// index records each published size (checkpoint-index/<bucket>) so a PG-off read
+	// front can ENUMERATE published checkpoints (the receipt-proof head resolver),
+	// which the byte store's per-key reads alone cannot.
+	index *S3CheckpointSizeIndex
+}
 
 // NewS3CheckpointPublisher publishes the horizon to obj (a *bytestore.S3).
 func NewS3CheckpointPublisher(obj objectPutGetter) *S3CheckpointPublisher {
-	return &S3CheckpointPublisher{obj: obj}
+	return &S3CheckpointPublisher{obj: obj, index: NewS3CheckpointSizeIndex(obj)}
 }
 
 // PublishCosignedCheckpoint writes json(head) to the shared checkpoint key.
@@ -58,25 +64,34 @@ func (p *S3CheckpointPublisher) PublishCosignedCheckpoint(ctx context.Context, h
 	if err != nil {
 		return fmt.Errorf("store/horizon-s3: marshal cosigned head: %w", err)
 	}
-	if err := p.obj.PutObject(ctx, cosignedCheckpointKey, body); err != nil {
-		return fmt.Errorf("store/horizon-s3: publish checkpoint: %w", err)
-	}
-	// Per-tree_size archive (1.1a): durably retain this cosigned head (with its
-	// witness cosignatures) so historical heads stay fetchable PG-free after the
-	// latest advances — the anchor for cold-seq inclusion proofs. Never overwritten
-	// across sizes. Mirrors the POSIX dual-write in tessera/embedded_appender.go.
+	// Durable-BEFORE-horizon: the per-tree_size archive (1.1a) AND the size index must
+	// be readable the instant a reader can fetch this horizon, so a PG-off read front
+	// resolves the covering checkpoint for a receipt proof at exactly the head it just
+	// published. Both are fail-closed (a write error returns before the horizon
+	// advances), the same posture the tile shipper uses — a cold reader has no PG
+	// fallback to degrade to. The archive is never overwritten across sizes; the index
+	// append is idempotent. Skipped at size 0 (pre-genesis: nothing to archive/index).
 	if head.TreeSize > 0 {
 		if err := p.obj.PutObject(ctx, checkpointArchiveKey(head.TreeSize), body); err != nil {
 			return fmt.Errorf("store/horizon-s3: archive checkpoint %d: %w", head.TreeSize, err)
 		}
+		if err := p.index.Append(ctx, head.TreeSize); err != nil {
+			return fmt.Errorf("store/horizon-s3: index checkpoint %d: %w", head.TreeSize, err)
+		}
+	}
+	// Horizon LAST: the published head only advances once its archive + index are
+	// durable, so a reader never sees a horizon whose covering checkpoint it can't find.
+	if err := p.obj.PutObject(ctx, cosignedCheckpointKey, body); err != nil {
+		return fmt.Errorf("store/horizon-s3: publish checkpoint: %w", err)
 	}
 	return nil
 }
 
 // ArchiveCheckpointAt writes ONLY the per-size archive copy (checkpoints/<size>) for
-// head — NOT the latest horizon. The backfill job (1.x) uses it to regenerate
-// pre-archive history without moving the horizon backward. Idempotent: the same head
-// re-archives to the same bytes at the same key.
+// head and records it in the size index — NOT the latest horizon. The backfill job
+// (1.x) uses it to regenerate pre-archive history (and rebuild the index) without
+// moving the horizon backward. Idempotent: the same head re-archives to the same bytes
+// at the same key and the index append is a no-op.
 func (p *S3CheckpointPublisher) ArchiveCheckpointAt(ctx context.Context, head sdktypes.CosignedTreeHead) error {
 	if head.TreeSize == 0 {
 		return nil
@@ -87,6 +102,9 @@ func (p *S3CheckpointPublisher) ArchiveCheckpointAt(ctx context.Context, head sd
 	}
 	if err := p.obj.PutObject(ctx, checkpointArchiveKey(head.TreeSize), body); err != nil {
 		return fmt.Errorf("store/horizon-s3: archive checkpoint %d: %w", head.TreeSize, err)
+	}
+	if err := p.index.Append(ctx, head.TreeSize); err != nil {
+		return fmt.Errorf("store/horizon-s3: index checkpoint %d: %w", head.TreeSize, err)
 	}
 	return nil
 }

@@ -135,12 +135,13 @@ type ReceiptRanger interface {
 
 // ReceiptCommitArchiver durably archives the dense receipt-commitment set a
 // published checkpoint's ReceiptRoot is computed over (to the object store), so
-// receipt proofs reconstruct PG-free (store.ArchiveReceiptRanger). OPTIONAL +
-// BEST-EFFORT: the loop calls it AFTER a successful publish and never fails the
-// checkpoint on an archive error — exactly the non-load-bearing contract of the
-// 1.1a per-size checkpoint archive. coveringSize is the published tree_size;
-// [fromSeq, toSeq] is the same delta the ReceiptRoot was computed over. nil ⇒ no
-// receipt archiving (receipts read from PG only).
+// receipt proofs reconstruct PG-free (store.ArchiveReceiptRanger). OPTIONAL but
+// LOAD-BEARING when wired: the loop calls it BEFORE publishing the horizon and
+// WITHHOLDS the horizon on an archive error (fail-closed), so a PG-off read front —
+// which has no PG fallback — can always reconstruct the receipt proof for any entry
+// the published head covers. coveringSize is the published tree_size; [fromSeq, toSeq]
+// is the same delta the ReceiptRoot was computed over. nil ⇒ no receipt archiving
+// (POSIX single-node: receipts read from PG only).
 type ReceiptCommitArchiver interface {
 	ArchiveReceiptCommits(ctx context.Context, coveringSize, fromSeq, toSeq uint64) error
 }
@@ -170,11 +171,11 @@ type CheckpointLoop struct {
 	interval  time.Duration
 	logger    *slog.Logger
 
-	// receiptArchiver, when non-nil, best-effort archives each published
-	// checkpoint's dense receipt-commitment set so receipt proofs reconstruct
-	// PG-free (1.2a). Injected by the composition root (SetReceiptArchiver); a write
-	// error is logged and dropped — it never stalls a checkpoint. nil ⇒ receipts
-	// read from PG only.
+	// receiptArchiver, when non-nil, archives each published checkpoint's dense
+	// receipt-commitment set so receipt proofs reconstruct PG-free (1.2a). Injected by
+	// the composition root (SetReceiptArchiver) for object-store deployments; the loop
+	// archives BEFORE publishing and a write error WITHHOLDS the horizon (fail-closed),
+	// since a PG-off read front has no PG fallback. nil ⇒ receipts read from PG only.
 	receiptArchiver ReceiptCommitArchiver
 
 	// onWitnessQuorumFailure, when non-nil, fires once per cycle the K-of-N
@@ -523,7 +524,33 @@ func (l *CheckpointLoop) CheckpointOnce(ctx context.Context) error {
 	l.logger.DebugContext(ctx, "checkpoint step: cosignatures collected",
 		"tree_size", treeSize, "signatures", len(cosigned.Signatures))
 
-	// ── Step 9: publish. The horizon now advertises a root whose tiles are present. ──
+	// ── Step 9a: archive the receipt commitments BEFORE publishing the horizon. ──
+	// The dense receipt-commitment set this checkpoint's ReceiptRoot was computed over
+	// must be durable in the object store before the horizon advertises this size, so a
+	// PG-OFF read front can reconstruct the receipt proof for any entry the published
+	// head covers. Fail-closed — a receipt-archive error withholds the horizon (the
+	// same posture as the tile shipper + the per-size checkpoint archive), because a
+	// cold reader has no PG fallback to degrade to. Uses the not-yet-advanced
+	// lastPublishedSize as the delta start — the exact [fromSeq, cSeq] the ReceiptRoot
+	// was computed over at Step 7, covering size = published tree_size. The archiver is
+	// wired only for object-store deployments (SetReceiptArchiver); a POSIX single-node
+	// co-locates PG and never sets it, so this is a no-op there.
+	if l.receiptArchiver != nil && cSeq >= l.lastPublishedSize {
+		arCtx, arSpan := tr.Start(ctx, "checkpoint.receipt-archive",
+			trace.WithAttributes(attribute.Int64("ledger.tree_size", int64(treeSize))))
+		aErr := l.receiptArchiver.ArchiveReceiptCommits(arCtx, treeSize, l.lastPublishedSize, cSeq)
+		if aErr != nil {
+			arSpan.RecordError(aErr)
+			arSpan.SetStatus(codes.Error, aErr.Error())
+		}
+		arSpan.End()
+		if aErr != nil {
+			return fmt.Errorf("checkpoint: receipt-commit archive at %d not durable, withholding horizon: %w", treeSize, aErr)
+		}
+	}
+
+	// ── Step 9b: publish. The horizon now advertises a root whose tiles, per-size
+	// checkpoint archive, size index, and receipt commitments are ALL durable. ──
 	pubCtx, pubSpan := tr.Start(ctx, "checkpoint.publish",
 		trace.WithAttributes(attribute.Int("ledger.signatures", len(cosigned.Signatures))))
 	pErr := l.publisher.PublishCosignedCheckpoint(pubCtx, cosigned)
@@ -534,19 +561,6 @@ func (l *CheckpointLoop) CheckpointOnce(ctx context.Context) error {
 	pubSpan.End()
 	if pErr != nil {
 		return fmt.Errorf("checkpoint: publish checkpoint at %d: %w", treeSize, pErr)
-	}
-
-	// Best-effort (1.2a): archive the dense receipt-commitment set this checkpoint's
-	// ReceiptRoot was computed over, so receipt proofs reconstruct PG-free. The
-	// publish has ALREADY succeeded; an archive error only degrades the receipt
-	// endpoint to its PG path (cf. 1.1a) and MUST NOT fail the checkpoint. Uses the
-	// not-yet-advanced lastPublishedSize as the delta start — the exact [fromSeq, cSeq]
-	// the ReceiptRoot was computed over at Step 7, covering size = published tree_size.
-	if l.receiptArchiver != nil && cSeq >= l.lastPublishedSize {
-		if aErr := l.receiptArchiver.ArchiveReceiptCommits(pubCtx, treeSize, l.lastPublishedSize, cSeq); aErr != nil {
-			l.logger.WarnContext(ctx, "checkpoint: receipt-commit archive failed (best-effort; receipts fall back to PG)",
-				"tree_size", treeSize, "from_seq", l.lastPublishedSize, "to_seq", cSeq, "error", aErr)
-		}
 	}
 
 	span.SetAttributes(attribute.Int("ledger.signatures", len(cosigned.Signatures)))

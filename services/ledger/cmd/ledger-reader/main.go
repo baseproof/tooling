@@ -38,6 +38,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -156,10 +157,25 @@ func run(logger *slog.Logger) error {
 	var tesseraAppender tessera.AppenderBackend
 	var smtTiles store.SMTTileStore
 	var horizon api.HorizonReader
+	// Receipt-proof surface (the entry's third cosigned-root leg). Resolved per
+	// substrate below: an object-store deployment reconstructs it PG-free from the
+	// checkpoint-size index + the dense receipt-commitment archive; the POSIX
+	// shared-volume reader uses the co-located Postgres (wired after treeHeadStore).
+	var receiptHeads api.ReceiptHeadResolver
+	var receiptProver api.ReceiptProver
 	if s3, ok := entryBytes.(*bytestore.S3); ok {
 		tileBackend = tessera.NewObjectTileBackend(s3)
 		smtTiles = store.NewS3SMTTileStore(s3)
-		horizon = store.NewS3HorizonReader(s3)
+		s3Horizon := store.NewS3HorizonReader(s3)
+		horizon = s3Horizon
+		// PG-free receipt proofs: the checkpoint-size index enumerates published
+		// checkpoints (the covering-head resolver) and the per-checkpoint
+		// receipt-commit archive reconstructs the inclusion proof — both written
+		// durable-before-horizon by the writer (store.S3CheckpointPublisher +
+		// builder.CheckpointLoop), so any entry a published head covers has a
+		// reconstructable receipt with no Postgres in the path.
+		receiptHeads = store.NewS3ReceiptHeadResolver(store.NewS3CheckpointSizeIndex(s3), s3Horizon)
+		receiptProver = store.NewArchiveReceiptRanger(s3Horizon, cfg.LogDID)
 		// No POSIX checkpoint file in an object-store deployment: the proof
 		// adapter's tree head/size come from the published cosigned horizon
 		// (horizon_appender.go); the proofs themselves come from the tiles.
@@ -191,6 +207,14 @@ func run(logger *slog.Logger) error {
 	treeHeadStore := store.NewTreeHeadStore(pool.DB)
 	commitmentStore := store.NewCommitmentStore(pool.DB)
 	fetcher := store.NewPostgresEntryFetcher(pool.DB, entryBytes, cfg.LogDID)
+
+	// POSIX shared-volume reader: receipts resolve from the co-located Postgres
+	// (tree_heads as the covering-head ladder + entry_index as the commitment ranger).
+	// The S3 branch above already wired the PG-free path; this fills only the POSIX case.
+	if receiptHeads == nil {
+		receiptHeads = treeHeadStore
+		receiptProver = store.NewEntryIndexReceiptRanger(pool.DB, cfg.LogDID)
+	}
 
 	// ── Difficulty (static) ────────────────────────────────────────────
 	diffController := middleware.NewDifficultyController(
@@ -257,7 +281,9 @@ func run(logger *slog.Logger) error {
 		CommitmentStore: commitmentStore, Logger: logger,
 	}
 
-	handlers := readerHandlers(treeDeps, smtDeps, queryDeps, entryReadDeps, commitDeps, horizon, logger)
+	handlers := readerHandlers(treeDeps, smtDeps, queryDeps, entryReadDeps, commitDeps, horizon,
+		&api.ReceiptDeps{Heads: receiptHeads, Receipts: receiptProver, MinSigs: cfg.WitnessQuorumK, Logger: logger},
+		cfg.LogDID, logger)
 
 	serverCfg := api.DefaultServerConfig()
 	serverCfg.Addr = cfg.ServerAddr
@@ -321,6 +347,8 @@ func readerHandlers(
 	entryReadDeps *api.EntryReadDeps,
 	commitDeps *api.DerivationCommitmentDeps,
 	horizon api.HorizonReader,
+	receiptDeps *api.ReceiptDeps,
+	logDID string,
 	logger *slog.Logger,
 ) api.Handlers {
 	// CheckpointArchive (1.1a): the per-size cosigned-head read API. The horizon
@@ -337,6 +365,14 @@ func readerHandlers(
 		SMTProof:          api.NewSMTProofHandler(smtDeps),
 		SMTBatchProof:     api.NewSMTBatchProofHandler(smtDeps),
 		SMTRoot:           api.NewSMTRootHandler(smtDeps),
+		// ReceiptProof + Burn are the v2 proof's third-root + equivocation legs. The
+		// SDK gather fetches BOTH unconditionally and fails the proof on a 404
+		// (log/bundle/v2_build.go), so a read front that omits them cannot serve a full
+		// offline proof. ReceiptProof reconstructs PG-free from the object store (S3
+		// branch) or PG (POSIX). Burn observes no gossip here, so it reports
+		// is_burned=false (NewGossipBurnSource handles the nil store).
+		ReceiptProof: api.NewReceiptProofHandler(receiptDeps),
+		Burn:         api.NewBurnHandler(api.NewGossipBurnSource(nil), logDID, logger),
 		CosignatureOf:     api.NewQueryCosignatureOfHandler(queryDeps),
 		TargetRoot:        api.NewQueryTargetRootHandler(queryDeps),
 		SignerDID:         api.NewQuerySignerDIDHandler(queryDeps),
@@ -372,6 +408,13 @@ type readerConfig struct {
 	MinDifficulty     int
 	MaxDifficulty     int
 	HashFunction      string
+
+	// WitnessQuorumK is the distinct-signer threshold a published checkpoint must meet
+	// (LEDGER_WITNESS_QUORUM_K, matching the writer). The receipt-proof handler uses it
+	// to pick the covering cosigned checkpoint; the S3 resolver treats every archived
+	// checkpoint as already-quorum (only cosigned heads are published), so it bites
+	// only on the POSIX/PG path. Default 1, the writer's default.
+	WitnessQuorumK int
 
 	// TLS. When both are set the read front serves HTTPS (ListenAndServeTLS)
 	// with the writer's server cert — proof tooling pins it against the run CA
@@ -419,6 +462,7 @@ func loadConfig() readerConfig {
 		MinDifficulty:     8,
 		MaxDifficulty:     24,
 		HashFunction:      "sha256",
+		WitnessQuorumK:    envIntOr("LEDGER_WITNESS_QUORUM_K", 1),
 		TLSCertFile:       os.Getenv("LEDGER_TLS_CERT_FILE"),
 		TLSKeyFile:        os.Getenv("LEDGER_TLS_KEY_FILE"),
 
@@ -469,6 +513,16 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// envIntOr reads key as a base-10 int, falling back to def when unset or unparseable.
+func envIntOr(key string, def int) int {
+	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
+		}
+	}
+	return def
 }
 
 // parsePgStatementTimeout reads LEDGER_PG_STATEMENT_TIMEOUT as a Go
