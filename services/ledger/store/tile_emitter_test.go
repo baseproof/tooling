@@ -41,7 +41,7 @@ func TestBuildTilesEmitter_EmitsResolvableTilesThenPrunes(t *testing.T) {
 	tiles := NewMemSMTTileStore()
 	em := NewBuildTilesEmitter(nodes, tiles)
 
-	if err := em.EmitDurable(ctx, smt.EmptyHash, root, 8); err != nil {
+	if _, err := em.EmitDurable(ctx, smt.EmptyHash, root, 8); err != nil {
 		t.Fatalf("EmitDurable: %v", err)
 	}
 	emitted := tiles.Len()
@@ -63,7 +63,7 @@ func TestBuildTilesEmitter_EmitsResolvableTilesThenPrunes(t *testing.T) {
 	}
 
 	// Idempotent re-emit: Exists prunes the whole set, no new tiles.
-	if err := em.EmitDurable(ctx, smt.EmptyHash, root, 8); err != nil {
+	if _, err := em.EmitDurable(ctx, smt.EmptyHash, root, 8); err != nil {
 		t.Fatalf("second EmitDurable: %v", err)
 	}
 	if tiles.Len() != emitted {
@@ -72,7 +72,7 @@ func TestBuildTilesEmitter_EmitsResolvableTilesThenPrunes(t *testing.T) {
 
 	// Empty root → no-op.
 	empty := NewMemSMTTileStore()
-	if err := NewBuildTilesEmitter(nodes, empty).EmitDurable(ctx, smt.EmptyHash, smt.EmptyHash, 0); err != nil {
+	if _, err := NewBuildTilesEmitter(nodes, empty).EmitDurable(ctx, smt.EmptyHash, smt.EmptyHash, 0); err != nil {
 		t.Fatalf("EmitDurable(empty): %v", err)
 	}
 	if empty.Len() != 0 {
@@ -125,7 +125,7 @@ func TestBuildTilesEmitter_IncrementalEqualsFull(t *testing.T) {
 
 	// Batch 1 → emit (the band structure for the first half).
 	root1 := insert(0, 32)
-	if err := em.EmitDurable(ctx, smt.EmptyHash, root1, 32); err != nil {
+	if _, err := em.EmitDurable(ctx, smt.EmptyHash, root1, 32); err != nil {
 		t.Fatalf("emit root1: %v", err)
 	}
 	afterFirst := tiles.Len()
@@ -133,7 +133,7 @@ func TestBuildTilesEmitter_IncrementalEqualsFull(t *testing.T) {
 	// Batch 2 → emit. Adds band-2 branches UNDER existing band-1 tiles (those tiles go
 	// dirty; their new band-2 children emit only via the dirty recursion).
 	root2 := insert(32, 64)
-	if err := em.EmitDurable(ctx, root1, root2, 64); err != nil {
+	if _, err := em.EmitDurable(ctx, root1, root2, 64); err != nil {
 		t.Fatalf("emit root2: %v", err)
 	}
 	if tiles.Len() <= afterFirst {

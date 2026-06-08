@@ -65,20 +65,24 @@ func (f *fakeFrontier) AdvanceFrontier(_ context.Context, seq uint64, root [32]b
 type fakeTiles struct {
 	mu      sync.Mutex
 	durable map[[32]byte]bool
-	err     error // when non-nil, EmitDurable fails (blob-store outage)
-	calls   [][32]byte
+	// durableNodes is the node-hash set EmitDurable returns — the tail-prune signal
+	// the loop evicts. nil ⇒ the loop prunes nothing (the default; most tests do not
+	// exercise the tail).
+	durableNodes map[[32]byte]struct{}
+	err          error // when non-nil, EmitDurable fails (blob-store outage)
+	calls        [][32]byte
 }
 
 func newFakeTiles() *fakeTiles { return &fakeTiles{durable: map[[32]byte]bool{}} }
-func (f *fakeTiles) EmitDurable(_ context.Context, _ [32]byte, committedRoot [32]byte, _ uint64) error {
+func (f *fakeTiles) EmitDurable(_ context.Context, _ [32]byte, committedRoot [32]byte, _ uint64) (map[[32]byte]struct{}, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, committedRoot)
 	if f.err != nil {
-		return f.err // no PUT-ack ⇒ root NOT recorded durable
+		return nil, f.err // no PUT-ack ⇒ root NOT recorded durable, nothing to prune
 	}
 	f.durable[committedRoot] = true
-	return nil
+	return f.durableNodes, nil
 }
 func (f *fakeTiles) present(root [32]byte) bool {
 	f.mu.Lock()
@@ -605,5 +609,78 @@ func TestCheckpoint_ReceiptDeltaSurvivesCosignHold(t *testing.T) {
 	}
 	if got.from != 100 {
 		t.Errorf("post-hold receipt delta = [%d,%d], want [100,299] (spans the held [100,199]); frontier-keyed would orphan it as [200,299]", got.from, got.to)
+	}
+}
+
+// ── unbounded-tail (#1) regression — the loop evicts the now-durable nodes ──────
+
+// fakeTailPruner is the in-memory SMT node tail at the loop seam. It records the
+// loop's eviction decisions over a fixed candidate set, so a test can assert the loop
+// evicts EXACTLY the EmitDurable durable set (and nothing else — fail-closed). nil-safe
+// is exercised by every other test (they never call SetTailPruner).
+type fakeTailPruner struct {
+	candidates [][32]byte        // the "tail" the loop's oracle is consulted about
+	evicted    map[[32]byte]bool // hashes the oracle reported durable → evicted
+	called     bool
+}
+
+func (f *fakeTailPruner) PruneTiled(ctx context.Context, exists func(context.Context, [32]byte) (bool, error)) {
+	f.called = true
+	f.evicted = map[[32]byte]bool{}
+	for _, h := range f.candidates {
+		if ok, _ := exists(ctx, h); ok {
+			f.evicted[h] = true
+		}
+	}
+}
+
+// TestCheckpoint_PrunesTailWithDurableSet (+/−): after a successful emit+advance the
+// loop evicts EXACTLY the node set EmitDurable reported durable (Step 5a) — the bound
+// that stops the tail growing O(history) and OOMing — and evicts nothing else (an
+// un-tiled node is retained, fail-closed). Without SetTailPruner the tail is never
+// pruned; this pins the wiring.
+func TestCheckpoint_PrunesTailWithDurableSet(t *testing.T) {
+	commit := &fakeCommit{seq: 9, root: rootN(0x22)}
+	frontier := &fakeFrontier{root: smt.EmptyHash}
+	tiles := newFakeTiles()
+	hA, hB, hC := rootN(0xA1), rootN(0xB2), rootN(0xC3)
+	tiles.durableNodes = map[[32]byte]struct{}{hA: {}, hB: {}} // A,B made durable; C un-tiled
+	pruner := &fakeTailPruner{candidates: [][32]byte{hA, hB, hC}}
+	loop := newLoop(commit, frontier, tiles, &fakeWitness{}, &fakePublisher{})
+	loop.SetTailPruner(pruner)
+
+	if err := loop.CheckpointOnce(context.Background()); err != nil {
+		t.Fatalf("CheckpointOnce: %v", err)
+	}
+	if !pruner.called {
+		t.Fatal("loop did not prune the tail after emit — the unbounded-tail OOM regression")
+	}
+	if !pruner.evicted[hA] || !pruner.evicted[hB] {
+		t.Fatalf("durable nodes A/B not evicted: %v", pruner.evicted)
+	}
+	if pruner.evicted[hC] {
+		t.Fatal("un-tiled node C evicted — over-eviction, retention invariant violated")
+	}
+}
+
+// TestCheckpoint_EmitError_DoesNotPruneTail (−): on a blob-store outage EmitDurable
+// fails, the loop HOLDS before advancing the frontier, and the tail is NOT pruned —
+// nothing became durable, so evicting anything would be data loss (fail-closed).
+func TestCheckpoint_EmitError_DoesNotPruneTail(t *testing.T) {
+	commit := &fakeCommit{seq: 5, root: rootN(0x33)}
+	frontier := &fakeFrontier{root: smt.EmptyHash}
+	tiles := newFakeTiles()
+	tiles.err = errors.New("blob store down")
+	pruner := &fakeTailPruner{candidates: [][32]byte{rootN(0xA1)}}
+	loop := newLoop(commit, frontier, tiles, &fakeWitness{}, &fakePublisher{})
+	loop.SetTailPruner(pruner)
+
+	// Emit error is a HOLD (non-fatal); CheckpointOnce returns nil and never reaches
+	// the prune step.
+	if err := loop.CheckpointOnce(context.Background()); err != nil {
+		t.Fatalf("emit error should HOLD (nil), got: %v", err)
+	}
+	if pruner.called {
+		t.Fatal("tail pruned despite emit failure — must not evict when nothing became durable")
 	}
 }

@@ -86,13 +86,25 @@ type TileFrontierStore interface {
 }
 
 // TileEmitter makes every SMT tile reachable from committedRoot durable in the
-// object store. It MUST return nil ONLY after the backend has acknowledged the
-// writes (PUT-ack / fsync). It is idempotent and content-addressed, so
+// object store. It MUST return a nil error ONLY after the backend has acknowledged
+// the writes (PUT-ack / fsync). It is idempotent and content-addressed, so
 // re-emitting an already-present set is cheap. fromRoot lets an implementation
-// emit incrementally (fromRoot→committedRoot delta). Satisfied by
-// store.BuildTilesEmitter.
+// emit incrementally (fromRoot→committedRoot delta). It returns the content hashes
+// of every node now durable in those tiles (the set the reconciler evicts from the
+// in-memory tail to bound it); the set is nil/empty on an error or a no-tile root.
+// Satisfied by store.BuildTilesEmitter.
 type TileEmitter interface {
-	EmitDurable(ctx context.Context, fromRoot, committedRoot [32]byte, committedSeq uint64) error
+	EmitDurable(ctx context.Context, fromRoot, committedRoot [32]byte, committedSeq uint64) (durable map[[32]byte]struct{}, err error)
+}
+
+// TailPruner evicts a set of now-durable nodes from the in-memory SMT node tail,
+// bounding it to the un-tiled gap. *store.TailedNodeStore satisfies it (PruneTiled).
+// Optional (SetTailPruner): nil ⇒ no tail eviction. Its absence is the unbounded-
+// memory regression — the tail then accumulates every committed node (O(history))
+// until the writer OOMs — so a wired pruner is load-bearing for any object-store
+// deployment, and tail-bound is pinned by a regression test.
+type TailPruner interface {
+	PruneTiled(ctx context.Context, exists func(ctx context.Context, id [32]byte) (bool, error))
 }
 
 // CheckpointRooter derives the deterministic RFC 6962 Merkle root at a tree size
@@ -164,6 +176,7 @@ type CheckpointLoop struct {
 	commit    CommitCursorReader
 	frontier  TileFrontierStore
 	emitter   TileEmitter
+	tail      TailPruner // optional (SetTailPruner); evicts now-durable nodes from the tail
 	rooter    CheckpointRooter
 	publisher CheckpointPublisher
 	witness   WitnessCosigner
@@ -281,6 +294,16 @@ func (l *CheckpointLoop) SetEntryTraceReader(r EntryTraceReader) {
 // receipt archiving (the default) — receipts then read from PG only.
 func (l *CheckpointLoop) SetReceiptArchiver(a ReceiptCommitArchiver) {
 	l.receiptArchiver = a
+}
+
+// SetTailPruner injects the in-memory SMT node tail so the loop evicts the nodes it
+// just made durable after each frontier advance, bounding the tail to the un-tiled
+// gap. Without it the tail grows O(history) and the writer OOMs (the de-pollution
+// node DAG lives only in the tail until tiled). Set before Run; not safe to change
+// concurrently with a running loop. nil disables tail eviction (POSIX/no-tail or a
+// substrate that is not a TailedNodeStore).
+func (l *CheckpointLoop) SetTailPruner(p TailPruner) {
+	l.tail = p
 }
 
 // maxCheckpointLinks bounds the number of entry links on a checkpoint.cycle span.
@@ -435,7 +458,7 @@ func (l *CheckpointLoop) CheckpointOnce(ctx context.Context) error {
 	//    commentary/seed root) is a no-op success — there are no SMT tiles. ──
 	emitCtx, emitSpan := tr.Start(ctx, "checkpoint.emit_tiles",
 		trace.WithAttributes(attribute.Int64("ledger.committed_seq", int64(cSeq))))
-	eErr := l.emitter.EmitDurable(emitCtx, fromRoot, cRoot, cSeq)
+	durable, eErr := l.emitter.EmitDurable(emitCtx, fromRoot, cRoot, cSeq)
 	if eErr != nil {
 		emitSpan.RecordError(eErr)
 		emitSpan.SetStatus(codes.Error, eErr.Error())
@@ -456,6 +479,20 @@ func (l *CheckpointLoop) CheckpointOnce(ctx context.Context) error {
 	}
 	l.logger.DebugContext(ctx, "checkpoint step: advance frontier",
 		"frontier_seq", cSeq, "frontier_root", fmt.Sprintf("%x", cRoot[:8]))
+
+	// ── Step 5a: evict the now-durable nodes from the in-memory SMT node tail. ──
+	// cRoot's tiles are durable (Step 4) and the frontier has advanced past them
+	// (Step 5), so every node in `durable` is servable from tiles — retaining it in
+	// the tail only grows the heap. The oracle is membership in the just-durable set,
+	// so eviction is fail-closed (evict iff durable), honoring the retention invariant
+	// (store/tailed_node_store.go). WITHOUT this the tail accumulates every committed
+	// node, O(history), and the writer OOMs. nil pruner (no tail) ⇒ skip.
+	if l.tail != nil && len(durable) > 0 {
+		l.tail.PruneTiled(ctx, func(_ context.Context, h [32]byte) (bool, error) {
+			_, ok := durable[h]
+			return ok, nil
+		})
+	}
 
 	// ── Step 6: Merkle root at the committed size (deterministic from durable
 	//    tiles). Step 2 already gated treeSize <= integrated, so ErrTilesNotDurable

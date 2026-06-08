@@ -381,6 +381,12 @@ func Wire(ctx context.Context, cfg Config, d *deps.AppDeps) error {
 			checkpointLoop.SetReceiptArchiver(store.NewReceiptArchiveWriter(
 				store.NewEntryIndexReceiptRanger(d.PgPool.DB, cfg.LogDID), s3))
 		}
+		// Bound the in-memory SMT node tail: after each frontier advance the loop
+		// evicts the nodes it just made durable (store.TailedNodeStore.PruneTiled).
+		// Load-bearing — without it the tail accumulates every committed node
+		// (O(history)) and the writer OOMs (the node DAG is de-polluted out of PG and
+		// lives only in the tail until tiled).
+		checkpointLoop.SetTailPruner(d.NodeStore)
 		d.Logger.Info("checkpoint loop enabled", "tile_dir", tileDir, "quorum_k", cfg.WitnessQuorumK)
 	}
 
