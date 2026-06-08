@@ -423,12 +423,19 @@ type readerConfig struct {
 	TLSKeyFile  string
 
 	// Byte store. Reader and writer must agree on backend + bucket
-	// + prefix so reads return the same bytes
-	// the writer admitted. Backend selection mirrors the writer
+	// + prefix + NAMESPACE so reads resolve the same objects the
+	// writer admitted. Backend selection mirrors the writer
 	// ledger: "gcs" or "s3" via LEDGER_BYTE_STORE_BACKEND.
 	ByteStoreBackend   string
 	ByteStorePrefix    string
 	ByteStoreCacheSize int
+	// ByteStoreNamespace is the per-log isolation segment the *bytestore.S3 adapter
+	// prepends to every RAW substrate key (cosigned-checkpoint horizon, SMT tiles,
+	// tessera log tiles, per-size checkpoint + receipt + index archives). It MUST match
+	// the writer or the reader resolves none of them. Empty ⇒ derived from LogDID via
+	// the SHARED bytestore.NamespaceForLog, exactly as the writer derives it
+	// (LEDGER_BYTE_STORE_NAMESPACE overrides, also matching the writer).
+	ByteStoreNamespace string
 	// GCS-specific.
 	ByteStoreGCSBucket   string
 	ByteStoreGCSEndpoint string
@@ -468,6 +475,7 @@ func loadConfig() readerConfig {
 
 		ByteStoreBackend:   os.Getenv("LEDGER_BYTE_STORE_BACKEND"),
 		ByteStorePrefix:    envOr("LEDGER_BYTE_STORE_PREFIX", "entries"),
+		ByteStoreNamespace: os.Getenv("LEDGER_BYTE_STORE_NAMESPACE"), // empty → derived from LogDID in toBytestoreConfig
 		ByteStoreCacheSize: 4096,
 		// GCS family.
 		ByteStoreGCSBucket:   os.Getenv("LEDGER_BYTE_STORE_GCS_BUCKET"),
@@ -485,11 +493,14 @@ func loadConfig() readerConfig {
 
 // toBytestoreConfig flattens the reader config into the bytestore
 // factory's Config. Mirrors cmd/ledger/main.go's helper so the
-// reader and writer pick identical backends from identical env vars.
+// reader and writer pick identical backends — AND the identical per-log
+// namespace — from identical env vars; without the matching namespace
+// the reader resolves none of the writer's raw substrate objects.
 func (c readerConfig) toBytestoreConfig() bytestore.Config {
 	bc := bytestore.Config{
 		Backend:   c.ByteStoreBackend,
 		Prefix:    c.ByteStorePrefix,
+		Namespace: c.byteStoreNamespace(),
 		CacheSize: c.ByteStoreCacheSize,
 	}
 	switch c.ByteStoreBackend {
@@ -502,10 +513,23 @@ func (c readerConfig) toBytestoreConfig() bytestore.Config {
 		bc.S3Endpoint = c.ByteStoreS3Endpoint
 		bc.S3Region = c.ByteStoreS3Region
 		bc.S3AccessKey = c.ByteStoreS3AccessKey
-		bc.S3SecretKey = c.ByteStoreS3SecretKey
 		bc.S3PathStyle = c.ByteStoreS3PathStyle
+		bc.S3SecretKey = c.ByteStoreS3SecretKey
 	}
 	return bc
+}
+
+// byteStoreNamespace resolves the per-log object-store namespace the writer prepends
+// to every raw substrate key. An explicit LEDGER_BYTE_STORE_NAMESPACE wins; otherwise
+// it is DERIVED from the LogDID via the SHARED bytestore.NamespaceForLog — the EXACT
+// derivation cmd/ledger uses (config.byteStoreNamespace) — so the read front resolves
+// the SAME namespace for a given log and finds the writer's horizon, tiles, and
+// checkpoint/receipt/index archives. Empty only when LogDID is empty.
+func (c readerConfig) byteStoreNamespace() string {
+	if c.ByteStoreNamespace != "" {
+		return c.ByteStoreNamespace
+	}
+	return bytestore.NamespaceForLog(c.LogDID)
 }
 
 func envOr(key, fallback string) string {
