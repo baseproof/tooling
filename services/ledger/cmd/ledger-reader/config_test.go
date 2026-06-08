@@ -1,6 +1,10 @@
 package main
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/baseproof/tooling/services/ledger/bytestore"
+)
 
 // TestLoadConfig_LedgerEnvWinsOverBaseproof pins the drop-in contract: the read
 // front reads the writer's LEDGER_* names (so the stack passes ONE env set), with
@@ -48,5 +52,47 @@ func TestLoadConfig_BaseproofFallbackAndPlainHTTP(t *testing.T) {
 	}
 	if cfg.TLSCertFile != "" || cfg.TLSKeyFile != "" {
 		t.Errorf("TLS = (%q,%q), want both empty (plain HTTP default)", cfg.TLSCertFile, cfg.TLSKeyFile)
+	}
+}
+
+// The reader MUST resolve the SAME per-log object-store namespace the writer prepends
+// to every raw substrate key (cosigned-checkpoint horizon, SMT/log tiles, per-size
+// checkpoint + receipt + index archives). A mismatch makes every proof-substrate read
+// 404 — the reader's /v1/tree/horizon returns 503 and no offline proof can be served.
+// This is the +/- guard for that bug: the derived namespace must equal the shared
+// bytestore.NamespaceForLog(LogDID) that cmd/ledger.byteStoreNamespace also uses.
+func TestReaderByteStoreNamespace_MatchesWriterDerivation(t *testing.T) {
+	const logDID = "did:web:baseproof:federal"
+	got := readerConfig{LogDID: logDID}.byteStoreNamespace()
+	want := bytestore.NamespaceForLog(logDID)
+	if got != want {
+		t.Fatalf("reader namespace = %q, want %q (must match the writer's NamespaceForLog)", got, want)
+	}
+	if got == "" {
+		t.Fatal("a non-empty LogDID must derive a non-empty namespace, else reads land in the bucket root")
+	}
+}
+
+// An explicit LEDGER_BYTE_STORE_NAMESPACE overrides the derivation (matching the
+// writer's precedence), and an empty LogDID yields the empty (flat) namespace.
+func TestReaderByteStoreNamespace_OverrideAndEmpty(t *testing.T) {
+	if got := (readerConfig{LogDID: "did:web:x", ByteStoreNamespace: "explicit-ns"}).byteStoreNamespace(); got != "explicit-ns" {
+		t.Errorf("explicit namespace = %q, want explicit-ns", got)
+	}
+	if got := (readerConfig{}).byteStoreNamespace(); got != "" {
+		t.Errorf("empty LogDID namespace = %q, want \"\"", got)
+	}
+}
+
+// The flattened bytestore.Config carries the derived namespace (the field the bug left
+// zero) for the S3 backend the cold reader uses.
+func TestReaderToBytestoreConfig_CarriesNamespace(t *testing.T) {
+	c := readerConfig{
+		LogDID:            "did:web:baseproof:federal",
+		ByteStoreBackend:  "s3",
+		ByteStoreS3Bucket: "baseproof-bytes-federal",
+	}
+	if bc := c.toBytestoreConfig(); bc.Namespace != bytestore.NamespaceForLog(c.LogDID) {
+		t.Fatalf("toBytestoreConfig Namespace = %q, want %q", bc.Namespace, bytestore.NamespaceForLog(c.LogDID))
 	}
 }
