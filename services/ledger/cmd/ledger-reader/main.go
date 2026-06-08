@@ -34,8 +34,10 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"strconv"
@@ -45,6 +47,7 @@ import (
 	"time"
 
 	"github.com/baseproof/baseproof/core/smt"
+	"github.com/baseproof/baseproof/network"
 
 	"github.com/baseproof/tooling/services/ledger/api"
 	"github.com/baseproof/tooling/services/ledger/api/middleware"
@@ -281,9 +284,14 @@ func run(logger *slog.Logger) error {
 		CommitmentStore: commitmentStore, Logger: logger,
 	}
 
+	// Genesis bootstrap (config, not log data): the v2 proof gather GETs
+	// /v1/network/bootstrap from the serving node and verifies its SHA-256 against the
+	// trust root, so a read front that omits it cannot serve a full offline proof. The
+	// reader serves it from the same LEDGER_NETWORK_BOOTSTRAP_FILE the writer reads.
+	bootstrapDoc := loadReaderBootstrap(cfg.NetworkBootstrapFile, logger)
 	handlers := readerHandlers(treeDeps, smtDeps, queryDeps, entryReadDeps, commitDeps, horizon,
 		&api.ReceiptDeps{Heads: receiptHeads, Receipts: receiptProver, MinSigs: cfg.WitnessQuorumK, Logger: logger},
-		cfg.LogDID, logger)
+		bootstrapDoc, cfg.LogDID, logger)
 
 	serverCfg := api.DefaultServerConfig()
 	serverCfg.Addr = cfg.ServerAddr
@@ -348,6 +356,7 @@ func readerHandlers(
 	commitDeps *api.DerivationCommitmentDeps,
 	horizon api.HorizonReader,
 	receiptDeps *api.ReceiptDeps,
+	bootstrapDoc network.BootstrapDocument,
 	logDID string,
 	logger *slog.Logger,
 ) api.Handlers {
@@ -373,19 +382,75 @@ func readerHandlers(
 		// is_burned=false (NewGossipBurnSource handles the nil store).
 		ReceiptProof: api.NewReceiptProofHandler(receiptDeps),
 		Burn:         api.NewBurnHandler(api.NewGossipBurnSource(nil), logDID, logger),
-		CosignatureOf:     api.NewQueryCosignatureOfHandler(queryDeps),
-		TargetRoot:        api.NewQueryTargetRootHandler(queryDeps),
-		SignerDID:         api.NewQuerySignerDIDHandler(queryDeps),
-		SchemaRef:         api.NewQuerySchemaRefHandler(queryDeps),
-		Scan:              api.NewQueryScanHandler(queryDeps),
-		Difficulty:        api.NewDifficultyHandler(queryDeps),
-		EntryBySequence:   api.NewEntryBySequenceHandler(entryReadDeps),
-		EntryBatch:        api.NewEntryBatchHandler(entryReadDeps),
-		EntryRaw:          api.NewRawEntryHandler(entryReadDeps),
-		SMTLeaf:           api.NewSMTLeafHandler(smtDeps),
-		SMTLeafBatch:      api.NewSMTLeafBatchHandler(smtDeps),
-		CommitmentQuery:   api.NewDerivationCommitmentQueryHandler(commitDeps),
+		// Genesis network identity (config). NetworkBootstrap is REQUIRED by the v2
+		// proof gather (standalone_bundle.go SHA-256-checks the served canonical bytes
+		// against the trust root); NetworkIdentity rounds out the surface the writer
+		// serves. Both 404 gracefully when no bootstrap file was provided.
+		NetworkBootstrap: readerNetworkBootstrapHandler(bootstrapDoc, logger),
+		NetworkIdentity:  readerNetworkIdentityHandler(bootstrapDoc, logger),
+		CosignatureOf:    api.NewQueryCosignatureOfHandler(queryDeps),
+		TargetRoot:       api.NewQueryTargetRootHandler(queryDeps),
+		SignerDID:        api.NewQuerySignerDIDHandler(queryDeps),
+		SchemaRef:        api.NewQuerySchemaRefHandler(queryDeps),
+		Scan:             api.NewQueryScanHandler(queryDeps),
+		Difficulty:       api.NewDifficultyHandler(queryDeps),
+		EntryBySequence:  api.NewEntryBySequenceHandler(entryReadDeps),
+		EntryBatch:       api.NewEntryBatchHandler(entryReadDeps),
+		EntryRaw:         api.NewRawEntryHandler(entryReadDeps),
+		SMTLeaf:          api.NewSMTLeafHandler(smtDeps),
+		SMTLeafBatch:     api.NewSMTLeafBatchHandler(smtDeps),
+		CommitmentQuery:  api.NewDerivationCommitmentQueryHandler(commitDeps),
 	}
+}
+
+// loadReaderBootstrap reads + parses the genesis bootstrap document from path (the
+// same LEDGER_NETWORK_BOOTSTRAP_FILE the writer reads). Best-effort: an unset/unreadable/
+// unparseable path yields the zero document, and the bootstrap/identity handlers then
+// 404 gracefully (the network-info surface is simply unavailable). It is genesis CONFIG,
+// not log data, so reading it from a file keeps the cold-read contract (log data still
+// comes from the object store alone).
+func loadReaderBootstrap(path string, logger *slog.Logger) network.BootstrapDocument {
+	var doc network.BootstrapDocument
+	if strings.TrimSpace(path) == "" {
+		logger.Warn("LEDGER_NETWORK_BOOTSTRAP_FILE unset — /v1/network/bootstrap will 404 (offline proofs that bind to it will fail)")
+		return doc
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		logger.Warn("network bootstrap file unreadable — /v1/network/bootstrap will 404", "path", path, "error", err)
+		return network.BootstrapDocument{}
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		logger.Warn("network bootstrap parse failed — /v1/network/bootstrap will 404", "path", path, "error", err)
+		return network.BootstrapDocument{}
+	}
+	logger.Info("network bootstrap loaded", "path", path, "network", doc.NetworkName)
+	return doc
+}
+
+// readerNetworkBootstrapHandler serves GET /v1/network/bootstrap as the JCS-canonical
+// bytes the proof gather SHA-256-checks against the trust root — the SAME bytes the
+// writer serves (buildNetworkBootstrapHandler). A zero/invalid doc → 404 handler.
+func readerNetworkBootstrapHandler(doc network.BootstrapDocument, logger *slog.Logger) http.HandlerFunc {
+	if doc.NetworkName == "" {
+		return api.NewNetworkBootstrapHandler(nil)
+	}
+	canonical, err := doc.CanonicalBytes()
+	if err != nil {
+		logger.Error("bootstrap CanonicalBytes failed — /v1/network/bootstrap will 404", "error", err)
+		return api.NewNetworkBootstrapHandler(nil)
+	}
+	return api.NewNetworkBootstrapHandler(canonical)
+}
+
+// readerNetworkIdentityHandler serves GET /v1/network/identity from the same doc.
+func readerNetworkIdentityHandler(doc network.BootstrapDocument, logger *slog.Logger) http.HandlerFunc {
+	id, err := api.BuildNetworkIdentity(doc)
+	if err != nil {
+		logger.Error("BuildNetworkIdentity failed — /v1/network/identity will 404", "error", err)
+		return api.NewNetworkIdentityHandler(api.NetworkIdentity{})
+	}
+	return api.NewNetworkIdentityHandler(id)
 }
 
 // -------------------------------------------------------------------------------------------------
@@ -393,21 +458,22 @@ func readerHandlers(
 // -------------------------------------------------------------------------------------------------
 
 type readerConfig struct {
-	LogDID            string
-	PostgresDSN       string
-	ReplicaDSN        string
-	MaxConns          int
-	MinConns          int
-	StatementTimeout  time.Duration // LEDGER_PG_STATEMENT_TIMEOUT, default 5s
-	ServerAddr        string
-	TesseraStorageDir string // shared POSIX dir with the writer ledger
-	TileCacheSize     int
-	WarmTopLevels     int
-	SMTCacheSize      int
-	InitialDifficulty int
-	MinDifficulty     int
-	MaxDifficulty     int
-	HashFunction      string
+	LogDID               string
+	NetworkBootstrapFile string // LEDGER_NETWORK_BOOTSTRAP_FILE; backs GET /v1/network/bootstrap + /identity
+	PostgresDSN          string
+	ReplicaDSN           string
+	MaxConns             int
+	MinConns             int
+	StatementTimeout     time.Duration // LEDGER_PG_STATEMENT_TIMEOUT, default 5s
+	ServerAddr           string
+	TesseraStorageDir    string // shared POSIX dir with the writer ledger
+	TileCacheSize        int
+	WarmTopLevels        int
+	SMTCacheSize         int
+	InitialDifficulty    int
+	MinDifficulty        int
+	MaxDifficulty        int
+	HashFunction         string
 
 	// WitnessQuorumK is the distinct-signer threshold a published checkpoint must meet
 	// (LEDGER_WITNESS_QUORUM_K, matching the writer). The receipt-proof handler uses it
@@ -436,6 +502,12 @@ type readerConfig struct {
 	// the SHARED bytestore.NamespaceForLog, exactly as the writer derives it
 	// (LEDGER_BYTE_STORE_NAMESPACE overrides, also matching the writer).
 	ByteStoreNamespace string
+	// ByteStorePublicBaseURL is the credential-free URL prefix the ledger puts in the
+	// 302 Location for a SHIPPED entry's bytes (LEDGER_BYTE_STORE_PUBLIC_BASE_URL). It
+	// MUST be host/CDN-reachable by the proof consumer — without it /raw redirects to
+	// the in-network S3 endpoint, which an off-network verifier can't resolve. Matches
+	// the writer's ByteStorePublicBaseURL.
+	ByteStorePublicBaseURL string
 	// GCS-specific.
 	ByteStoreGCSBucket   string
 	ByteStoreGCSEndpoint string
@@ -454,29 +526,31 @@ func loadConfig() readerConfig {
 		// Prefer the writer's LEDGER_* names so the read front is a drop-in with
 		// the SAME env (only the DSN points elsewhere / at a dead host for PG-off);
 		// the BASEPROOF_* names remain as a fallback so existing deploys keep working.
-		LogDID:            envOr("LEDGER_LOG_DID", envOr("BASEPROOF_LOG_DID", "did:baseproof:ledger:001")),
-		PostgresDSN:       envOr("LEDGER_DATABASE_URL", envOr("BASEPROOF_POSTGRES_DSN", "postgres://baseproof:baseproof@localhost:5432/baseproof?sslmode=disable")),
-		ReplicaDSN:        envOr("LEDGER_REPLICA_DSN", envOr("BASEPROOF_REPLICA_DSN", "")),
-		MaxConns:          20,
-		MinConns:          5,
-		StatementTimeout:  parsePgStatementTimeout(),
-		ServerAddr:        envOr("LEDGER_ADDR", envOr("BASEPROOF_SERVER_ADDR", ":8081")),
-		TesseraStorageDir: envOr("LEDGER_TESSERA_STORAGE_DIR", envOr("BASEPROOF_TESSERA_STORAGE_DIR", "/var/lib/baseproof/tessera")),
-		TileCacheSize:     10000,
-		WarmTopLevels:     32,
-		SMTCacheSize:      100000,
-		InitialDifficulty: 16,
-		MinDifficulty:     8,
-		MaxDifficulty:     24,
-		HashFunction:      "sha256",
-		WitnessQuorumK:    envIntOr("LEDGER_WITNESS_QUORUM_K", 1),
-		TLSCertFile:       os.Getenv("LEDGER_TLS_CERT_FILE"),
-		TLSKeyFile:        os.Getenv("LEDGER_TLS_KEY_FILE"),
+		LogDID:               envOr("LEDGER_LOG_DID", envOr("BASEPROOF_LOG_DID", "did:baseproof:ledger:001")),
+		NetworkBootstrapFile: os.Getenv("LEDGER_NETWORK_BOOTSTRAP_FILE"),
+		PostgresDSN:          envOr("LEDGER_DATABASE_URL", envOr("BASEPROOF_POSTGRES_DSN", "postgres://baseproof:baseproof@localhost:5432/baseproof?sslmode=disable")),
+		ReplicaDSN:           envOr("LEDGER_REPLICA_DSN", envOr("BASEPROOF_REPLICA_DSN", "")),
+		MaxConns:             20,
+		MinConns:             5,
+		StatementTimeout:     parsePgStatementTimeout(),
+		ServerAddr:           envOr("LEDGER_ADDR", envOr("BASEPROOF_SERVER_ADDR", ":8081")),
+		TesseraStorageDir:    envOr("LEDGER_TESSERA_STORAGE_DIR", envOr("BASEPROOF_TESSERA_STORAGE_DIR", "/var/lib/baseproof/tessera")),
+		TileCacheSize:        10000,
+		WarmTopLevels:        32,
+		SMTCacheSize:         100000,
+		InitialDifficulty:    16,
+		MinDifficulty:        8,
+		MaxDifficulty:        24,
+		HashFunction:         "sha256",
+		WitnessQuorumK:       envIntOr("LEDGER_WITNESS_QUORUM_K", 1),
+		TLSCertFile:          os.Getenv("LEDGER_TLS_CERT_FILE"),
+		TLSKeyFile:           os.Getenv("LEDGER_TLS_KEY_FILE"),
 
-		ByteStoreBackend:   os.Getenv("LEDGER_BYTE_STORE_BACKEND"),
-		ByteStorePrefix:    envOr("LEDGER_BYTE_STORE_PREFIX", "entries"),
-		ByteStoreNamespace: os.Getenv("LEDGER_BYTE_STORE_NAMESPACE"), // empty → derived from LogDID in toBytestoreConfig
-		ByteStoreCacheSize: 4096,
+		ByteStoreBackend:       os.Getenv("LEDGER_BYTE_STORE_BACKEND"),
+		ByteStorePrefix:        envOr("LEDGER_BYTE_STORE_PREFIX", "entries"),
+		ByteStoreNamespace:     os.Getenv("LEDGER_BYTE_STORE_NAMESPACE"), // empty → derived from LogDID in toBytestoreConfig
+		ByteStorePublicBaseURL: os.Getenv("LEDGER_BYTE_STORE_PUBLIC_BASE_URL"),
+		ByteStoreCacheSize:     4096,
 		// GCS family.
 		ByteStoreGCSBucket:   os.Getenv("LEDGER_BYTE_STORE_GCS_BUCKET"),
 		ByteStoreGCSEndpoint: os.Getenv("LEDGER_BYTE_STORE_GCS_ENDPOINT"),
@@ -498,10 +572,11 @@ func loadConfig() readerConfig {
 // the reader resolves none of the writer's raw substrate objects.
 func (c readerConfig) toBytestoreConfig() bytestore.Config {
 	bc := bytestore.Config{
-		Backend:   c.ByteStoreBackend,
-		Prefix:    c.ByteStorePrefix,
-		Namespace: c.byteStoreNamespace(),
-		CacheSize: c.ByteStoreCacheSize,
+		Backend:       c.ByteStoreBackend,
+		Prefix:        c.ByteStorePrefix,
+		Namespace:     c.byteStoreNamespace(),
+		PublicBaseURL: c.ByteStorePublicBaseURL,
+		CacheSize:     c.ByteStoreCacheSize,
 	}
 	switch c.ByteStoreBackend {
 	case "gcs":

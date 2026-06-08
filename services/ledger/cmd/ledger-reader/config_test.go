@@ -1,7 +1,11 @@
 package main
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"testing"
+
+	"github.com/baseproof/baseproof/network"
 
 	"github.com/baseproof/tooling/services/ledger/bytestore"
 )
@@ -94,5 +98,38 @@ func TestReaderToBytestoreConfig_CarriesNamespace(t *testing.T) {
 	}
 	if bc := c.toBytestoreConfig(); bc.Namespace != bytestore.NamespaceForLog(c.LogDID) {
 		t.Fatalf("toBytestoreConfig Namespace = %q, want %q", bc.Namespace, bytestore.NamespaceForLog(c.LogDID))
+	}
+}
+
+// The flattened config carries the host-reachable public base URL — without it /raw
+// redirects to the in-network S3 endpoint an off-network verifier can't resolve.
+func TestReaderToBytestoreConfig_CarriesPublicBaseURL(t *testing.T) {
+	const pub = "http://localhost:8333/baseproof-bytes-federal"
+	c := readerConfig{LogDID: "did:web:x", ByteStoreBackend: "s3", ByteStoreS3Bucket: "b", ByteStorePublicBaseURL: pub}
+	if bc := c.toBytestoreConfig(); bc.PublicBaseURL != pub {
+		t.Fatalf("PublicBaseURL = %q, want %q", bc.PublicBaseURL, pub)
+	}
+}
+
+// loadReaderBootstrap is best-effort: an unset or unreadable path yields the zero
+// document (the bootstrap handler then 404s gracefully), never a fatal boot error.
+func TestLoadReaderBootstrap_MissingOrEmptyIsZeroDoc(t *testing.T) {
+	lg := discardLogger()
+	if doc := loadReaderBootstrap("", lg); doc.NetworkName != "" {
+		t.Errorf("empty path must yield the zero doc, got network %q", doc.NetworkName)
+	}
+	if doc := loadReaderBootstrap("/no/such/network-bootstrap.json", lg); doc.NetworkName != "" {
+		t.Errorf("unreadable path must yield the zero doc, got network %q", doc.NetworkName)
+	}
+}
+
+// With no bootstrap doc, GET /v1/network/bootstrap 404s (the v2 gather then fails
+// closed) — never a fabricated genesis. The +/- guard for the route the proof needs.
+func TestReaderNetworkBootstrapHandler_NoDoc404(t *testing.T) {
+	h := readerNetworkBootstrapHandler(network.BootstrapDocument{}, discardLogger())
+	rr := httptest.NewRecorder()
+	h(rr, httptest.NewRequest(http.MethodGet, "/v1/network/bootstrap", nil))
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("no-doc /v1/network/bootstrap = %d, want 404", rr.Code)
 	}
 }

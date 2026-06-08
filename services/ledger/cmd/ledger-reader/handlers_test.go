@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/baseproof/baseproof/network"
 	"github.com/baseproof/baseproof/types"
 
 	"github.com/baseproof/tooling/services/ledger/api"
@@ -43,6 +44,7 @@ func TestReaderHandlers_WiresCosignedHorizonRoute(t *testing.T) {
 		&api.DerivationCommitmentDeps{Logger: discardLogger()},
 		fakeReaderHorizon{head: head, raw: []byte(`{"tree_size":7}`)},
 		&api.ReceiptDeps{Logger: discardLogger()},
+		network.BootstrapDocument{},
 		"did:baseproof:test",
 		discardLogger(),
 	)
@@ -71,6 +73,7 @@ func TestReaderHandlers_HorizonPreGenesis_503(t *testing.T) {
 		&api.DerivationCommitmentDeps{Logger: discardLogger()},
 		fakeReaderHorizon{err: os.ErrNotExist},
 		&api.ReceiptDeps{Logger: discardLogger()},
+		network.BootstrapDocument{},
 		"did:baseproof:test",
 		discardLogger(),
 	)
@@ -98,6 +101,7 @@ func TestReaderHandlers_WiresReceiptAndBurnRoutes(t *testing.T) {
 		&api.DerivationCommitmentDeps{Logger: discardLogger()},
 		fakeReaderHorizon{head: &types.CosignedTreeHead{TreeHead: types.TreeHead{TreeSize: 7}}},
 		&api.ReceiptDeps{Logger: discardLogger()},
+		network.BootstrapDocument{},
 		"did:baseproof:test",
 		discardLogger(),
 	)
