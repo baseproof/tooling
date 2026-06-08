@@ -103,6 +103,74 @@ func (s *TailedNodeStore) PruneTiled(ctx context.Context, exists func(ctx contex
 	}
 }
 
+// reachableInTail returns the set of TAIL-RESIDENT node hashes reachable from
+// root via tail-only paths. A hash absent from the tail ends that branch: tiles
+// emit complete band subtrees, so a durable (tiled, non-tail) node has durable
+// children — no tail node hangs below it. Caller holds s.mu (read is enough).
+// Cost is bounded by the un-tiled gap, not history.
+func (s *TailedNodeStore) reachableInTail(root [32]byte) map[[32]byte]struct{} {
+	seen := make(map[[32]byte]struct{})
+	var visit func(h [32]byte)
+	visit = func(h [32]byte) {
+		if h == smt.EmptyHash {
+			return
+		}
+		if _, ok := seen[h]; ok {
+			return
+		}
+		n, ok := s.tail[h]
+		if !ok {
+			return // durable/absent ⇒ this branch is fully tiled
+		}
+		seen[h] = struct{}{}
+		if b, isBranch := n.(*smt.BranchNode); isBranch {
+			visit(b.LeftHash)
+			visit(b.RightHash)
+		}
+	}
+	visit(root)
+	return seen
+}
+
+// TailGCAudit is a NON-DESTRUCTIVE check of the assumption the orphan-prune will
+// rely on: every tail node the prune would drop (i.e. not reachable from
+// committedRoot) is safe to drop because it is EITHER durable in tiles (servable
+// there) OR not reachable from any retained published root (published ⇒ durable).
+//
+// It computes the RISKY set — tail nodes reachable from some publishedRoot but
+// NOT from committedRoot (these would be dropped, yet a published root needs
+// them) — and counts how many are NOT durable in tiles. That count is the number
+// of VIOLATIONS: a non-zero value means dropping them would strand a published
+// root, i.e. the assumption is FALSE. In a correct system (published ⇒ durable)
+// it is always 0, cheaply: a fully-tiled published root reaches no tail node.
+//
+// Durability is checked against the store's own durable read-through (s.tiles),
+// outside the lock (it may do I/O). Run this in a soak BEFORE enabling the prune.
+func (s *TailedNodeStore) TailGCAudit(committedRoot [32]byte, publishedRoots [][32]byte) (candidates, violations int, sample [32]byte) {
+	s.mu.RLock()
+	committedReach := s.reachableInTail(committedRoot)
+	candSet := make(map[[32]byte]struct{})
+	for _, pr := range publishedRoots {
+		for h := range s.reachableInTail(pr) {
+			if _, retained := committedReach[h]; retained {
+				continue // reachable from committed ⇒ the prune keeps it
+			}
+			candSet[h] = struct{}{}
+		}
+	}
+	s.mu.RUnlock()
+
+	candidates = len(candSet)
+	for h := range candSet {
+		if n, err := s.tiles.Get(h); err == nil && n != nil {
+			continue // durable in tiles ⇒ safe to drop from the tail
+		}
+		violations++
+		sample = h
+	}
+	return candidates, violations, sample
+}
+
 // TailLen reports the un-tiled node count (metrics / tests).
 func (s *TailedNodeStore) TailLen() int {
 	s.mu.RLock()

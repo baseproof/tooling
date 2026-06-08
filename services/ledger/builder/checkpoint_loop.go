@@ -107,6 +107,16 @@ type TailPruner interface {
 	PruneTiled(ctx context.Context, exists func(ctx context.Context, id [32]byte) (bool, error))
 }
 
+// TailGCAuditor (optional, satisfied by *store.TailedNodeStore) NON-DESTRUCTIVELY
+// checks the safety assumption the future orphan-prune will rely on: every tail
+// node not reachable from committedRoot (the prune's drop set) is either durable
+// in tiles or unreachable from any retained published root (published ⇒ durable).
+// It returns the count of VIOLATIONS — would-drop nodes a published root needs
+// that are NOT durable — which must stay 0. Wired only when OnTailGCAudit is set.
+type TailGCAuditor interface {
+	TailGCAudit(committedRoot [32]byte, publishedRoots [][32]byte) (candidates, violations int, sample [32]byte)
+}
+
 // CheckpointRooter derives the deterministic RFC 6962 Merkle root at a tree size
 // from durable tiles, and reports the integrated (durable) tree size. Satisfied
 // by *tessera.TesseraAdapter (RootAtSize + IntegratedSize).
@@ -227,6 +237,27 @@ type CheckpointLoop struct {
 	// goroutine AND the sequencer's backpressure gate — hence atomic. This is the
 	// memory-bounding signal: if tiling stalls, this climbs and admission backs off.
 	metricFrontierLag atomic.Uint64
+
+	// recentPublishedRoots is a bounded ring of the most recently PUBLISHED
+	// (cosigned) checkpoint roots — the historical roots as-of regeneration must
+	// keep servable. Used only by the optional tail-GC audit to confirm none of
+	// them still reaches into the in-memory tail (published ⇒ durable). Written
+	// and read from the single loop goroutine.
+	recentPublishedRoots [][32]byte
+	// onTailGCAudit, when set (OnTailGCAudit), runs the non-destructive tail-GC
+	// safety audit each cycle and reports its result. Injected by the composition
+	// root behind LEDGER_TAIL_GC_AUDIT so the core loop stays metrics-free; nil ⇒
+	// the audit does not run.
+	onTailGCAudit func(ctx context.Context, candidates, violations int, sample [32]byte)
+}
+
+const maxRecentPublishedRoots = 64
+
+// OnTailGCAudit installs the non-destructive tail-GC safety audit hook (see
+// TailGCAuditor). Set before Run; nil disables it. Temporary validation: it
+// proves the orphan-prune is safe (zero violations) before that prune is enabled.
+func (l *CheckpointLoop) OnTailGCAudit(fn func(ctx context.Context, candidates, violations int, sample [32]byte)) {
+	l.onTailGCAudit = fn
 }
 
 // HorizonLag returns committed head tree_size minus the published (witness-
@@ -521,6 +552,19 @@ func (l *CheckpointLoop) CheckpointOnce(ctx context.Context) error {
 		})
 	}
 
+	// ── Step 5a′ (temporary, LEDGER_TAIL_GC_AUDIT): non-destructive tail-GC safety
+	// audit. The future orphan-prune will drop tail nodes unreachable from the
+	// committed root; this confirms that is safe — that NO retained published root
+	// still reaches a non-durable tail node (published ⇒ durable). Reports via the
+	// injected hook; a non-zero violation count means the assumption is false. cRoot
+	// is the just-committed, now-durable SMT root. ──
+	if l.onTailGCAudit != nil {
+		if auditor, ok := l.tail.(TailGCAuditor); ok && len(l.recentPublishedRoots) > 0 {
+			cand, viol, sample := auditor.TailGCAudit(cRoot, l.recentPublishedRoots)
+			l.onTailGCAudit(ctx, cand, viol, sample)
+		}
+	}
+
 	// ── Step 6: Merkle root at the committed size (deterministic from durable
 	//    tiles). Step 2 already gated treeSize <= integrated, so ErrTilesNotDurable
 	//    here is only a tight race against a shrinking view — HOLD rather than fault. ──
@@ -631,6 +675,12 @@ func (l *CheckpointLoop) CheckpointOnce(ctx context.Context) error {
 	span.SetAttributes(attribute.Int("ledger.signatures", len(cosigned.Signatures)))
 	l.lastPublishedSize = treeSize
 	l.metricPublished.Store(treeSize) // horizon-lag gauge denominator (on publish)
+	if l.onTailGCAudit != nil { // retain the published SMT root for the tail-GC audit
+		l.recentPublishedRoots = append(l.recentPublishedRoots, cRoot)
+		if n := len(l.recentPublishedRoots); n > maxRecentPublishedRoots {
+			l.recentPublishedRoots = l.recentPublishedRoots[n-maxRecentPublishedRoots:]
+		}
+	}
 	l.lastHoldReason = ""
 	l.logger.InfoContext(ctx, "checkpoint published",
 		"tree_size", treeSize,

@@ -387,6 +387,22 @@ func Wire(ctx context.Context, cfg Config, d *deps.AppDeps) error {
 		// (O(history)) and the writer OOMs (the node DAG is de-polluted out of PG and
 		// lives only in the tail until tiled).
 		checkpointLoop.SetTailPruner(d.NodeStore)
+		// Temporary tail-GC safety audit (LEDGER_TAIL_GC_AUDIT=1): NON-destructive.
+		// Before enabling the orphan-prune, prove its assumption holds in a real soak
+		// — that no PUBLISHED root still reaches a non-durable node the prune would
+		// drop (published ⇒ durable). A non-zero violation count is logged at ERROR
+		// (the assumption is FALSE — do NOT enable the prune); zero confirms safety.
+		if os.Getenv("LEDGER_TAIL_GC_AUDIT") == "1" {
+			checkpointLoop.OnTailGCAudit(func(ctx context.Context, candidates, violations int, sample [32]byte) {
+				if violations > 0 {
+					d.Logger.ErrorContext(ctx, "tail-gc audit VIOLATION: a published root reaches a non-durable tail node the orphan-prune would drop — published⇒durable does NOT hold; do not enable the prune",
+						"violations", violations, "candidates", candidates, "sample_node", fmt.Sprintf("%x", sample[:8]))
+					return
+				}
+				d.Logger.DebugContext(ctx, "tail-gc audit ok (orphan-prune safe)", "risky_candidates", candidates)
+			})
+			d.Logger.Info("tail-gc safety audit enabled (LEDGER_TAIL_GC_AUDIT=1, non-destructive)")
+		}
 		d.Logger.Info("checkpoint loop enabled", "tile_dir", tileDir, "quorum_k", cfg.WitnessQuorumK)
 	}
 
