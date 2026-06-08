@@ -416,12 +416,15 @@ func (l *CheckpointLoop) CheckpointOnce(ctx context.Context) error {
 	if cSeq >= fSeq {
 		l.metricFrontierLag.Store(cSeq - fSeq)
 	}
-	// fromRoot == cRoot is an empty delta, so pass the empty-hash sentinel to force
-	// a full (idempotent) BuildTiles of the committed subtree.
+	// fromRoot is the prior durably-tiled root — the anchor the incremental emitter
+	// warms from: it fetches the same-position prior tile so a re-emitted tile's
+	// unchanged interiors resolve after the in-memory tail is pruned (without it the
+	// emit faults "interior node missing"). It is ALWAYS a valid warm anchor —
+	// EmptyHash at genesis (seeded by migration 0012) or a real durable tile root
+	// (AdvanceFrontier never writes the zero value). An empty delta (fRoot == cRoot)
+	// warms cRoot's own tile and re-emits it idempotently, so no special-casing is
+	// needed; passing the zero value here would instead fault the warm-walk.
 	fromRoot := fRoot
-	if fromRoot == cRoot {
-		fromRoot = [32]byte{}
-	}
 
 	// checkpoint.cycle — the N:1 batch span. A NEW ROOT (its own trace) marked
 	// AlwaysSampleAttr so it is ALWAYS recorded even under sparse per-entry

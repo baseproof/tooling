@@ -59,11 +59,17 @@ func NewBuildTilesEmitter(nodes smt.NodeStore, tiles SMTTileStore) *BuildTilesEm
 // committed node (O(history)) and the writer OOMs. A nil/empty return (EmptyHash, or
 // an error) prunes nothing. Returning a non-nil error means NO tiles became durable
 // this call; the set is then nil so the caller evicts nothing (fail-closed).
-func (e *BuildTilesEmitter) EmitDurable(ctx context.Context, _ [32]byte, committedRoot [32]byte, _ uint64) (map[[32]byte]struct{}, error) {
+//
+// fromRoot is the prior durably-tiled root (the frontier root; EmptyHash at genesis).
+// The incremental emitter warms the same-position prior tile from it so a re-emitted
+// tile's unchanged interiors resolve AFTER the tail is pruned — without it the emit
+// faults "interior node missing from node store" (the pruned-tail tiling stall). It
+// is only a warm anchor: the durable tile SET produced is identical regardless.
+func (e *BuildTilesEmitter) EmitDurable(ctx context.Context, fromRoot [32]byte, committedRoot [32]byte, _ uint64) (map[[32]byte]struct{}, error) {
 	if committedRoot == smt.EmptyHash {
 		return nil, nil // empty tree → no tiles, nothing durable
 	}
-	tileSet, err := e.buildTiles(ctx, committedRoot)
+	tileSet, err := e.buildTiles(ctx, fromRoot, committedRoot)
 	if err != nil {
 		return nil, err
 	}
@@ -98,7 +104,8 @@ func (e *BuildTilesEmitter) EmitDurable(ctx context.Context, _ [32]byte, committ
 // buildTiles selects the incremental dirty-set walk when the node substrate exposes
 // its un-tiled tail (production: *TailedNodeStore — work ∝ the checkpoint delta), else
 // the full-subtree walk (the correctness oracle BuildDirtyTiles is validated against).
-func (e *BuildTilesEmitter) buildTiles(ctx context.Context, committedRoot [32]byte) (map[[32]byte]smt.SMTTile, error) {
+// fromRoot anchors the incremental walk's prior-tile warming; the full walk ignores it.
+func (e *BuildTilesEmitter) buildTiles(ctx context.Context, fromRoot, committedRoot [32]byte) (map[[32]byte]smt.SMTTile, error) {
 	tailed, ok := e.nodes.(tailSnapshotter)
 	if !ok {
 		tiles, err := smt.BuildTiles(e.nodes, committedRoot, smt.TileHeight)
@@ -114,7 +121,7 @@ func (e *BuildTilesEmitter) buildTiles(ctx context.Context, committedRoot [32]by
 		present, eerr := e.tiles.Exists(ctx, top)
 		return eerr == nil && present
 	}
-	tiles, err := smt.BuildDirtyTiles(e.nodes, tailed.Tail(), committedRoot, smt.TileHeight, known)
+	tiles, err := smt.BuildDirtyTiles(e.nodes, tailed.Tail(), committedRoot, fromRoot, smt.TileHeight, known)
 	if err != nil {
 		return nil, fmt.Errorf("store/tile-emitter: build dirty tiles at %x: %w", committedRoot[:8], err)
 	}
