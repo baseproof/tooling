@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"testing"
 
 	"github.com/baseproof/baseproof/core/smt"
@@ -304,4 +305,92 @@ func TestTailBound_ReachableMutationsEndToEnd(t *testing.T) {
 		}
 	}
 	t.Logf("BOUNDED: %d entries, maxTail=%d nodes (%.3f/entry) — vs ~5.8/entry unfixed", total, maxTail, float64(maxTail)/float64(total))
+}
+
+// TestTileEmitter_FreshStore_FromRootResolvesPrunedInteriors is the production-
+// faithful capstone for the OOM-prune + tiling fix together. It emits each batch
+// through a FRESH TiledNodeStore the builder never warmed, so a re-emitted tile's
+// unchanged interiors — pruned from the tail and never fetched as tiles — resolve
+// ONLY via the fromRoot warm-walk that EmitDurable threads into BuildDirtyTiles.
+// (The other tail-bound tests share one long-lived store that SetLeaves incidentally
+// warms, so they would pass even if fromRoot were mis-threaded; this one would not.)
+// ± over a warm flag:
+//
+//	warm=true  (fromRoot=prevRoot): every batch emits cleanly under the pruned tail;
+//	warm=false (fromRoot=EmptyHash): the same flow strands a pruned interior
+//	                                 (ErrNodeMissing), proving the threading is load-bearing.
+func TestTileEmitter_FreshStore_FromRootResolvesPrunedInteriors(t *testing.T) {
+	if b, err := runFreshStoreEmit(t, 20, 64, true); err != nil {
+		t.Fatalf("fromRoot-warmed fresh-store emit must resolve every interior; failed at batch %d: %v", b, err)
+	}
+	b, err := runFreshStoreEmit(t, 20, 64, false)
+	if !errors.Is(err, smt.ErrNodeMissing) {
+		t.Fatalf("without fromRoot the fresh-store emit must strand a pruned interior (ErrNodeMissing); got (batch=%d) %v", b, err)
+	}
+}
+
+// runFreshStoreEmit drives the commit→checkpoint loop but emits each batch through
+// a FRESH store (never warmed by the builder). warm selects fromRoot=prevRoot (the
+// fix) vs EmptyHash (warming disabled). Returns the batch index and error of the
+// first emit failure, or (-1, nil) if all batches emit and the tree stays servable.
+func runFreshStoreEmit(t *testing.T, batches, perBatch int, warm bool) (int, error) {
+	t.Helper()
+	ctx := context.Background()
+	tiles := NewMemSMTTileStore() // shared durable tile sink
+
+	// Builder substrate: long-lived, warmed by its own top-down reads (realistic).
+	builderTailed := NewTailedNodeStore(smt.NewTiledNodeStore(ctx, tiles, smt.NewTileCache(1<<16)))
+	leafStore := smt.NewInMemoryLeafStore()
+
+	root, prevRoot := smt.EmptyHash, smt.EmptyHash
+	total := 0
+	for b := 0; b < batches; b++ {
+		overlay := smt.NewOverlayNodeStore(builderTailed)
+		tree := smt.NewTree(leafStore, overlay)
+		tree.SetRoot(root)
+		batch := make([]types.SMTLeaf, 0, perBatch)
+		for i := 0; i < perBatch; i++ {
+			k := sha256.Sum256([]byte{byte(total), byte(total >> 8), byte(total >> 16)})
+			batch = append(batch, types.SMTLeaf{Key: k, OriginTip: types.LogPosition{LogDID: "did:test", Sequence: uint64(total + 1)}})
+			total++
+		}
+		if err := tree.SetLeaves(ctx, batch); err != nil {
+			t.Fatalf("SetLeaves: %v", err)
+		}
+		var err error
+		if root, err = tree.Root(ctx); err != nil {
+			t.Fatalf("Root: %v", err)
+		}
+		dirty := overlay.ReachableMutations(root)
+		nodes := make([]smt.Node, 0, len(dirty))
+		for _, n := range dirty {
+			nodes = append(nodes, n)
+		}
+		builderTailed.PutBatch(nodes)
+
+		// Emit through a FRESH store seeded with ONLY this batch's committed-but-not-
+		// tiled delta — never warmed by the builder. Pruned prior interiors can resolve
+		// only if EmitDurable warms the prior tile from fromRoot.
+		emitTailed := NewTailedNodeStore(smt.NewTiledNodeStore(ctx, tiles, smt.NewTileCache(4096)))
+		emitTailed.PutBatch(nodes)
+		from := smt.EmptyHash
+		if warm {
+			from = prevRoot
+		}
+		durable, err := NewBuildTilesEmitter(emitTailed, tiles).EmitDurable(ctx, from, root, uint64(total))
+		if err != nil {
+			return b, err
+		}
+		builderTailed.PruneTiled(ctx, func(_ context.Context, h [32]byte) (bool, error) { _, ok := durable[h]; return ok, nil })
+		prevRoot = root
+	}
+	// Servable from tiles alone — the warmed path emitted a complete, correct set.
+	fresh := smt.NewTiledNodeStore(ctx, tiles, smt.NewTileCache(1<<16))
+	for _, idx := range []int{0, total / 2, total - 1} {
+		k := sha256.Sum256([]byte{byte(idx), byte(idx >> 8), byte(idx >> 16)})
+		if _, perr := smt.GenerateProofAt(fresh, root, k); perr != nil {
+			t.Fatalf("proof idx=%d unservable from tiles: %v", idx, perr)
+		}
+	}
+	return -1, nil
 }
