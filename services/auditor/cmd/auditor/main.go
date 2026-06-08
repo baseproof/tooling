@@ -161,6 +161,18 @@ type config struct {
 	// lands.
 	custodyInterval time.Duration
 
+	// equivScanInterval (AUDITOR_EQUIVOCATION_SCAN_INTERVAL, default 0 =
+	// disabled) is the cadence the INDEPENDENT equivocation scanner polls each
+	// peer's latest cosigned tree head at. 0 = the scanner is not started.
+	// Requires gossipSigningKeyFile (emit needs a gossip identity).
+	equivScanInterval time.Duration
+
+	// gossipSigningKeyFile (AUDITOR_GOSSIP_SIGNING_KEY_FILE) is the path to the
+	// auditor's secp256k1 gossip signing key (PEM). The emit-side originator
+	// did:key is derived from it (no DID in config); empty disables the
+	// equivocation scanner's push leg.
+	gossipSigningKeyFile string
+
 	// Ladder 5 P6 (#21): tree-size-keyed materialized-view cache.
 	//
 	//   AUDITOR_MATERIALIZED_CACHE_DIR — root directory for the cache.
@@ -229,6 +241,10 @@ func loadConfig() config {
 		governanceInterval: envDuration("AUDITOR_GOVERNANCE_INTERVAL", 0),
 		commitmentInterval: envDuration("AUDITOR_COMMITMENT_INTERVAL", 0),
 		custodyInterval:    envDuration("AUDITOR_CUSTODY_INTERVAL", 0),
+		// Independent equivocation scanner (push leg). Disabled unless both
+		// the interval AND a gossip signing key are set.
+		equivScanInterval:    envDuration("AUDITOR_EQUIVOCATION_SCAN_INTERVAL", 0),
+		gossipSigningKeyFile: os.Getenv("AUDITOR_GOSSIP_SIGNING_KEY_FILE"),
 		// Ladder 5 P6 (#21): materialized-view cache.
 		materializedCacheDir: os.Getenv("AUDITOR_MATERIALIZED_CACHE_DIR"),
 		materializedKeepLast: envInt("AUDITOR_MATERIALIZED_KEEP_LAST", 5),
@@ -273,6 +289,8 @@ func run(ctx context.Context, cfg config, logger *slog.Logger) error {
 	// shutdown branch joins both ONLY when non-nil, so the health-only
 	// path remains a no-op join (covered by TestRun_GracefulShutdown).
 	var pullerDone, schedulerDone chan struct{}
+	var scannerDone <-chan struct{}
+	var scannerCleanup func(context.Context) error
 
 	// Custody + pipeline: only when a durable store is configured. The store
 	// impl is auditor-internal (services/auditor/internal/store) — no enforcer
@@ -635,6 +653,27 @@ func run(ctx context.Context, cfg config, logger *slog.Logger) error {
 				pipe.Scheduler.Run(ctx)
 			}()
 		}
+		// Activate the INDEPENDENT equivocation-detection leg. It reuses the
+		// genesis-derived witness sets + resolver built above (so detection
+		// stays zero-trust) and pushes self-certifying findings to the peer
+		// gossip mesh. Disabled unless configured; a construction fault logs
+		// loudly and we continue the (valuable) consume-side role.
+		eqDone, eqCleanup, eqErr := startEquivocationScanner(ctx, equivScannerDeps{
+			signingKeyFile: cfg.gossipSigningKeyFile,
+			scanInterval:   cfg.equivScanInterval,
+			networkID:      nid,
+			peers:          resolvedPeers,
+			witnessSets:    witnessSets,
+			resolver:       endpointResolver,
+			httpClient:     peerHTTPClient,
+			logger:         logger,
+		})
+		if eqErr != nil {
+			logger.Error("auditor: equivocation scanner failed to start; continuing without it",
+				"error", eqErr.Error())
+		} else {
+			scannerDone, scannerCleanup = eqDone, eqCleanup
+		}
 		logger.Info("auditor: custody + inbound pipeline up",
 			"exchange_did", exchangeDID, "witness_sets", len(witnessSets),
 			"peers", len(resolvedPeers), "originator_discovery", cfg.discoverOriginator,
@@ -686,6 +725,12 @@ func run(ctx context.Context, cfg config, logger *slog.Logger) error {
 		// are no-ops.
 		joinGoroutine(shutCtx, pullerDone, "puller", logger)
 		joinGoroutine(shutCtx, schedulerDone, "scheduler", logger)
+		joinGoroutine(shutCtx, scannerDone, "equivocation-scanner", logger)
+		if scannerCleanup != nil {
+			if err := scannerCleanup(shutCtx); err != nil {
+				logger.Warn("auditor: equivocation publisher drain", "error", err.Error())
+			}
+		}
 		logger.Info("auditor: stopped cleanly")
 		return nil
 	}
