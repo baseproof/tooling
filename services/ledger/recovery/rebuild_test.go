@@ -249,10 +249,11 @@ func TestRebuild_DeterministicProjectionFromTiles(t *testing.T) {
 	t.Logf("Rebuild #3 ✓ from OBJECT STORE: tree_size=%d root=%x… matches the POSIX rebuild", stats3.TreeSize, stats3.Root[:8])
 }
 
-// memObjStore is an in-memory tessera.ObjectStore for the object-store rebuild
-// path: the shipper writes tiles + the cursor, the ObjectTileBackend reads them
-// back. GetObject returns bytestore.ErrNotFound on a miss (the shipper's
-// cursor-load contract).
+// memObjStore is an in-memory object store shared by the recovery tests: the rebuild
+// path uses it as a tessera.ObjectStore (shipper writes tiles + cursor, ObjectTileBackend
+// reads them back); the archive-backfill path uses it as a recovery.ObjectStore (the
+// checkpoint/receipt/index writers + the cold resolvers). GetObject returns
+// bytestore.ErrNotFound on a miss (the shipper's cursor-load + the resolvers' contract).
 type memObjStore struct {
 	mu sync.Mutex
 	m  map[string][]byte
@@ -275,6 +276,13 @@ func (o *memObjStore) GetObject(_ context.Context, key string) ([]byte, error) {
 		return nil, bytestore.ErrNotFound
 	}
 	return append([]byte(nil), b...), nil
+}
+
+func (o *memObjStore) HeadObject(_ context.Context, key string) (bool, error) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	_, ok := o.m[key]
+	return ok, nil
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
