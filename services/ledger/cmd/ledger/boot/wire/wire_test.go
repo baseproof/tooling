@@ -48,6 +48,43 @@ func TestCtxCanceledOrDeadline(t *testing.T) {
 	}
 }
 
+func TestArchiveBackfillOnBoot(t *testing.T) {
+	// archiveBackfillOnBoot gates the G1 one-shot cold-archive backfill on
+	// LEDGER_ARCHIVE_BACKFILL_ON_BOOT. It is OFF by default and accepts a small
+	// set of truthy spellings (case-insensitive, whitespace-trimmed). The gate
+	// is fail-safe in the off direction: anything it does not recognise — empty,
+	// "0", "false", garbage — must NOT trigger a backfill at boot, since the live
+	// writer already archives forward and a stray value should never silently
+	// replay all of history.
+	cases := []struct {
+		val  string
+		want bool
+	}{
+		{"", false},
+		{"0", false},
+		{"false", false},
+		{"off", false},
+		{"no", false},
+		{"nonsense", false},
+		{"1", true},
+		{"true", true},
+		{"TRUE", true},
+		{"True", true},
+		{"yes", true},
+		{"on", true},
+		{"  on  ", true},  // trimmed
+		{"\tYES\n", true}, // trimmed + case-folded
+	}
+	for _, tc := range cases {
+		t.Run(tc.val, func(t *testing.T) {
+			t.Setenv("LEDGER_ARCHIVE_BACKFILL_ON_BOOT", tc.val)
+			if got := archiveBackfillOnBoot(); got != tc.want {
+				t.Errorf("archiveBackfillOnBoot() with %q = %v, want %v", tc.val, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestConnCapDefault(t *testing.T) {
 	// composeServers uses 8 × NumCPU when MaxConcurrentConns ≤ 0.
 	// The constant is hard-coded; we re-derive it here so a regression

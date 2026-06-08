@@ -1,5 +1,5 @@
 /*
-FILE PATH: cmd/rebuild-projection/rebuild.go
+FILE PATH: recovery/rebuild.go
 
 Rebuild walks the canonical Static-CT tile store and reconstructs
 the Ledger's Postgres projection tables (entry_index, smt_leaves,
@@ -74,7 +74,7 @@ LIMITS:
 	cost analysis + RTO budget for production-scale rebuild is
 	§C2 in docs/production_readiness.md.
 */
-package main
+package recovery
 
 import (
 	"context"

@@ -1,7 +1,6 @@
 package tessera
 
 import (
-	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -29,8 +28,8 @@ func TestPublishCheckpointFiles_DualWrite(t *testing.T) {
 	publicPath := filepath.Join(dir, "cosigned-checkpoint")
 
 	head := types.CosignedTreeHead{TreeHead: types.TreeHead{TreeSize: 42, SMTRoot: [32]byte{0xAB}}}
-	if err := publishCheckpoint(context.Background(), publicPath, head, nil); err != nil {
-		t.Fatalf("publishCheckpointFiles: %v", err)
+	if err := publishCheckpoint(publicPath, head); err != nil {
+		t.Fatalf("publishCheckpoint: %v", err)
 	}
 
 	latest, err := os.ReadFile(publicPath)
@@ -71,7 +70,7 @@ func TestPublishCheckpointFiles_ArchiveRetainsAllSizes(t *testing.T) {
 	sizes := []uint64{42, 50, 99}
 	for _, n := range sizes {
 		head := types.CosignedTreeHead{TreeHead: types.TreeHead{TreeSize: n, SMTRoot: [32]byte{byte(n)}}}
-		if err := publishCheckpoint(context.Background(), publicPath, head, nil); err != nil {
+		if err := publishCheckpoint(publicPath, head); err != nil {
 			t.Fatalf("publish size %d: %v", n, err)
 		}
 	}
@@ -98,12 +97,13 @@ func TestPublishCheckpointFiles_ArchiveRetainsAllSizes(t *testing.T) {
 	}
 }
 
-// TestPublishCheckpoint_ArchiveFailure_DoesNotFailPublish is the load-bearing
-// resilience invariant (Phase 1): the per-size archive is BEST-EFFORT, so a failed
-// archive write must NOT fail the publish — the load-bearing latest checkpoint (the
-// horizon) is still written and the checkpoint loop is never stalled. Reverting the
-// archive write to load-bearing (propagating its error) makes this test fail.
-func TestPublishCheckpoint_ArchiveFailure_DoesNotFailPublish(t *testing.T) {
+// TestPublishCheckpoint_ArchiveFailure_WithholdsHorizon is the load-bearing
+// fail-closed invariant (Phase 1, symmetric with store/horizon_s3.go): the per-size
+// archive is written BEFORE the horizon, so a failed archive write FAILS the publish
+// AND the horizon never advances — a cold/PG-off reader must never see a horizon whose
+// covering per-size checkpoint archive is missing. Reverting the archive write to
+// best-effort (swallowing its error and writing the horizon anyway) makes this fail.
+func TestPublishCheckpoint_ArchiveFailure_WithholdsHorizon(t *testing.T) {
 	dir := t.TempDir()
 	publicPath := filepath.Join(dir, "cosigned-checkpoint")
 
@@ -114,20 +114,13 @@ func TestPublishCheckpoint_ArchiveFailure_DoesNotFailPublish(t *testing.T) {
 	}
 
 	head := types.CosignedTreeHead{TreeHead: types.TreeHead{TreeSize: 7, SMTRoot: [32]byte{0x7}}}
-	if err := publishCheckpoint(context.Background(), publicPath, head, nil); err != nil {
-		t.Fatalf("publish must SUCCEED despite a failed archive write (best-effort), got: %v", err)
+	if err := publishCheckpoint(publicPath, head); err == nil {
+		t.Fatal("publish must FAIL when the per-size archive write fails (fail-closed) — the horizon must not advance past a non-durable archive")
 	}
 
-	// The load-bearing latest checkpoint (the horizon) was still written.
-	body, err := os.ReadFile(publicPath)
-	if err != nil {
-		t.Fatalf("latest checkpoint (horizon) missing after archive failure: %v", err)
-	}
-	var w types.WireCosignedTreeHead
-	if err := json.Unmarshal(body, &w); err != nil {
-		t.Fatalf("decode latest: %v", err)
-	}
-	if h, _ := w.ToCosignedTreeHead(); h.TreeSize != 7 {
-		t.Errorf("horizon TreeSize = %d, want 7", h.TreeSize)
+	// Fail-closed: the horizon (latest checkpoint) was NOT written — the archive is
+	// durable-before-horizon, so an archive fault aborts before the horizon advances.
+	if _, err := os.Stat(publicPath); !os.IsNotExist(err) {
+		t.Fatalf("horizon must NOT exist after a failed archive (fail-closed); stat err = %v", err)
 	}
 }

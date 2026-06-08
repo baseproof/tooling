@@ -766,16 +766,20 @@ func (bl *BuilderLoop) processBatch(ctx context.Context) (int, error) {
 	// back the durable Postgres + Tessera + tree-head-sigs state.
 	// ───────────────────────────────────────────────────────────────
 
-	// ── SMT tiles + horizon: owned by the TileReconciler, NOT here ────
+	// ── SMT tiles + horizon: owned by the CheckpointLoop, NOT here ────
 	// Tile emission and cosigned-checkpoint publication are done by the async
-	// TileReconciler (builder/tile_reconciler.go): it advances the durable
-	// tile_frontier ONLY after a PUT-ack and publishes the horizon gated on it,
-	// so a published root never advertises an SMTRoot whose tiles are missing.
-	// Keeping that off the commit hot path is what makes admission melt-proof
-	// under a blob-store outage (the commit cursor keeps advancing; the frontier
-	// holds). The builder's only contract with the tile world: PG holds every
-	// node for the committed root (PutBatchTx above), so the reconciler can
-	// (re)derive tiles for it. See store/{tile_emitter,horizon_publisher,tile_frontier}.go.
+	// builder.CheckpointLoop (builder/checkpoint_loop.go): it makes every SMT tile
+	// reachable from the committed root durable (EmitDurable), advances the durable
+	// tile_frontier ONLY after that PUT-ack, and publishes the horizon gated on the
+	// frontier — so a published root never advertises an SMTRoot whose tiles are
+	// missing. Keeping that off the commit hot path is what makes admission melt-proof
+	// under a blob-store outage (the commit cursor keeps advancing; the frontier holds).
+	// The builder's only contract with the tile world: the atomic tx above persists
+	// smt_leaves + root + cursor — NOT the node DAG (see the de-pollution note) — and
+	// root = f(smt_leaves), so the CheckpointLoop can (re)derive every tile from
+	// smt_leaves. The dirty nodes handed to the in-memory tail (bl.nodeStore.PutBatch
+	// below) are a read-cache optimization, lost on crash and re-derived on boot
+	// (RecoverTail). See store/{tile_emitter,tile_frontier}.go + builder/checkpoint_loop.go.
 
 	// ── Step 10: Publish derivation commitment ───────────────────────
 	if bl.commitPub != nil && len(positions) > 0 {
@@ -798,13 +802,14 @@ func (bl *BuilderLoop) processBatch(ctx context.Context) (int, error) {
 	// total = sum of the above; gives the per-batch latency floor. (Cosign is no
 	// longer on this path — it lags in the CheckpointLoop.)
 	//
-	// leaves_written / nodes_written verify the N+1 fix landed:
-	// every batch must show ONE log line covering leaves_written N
-	// AND nodes_written M, NOT N+M separate PG round-trips. Pair
-	// this with `commit` duration to compute the effective
-	// throughput of SetBatchTx / PutBatchTx; a regression to
-	// per-row SetTx / PutTx would show up immediately as commit
-	// climbing back into the seconds.
+	// leaves_written / nodes_written verify the N+1 fix landed: every batch
+	// must show ONE log line covering leaves_written N AND nodes_written M,
+	// NOT N+M separate round-trips. Pair leaves_written with `commit` duration
+	// to compute the effective LEAF-write throughput of SetBatchTx (the batched
+	// PG tx); a regression to per-row SetTx would show up immediately as commit
+	// climbing back into the seconds. nodes_written M is the in-memory tail
+	// handoff (bl.nodeStore.PutBatch) — NOT a PG write (de-pollution), so it
+	// never loads the commit tx.
 	//
 	// process_per_leaf / nodes_per_leaf / cum_seq answer the SCALING
 	// question: at 10M leaves, does the SDK's jellyfishInsert path

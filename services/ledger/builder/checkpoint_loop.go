@@ -273,11 +273,12 @@ func (l *CheckpointLoop) SetEntryTraceReader(r EntryTraceReader) {
 	l.entryTrace = r
 }
 
-// SetReceiptArchiver injects the best-effort archiver that durably retains each
-// published checkpoint's dense receipt-commitment set (1.2a), the source receipt
-// proofs reconstruct from PG-free. Set before Run; not safe to change concurrently
-// with a running loop. nil disables receipt archiving (the default) — receipts then
-// read from PG only.
+// SetReceiptArchiver injects the fail-closed archiver that durably retains each
+// published checkpoint's dense receipt-commitment set (1.2a) BEFORE the horizon
+// advances — the source receipt proofs reconstruct from PG-free. A write error
+// WITHHOLDS the horizon (Step 9a), since a PG-off read front has no PG fallback. Set
+// before Run; not safe to change concurrently with a running loop. nil disables
+// receipt archiving (the default) — receipts then read from PG only.
 func (l *CheckpointLoop) SetReceiptArchiver(a ReceiptCommitArchiver) {
 	l.receiptArchiver = a
 }

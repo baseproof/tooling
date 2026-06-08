@@ -1,17 +1,19 @@
 /*
 FILE PATH: store/receipt_archive_writer.go
 
-ReceiptArchiveWriter — best-effort writer of the per-checkpoint dense
-receipt-commitment archive (1.2a step 3), the source ArchiveReceiptRanger
-reconstructs PG-free receipt proofs from.
+ReceiptArchiveWriter — writer of the per-checkpoint dense receipt-commitment
+archive (1.2a step 3), the source ArchiveReceiptRanger reconstructs PG-free
+receipt proofs from.
 
 WHY: at publish the CheckpointLoop has just computed the checkpoint's ReceiptRoot
 over the delta [fromSeq, toSeq] (entry_index, PG). This writer re-gathers the SAME
 dense commitment set — via the SAME EntryIndexReceiptRanger.commitsInRange the
 cosigned ReceiptRoot was computed from — and writes it to receipts/<coveringSize>,
-so the archive is byte-consistent with the cosigned root BY CONSTRUCTION. Best-
-effort: builder.CheckpointLoop calls it after a successful publish and never stalls
-a checkpoint on a write error; the backfill job (1.x) regenerates any gaps. Object-
+so the archive is byte-consistent with the cosigned root BY CONSTRUCTION. Fail-
+closed: builder.CheckpointLoop calls it BEFORE publishing the horizon (Step 9a) and
+WITHHOLDS the horizon on a write error, since a PG-off reader has no PG fallback to
+degrade to. The archive backfill (G1) regenerates archives for history that PREDATES
+this writer (not forward gaps — a forward failure withholds the horizon). Object-
 store path only (PutObject); the per-log namespace is applied by the *bytestore.S3
 adapter, exactly as the checkpoint archive (1.1a).
 */
@@ -52,8 +54,9 @@ func NewReceiptArchiveWriter(ranger *EntryIndexReceiptRanger, obj objectPutGette
 }
 
 // ArchiveReceiptCommits gathers [fromSeq, toSeq] and writes the encoded commitment
-// set to receipts/<coveringSize>. The returned error is for the caller to LOG; the
-// checkpoint loop treats archiving as best-effort and never stalls publish on it.
+// set to receipts/<coveringSize>. The returned error is LOAD-BEARING: the checkpoint
+// loop treats it as fail-closed and WITHHOLDS the horizon on it (Step 9a), so the
+// archive is durable before the horizon advertises this size.
 func (w *ReceiptArchiveWriter) ArchiveReceiptCommits(ctx context.Context, coveringSize, fromSeq, toSeq uint64) error {
 	if w == nil || w.ranger == nil || w.obj == nil {
 		return nil

@@ -93,6 +93,7 @@ import (
 	"github.com/baseproof/tooling/services/ledger/internal/clienttls"
 	"github.com/baseproof/tooling/services/ledger/lifecycle"
 	"github.com/baseproof/tooling/services/ledger/observability"
+	"github.com/baseproof/tooling/services/ledger/recovery"
 	"github.com/baseproof/tooling/services/ledger/reservation"
 	"github.com/baseproof/tooling/services/ledger/sequencer"
 	"github.com/baseproof/tooling/services/ledger/shipper"
@@ -318,7 +319,7 @@ func Wire(ctx context.Context, cfg Config, d *deps.AppDeps) error {
 	// The CheckpointLoop is the single authoritative position of the log: it
 	// tiles the latest committed root durable, then cosigns + publishes THAT root
 	// as the horizon, lagging the commit cursor (builder/checkpoint_loop.go). It
-	// replaces both the legacy TileReconciler→HorizonPublisher seam AND the
+	// replaces both the legacy reconciler→publisher seam AND the
 	// builder's pre-commit cosign. Enabled when SMT tile emission is configured
 	// (the substrate the horizon is served from) — the same boundary the legacy
 	// reconciler used.
@@ -370,16 +371,48 @@ func Wire(ctx context.Context, cfg Config, d *deps.AppDeps) error {
 		if d.WALCommitter != nil {
 			checkpointLoop.SetEntryTraceReader(walEntryTrace{wal: d.WALCommitter})
 		}
-		// 1.2a: best-effort archive each published checkpoint's dense receipt-commitment
-		// set to the shared object store (PutObject — the S3/SeaweedFS standard
-		// interface) so receipt proofs reconstruct PG-free. Re-gathers the SAME set the
-		// cosigned ReceiptRoot was computed from; an object-store write error never
-		// stalls a checkpoint. Object-store deployments only (POSIX single-node co-locates PG).
+		// 1.2a: archive each published checkpoint's dense receipt-commitment set to the
+		// shared object store (PutObject — the S3/SeaweedFS standard interface) so receipt
+		// proofs reconstruct PG-free. Re-gathers the SAME set the cosigned ReceiptRoot was
+		// computed from. Fail-closed: the loop writes it BEFORE the horizon and an
+		// object-store write error WITHHOLDS the horizon (Step 9a), since a PG-off reader
+		// has no PG fallback. Object-store deployments only (POSIX single-node co-locates PG).
 		if s3, ok := d.ByteStore.(*bytestore.S3); ok {
 			checkpointLoop.SetReceiptArchiver(store.NewReceiptArchiveWriter(
 				store.NewEntryIndexReceiptRanger(d.PgPool.DB, cfg.LogDID), s3))
 		}
 		d.Logger.Info("checkpoint loop enabled", "tile_dir", tileDir, "quorum_k", cfg.WitnessQuorumK)
+	}
+
+	// Operator one-shot (G1): when LEDGER_ARCHIVE_BACKFILL_ON_BOOT is set, regenerate the
+	// cold-read archives (checkpoints/<n> + the size index, receipts/<n>, the rotation
+	// index) for ALL published history from the Postgres cosigned ladder, BEFORE serving.
+	// This gives history that PREDATES the forward archivers a cold form in the object
+	// store — the precondition for bounding Postgres, since a bounded PG must reconstruct
+	// below its window from the object store alone. Idempotent + best-effort per item; a
+	// ladder (Postgres) fault fails boot loudly so the operator's explicit request is never
+	// silently skipped. Object-store deployments only: a POSIX single-node co-locates PG
+	// and serves no cold reads, so there is nothing to backfill.
+	if archiveBackfillOnBoot() {
+		s3, ok := d.ByteStore.(*bytestore.S3)
+		if !ok {
+			d.Logger.Warn("LEDGER_ARCHIVE_BACKFILL_ON_BOOT set but byte store is not an object store — skipping (cold archives are object-store only)")
+		} else {
+			d.Logger.Info("archive backfill on boot: regenerating cold archives from the cosigned ladder")
+			rep, abErr := recovery.ArchiveBackfill(ctx, recovery.ArchiveBackfillDeps{
+				Pool:        d.PgPool.DB,
+				ObjectStore: s3,
+				LogDID:      cfg.LogDID,
+				MinSigs:     cfg.WitnessQuorumK,
+				Logger:      d.Logger,
+			})
+			if abErr != nil {
+				return fmt.Errorf("wire: archive backfill on boot: %w", abErr)
+			}
+			d.Logger.Info("archive backfill on boot complete",
+				"checkpoints", rep.Checkpoints, "checkpoint_errs", rep.CheckpointErrs,
+				"receipt_errs", rep.ReceiptErrs, "rotation_err", rep.RotationErr)
+		}
 	}
 
 	reg, err := schemareg.BuildLedgerSchemaRegistry()
@@ -413,6 +446,18 @@ func Wire(ctx context.Context, cfg Config, d *deps.AppDeps) error {
 	startGoroutines(ctx, d, bl, checkpointLoop, seq, ship, detector, smtDetector)
 
 	return nil
+}
+
+// archiveBackfillOnBoot reports whether the operator requested a one-shot cold-archive
+// backfill at boot (LEDGER_ARCHIVE_BACKFILL_ON_BOOT). Off by default — the live writer
+// archives forward, so this is only for history that predates the archivers and is run
+// once (the operator clears the flag after).
+func archiveBackfillOnBoot() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("LEDGER_ARCHIVE_BACKFILL_ON_BOOT"))) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
 }
 
 // buildPeerHTTPClient always returns a non-nil *http.Client. When

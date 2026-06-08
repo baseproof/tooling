@@ -151,9 +151,11 @@ func TestSMTRootStateStore_RoundTrip(t *testing.T) {
 //
 // This is the mathematical foundation the builder's overlay-commit
 // path relies on: the builder computes newRoot via ComputeDirtyRoot
-// inside the batch (no commit), then atomically writes the overlay's
-// leaf + node mutations via PutTx — the SDK's order-invariance
-// guarantees the persisted graph reproduces the computed root.
+// inside the batch (no commit), then atomically persists the overlay's
+// LEAVES + root + cursor (SetBatchTx). The node DAG is NOT persisted —
+// it is re-derived from smt_leaves on read/recovery (builder/loop.go
+// de-pollution) — and the SDK's order-invariance guarantees that graph,
+// re-derived from the persisted leaves, reproduces the computed root.
 //
 // If this regresses, every batch's persisted root would diverge from
 // the value /v1/smt/root reports and consumers would see proof
