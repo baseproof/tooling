@@ -15,6 +15,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/baseproof/baseproof/crypto/signatures"
+	sdkdid "github.com/baseproof/baseproof/did"
 	"github.com/baseproof/baseproof/network"
 	"github.com/baseproof/baseproof/witness"
 
@@ -34,9 +36,79 @@ func devNull(t *testing.T) *os.File {
 	return f
 }
 
+// testSecp256k1DIDKey mints a fresh secp256k1 did:key (did:key:zQ3s…) — the shape
+// gen-fixtures decodes for a -genesis-auditor-did.
+func testSecp256k1DIDKey(t *testing.T) string {
+	t.Helper()
+	priv, err := signatures.GenerateKey()
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+	compressed, err := signatures.CompressSecp256k1Pubkey(signatures.PubKeyBytes(&priv.PublicKey))
+	if err != nil {
+		t.Fatalf("compress: %v", err)
+	}
+	return sdkdid.EncodeDIDKey(sdkdid.MulticodecSecp256k1, compressed)
+}
+
+// A -genesis-auditor-did is decoded into a valid genesis_auditors entry (DID,
+// public key from the did:key, ECDSA, non-zero scope, findings URL), and the
+// resulting bootstrap canonicalizes (mints a NetworkID) cleanly.
+func TestRun_GenesisAuditors_Emitted(t *testing.T) {
+	dir := t.TempDir()
+	auditorDID := testSecp256k1DIDKey(t)
+	const url = "https://auditor.example/v1/findings"
+	if err := run(dir, "", defaultLogDID, defaultNetworkName, 1, "ecdsa", auditorDID, url, devNull(t)); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	body, err := os.ReadFile(filepath.Join(dir, "network-bootstrap.json"))
+	if err != nil {
+		t.Fatalf("read bootstrap: %v", err)
+	}
+	var doc network.BootstrapDocument
+	if err := json.Unmarshal(body, &doc); err != nil {
+		t.Fatalf("parse bootstrap: %v", err)
+	}
+	if len(doc.GenesisAuditors) != 1 {
+		t.Fatalf("genesis_auditors = %d, want 1", len(doc.GenesisAuditors))
+	}
+	ga := doc.GenesisAuditors[0]
+	if ga.AuditorDID != auditorDID {
+		t.Errorf("auditor_did = %q, want %q", ga.AuditorDID, auditorDID)
+	}
+	if ga.FindingsURL != url {
+		t.Errorf("findings_url = %q, want %q", ga.FindingsURL, url)
+	}
+	if ga.SchemeTag != 0x01 {
+		t.Errorf("scheme_tag = %d, want 1 (ECDSA)", ga.SchemeTag)
+	}
+	if ga.Scope == 0 {
+		t.Error("scope must be non-zero (recognized for at least one finding kind)")
+	}
+	if _, err := doc.IDs(); err != nil {
+		t.Fatalf("bootstrap with genesis auditor must canonicalize: %v", err)
+	}
+}
+
+// -genesis-auditor-did without a findings URL is a hard config error (the SDK
+// requires a non-empty URL on every auditor registration).
+func TestRun_GenesisAuditors_RequireFindingsURL(t *testing.T) {
+	if err := run(t.TempDir(), "", defaultLogDID, defaultNetworkName, 1, "ecdsa", testSecp256k1DIDKey(t), "", devNull(t)); err == nil {
+		t.Fatal("expected error: -genesis-auditor-did set without -genesis-auditor-findings-url")
+	}
+}
+
+// A non-secp256k1 did:key cannot be an ECDSA genesis auditor — rejected.
+func TestRun_GenesisAuditors_RejectsNonSecp256k1(t *testing.T) {
+	if err := run(t.TempDir(), "", defaultLogDID, defaultNetworkName, 1, "ecdsa",
+		"did:key:z6MkpTHR8VNsBxYAAWHut2Geadd9jSwuBV8xRoAnwWsdvktH", "https://x.example/f", devNull(t)); err == nil {
+		t.Fatal("expected error for a non-secp256k1 (ed25519) genesis auditor did:key")
+	}
+}
+
 func TestRun_SingleWitness_HappyPath(t *testing.T) {
 	dir := t.TempDir()
-	err := run(dir, "", defaultLogDID, defaultNetworkName, 1, "ecdsa", devNull(t))
+	err := run(dir, "", defaultLogDID, defaultNetworkName, 1, "ecdsa", "", "", devNull(t))
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
@@ -72,7 +144,7 @@ func TestRun_SingleWitness_HappyPath(t *testing.T) {
 func TestRun_MultiWitness(t *testing.T) {
 	dir := t.TempDir()
 	const n = 3
-	if err := run(dir, "", defaultLogDID, defaultNetworkName, n, "ecdsa", devNull(t)); err != nil {
+	if err := run(dir, "", defaultLogDID, defaultNetworkName, n, "ecdsa", "", "", devNull(t)); err != nil {
 		t.Fatalf("run: %v", err)
 	}
 	for i := 1; i <= n; i++ {
@@ -106,7 +178,7 @@ func TestRun_MultiWitness(t *testing.T) {
 
 func TestRun_Idempotent_PreservesKeys(t *testing.T) {
 	dir := t.TempDir()
-	if err := run(dir, "", defaultLogDID, defaultNetworkName, 2, "ecdsa", devNull(t)); err != nil {
+	if err := run(dir, "", defaultLogDID, defaultNetworkName, 2, "ecdsa", "", "", devNull(t)); err != nil {
 		t.Fatalf("first run: %v", err)
 	}
 	keyPath := filepath.Join(dir, "witnesses", "witness-1.pem")
@@ -115,7 +187,7 @@ func TestRun_Idempotent_PreservesKeys(t *testing.T) {
 		t.Fatalf("read key after first run: %v", err)
 	}
 	// Second run with same args — keys must not be regenerated.
-	if err := run(dir, "", defaultLogDID, defaultNetworkName, 2, "ecdsa", devNull(t)); err != nil {
+	if err := run(dir, "", defaultLogDID, defaultNetworkName, 2, "ecdsa", "", "", devNull(t)); err != nil {
 		t.Fatalf("second run: %v", err)
 	}
 	second, err := os.ReadFile(keyPath)
@@ -128,19 +200,19 @@ func TestRun_Idempotent_PreservesKeys(t *testing.T) {
 }
 
 func TestRun_RejectsZeroWitnesses(t *testing.T) {
-	if err := run(t.TempDir(), "", defaultLogDID, defaultNetworkName, 0, "ecdsa", devNull(t)); err == nil {
+	if err := run(t.TempDir(), "", defaultLogDID, defaultNetworkName, 0, "ecdsa", "", "", devNull(t)); err == nil {
 		t.Fatal("expected error for -witnesses=0")
 	}
 }
 
 func TestRun_RejectsEmptyLogDID(t *testing.T) {
-	if err := run(t.TempDir(), "", "", defaultNetworkName, 1, "ecdsa", devNull(t)); err == nil {
+	if err := run(t.TempDir(), "", "", defaultNetworkName, 1, "ecdsa", "", "", devNull(t)); err == nil {
 		t.Fatal("expected error for empty -log-did")
 	}
 }
 
 func TestRun_RejectsEmptyNetworkName(t *testing.T) {
-	if err := run(t.TempDir(), "", defaultLogDID, "", 1, "ecdsa", devNull(t)); err == nil {
+	if err := run(t.TempDir(), "", defaultLogDID, "", 1, "ecdsa", "", "", devNull(t)); err == nil {
 		t.Fatal("expected error for empty -network-name")
 	}
 }
@@ -148,7 +220,7 @@ func TestRun_RejectsEmptyNetworkName(t *testing.T) {
 func TestRun_CustomBootstrapPath(t *testing.T) {
 	dir := t.TempDir()
 	custom := filepath.Join(dir, "sub", "custom-bootstrap.json")
-	if err := run(dir, custom, defaultLogDID, defaultNetworkName, 1, "ecdsa", devNull(t)); err != nil {
+	if err := run(dir, custom, defaultLogDID, defaultNetworkName, 1, "ecdsa", "", "", devNull(t)); err != nil {
 		t.Fatalf("run: %v", err)
 	}
 	if _, err := os.Stat(custom); err != nil {
@@ -163,7 +235,7 @@ func TestRun_CustomBootstrapPath(t *testing.T) {
 // "x coordinate not on the secp256k1 curve".
 func TestRun_GeneratedKeysAreSecp256k1AndLedgerResolvable(t *testing.T) {
 	dir := t.TempDir()
-	if err := run(dir, "", defaultLogDID, defaultNetworkName, 2, "ecdsa", devNull(t)); err != nil {
+	if err := run(dir, "", defaultLogDID, defaultNetworkName, 2, "ecdsa", "", "", devNull(t)); err != nil {
 		t.Fatalf("run: %v", err)
 	}
 
@@ -204,7 +276,7 @@ func TestRun_GeneratedKeysAreSecp256k1AndLedgerResolvable(t *testing.T) {
 // witness key loads as a blskey (the witnesses join the verifying set on-log).
 func TestRun_BLSScheme(t *testing.T) {
 	dir := t.TempDir()
-	if err := run(dir, "", defaultLogDID, defaultNetworkName, 2, "bls", devNull(t)); err != nil {
+	if err := run(dir, "", defaultLogDID, defaultNetworkName, 2, "bls", "", "", devNull(t)); err != nil {
 		t.Fatalf("run(bls): %v", err)
 	}
 
@@ -237,7 +309,7 @@ func TestRun_BLSScheme(t *testing.T) {
 }
 
 func TestRun_RejectsUnknownScheme(t *testing.T) {
-	if err := run(t.TempDir(), "", defaultLogDID, defaultNetworkName, 1, "rsa", devNull(t)); err == nil {
+	if err := run(t.TempDir(), "", defaultLogDID, defaultNetworkName, 1, "rsa", "", "", devNull(t)); err == nil {
 		t.Fatal("unknown -scheme must be rejected")
 	}
 }
