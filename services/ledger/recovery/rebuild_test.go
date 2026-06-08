@@ -1,5 +1,5 @@
 /*
-FILE PATH: cmd/rebuild-projection/rebuild_test.go
+FILE PATH: recovery/rebuild_test.go
 
 Integration test for §C2 (PG-as-projection rebuild). Skips when
 BASEPROOF_TEST_DSN is unset; otherwise:
@@ -29,7 +29,7 @@ sequencer, no builder goroutine. Those layers are validated by the
 soak (tests/soak_test.go) and by the unit tests in builder/. The
 ONLY axis this test pins is "Rebuild is correct against tile state."
 */
-package main
+package recovery
 
 import (
 	"bytes"

@@ -1,7 +1,7 @@
 /*
 FILE PATH: cmd/rebuild-projection/main.go
 
-CLI wrapper around Rebuild() (rebuild.go). Operators invoke this in
+CLI wrapper around recovery.Rebuild() (services/ledger/recovery). Operators invoke this in
 two disaster-recovery scenarios:
 
  1. Postgres volume corrupted/wiped. The tile store is intact
@@ -17,7 +17,7 @@ two disaster-recovery scenarios:
 In both cases the integrity proof is: re-running the live
 admission/builder against the same inputs would produce the same
 projection rows, byte-for-byte. The integration test
-(rebuild_test.go) pins this invariant.
+(recovery/rebuild_test.go) pins this invariant.
 
 OPERATIONAL NOTES:
 
@@ -49,6 +49,7 @@ import (
 	"github.com/baseproof/baseproof/types"
 
 	"github.com/baseproof/tooling/services/ledger/bytestore"
+	"github.com/baseproof/tooling/services/ledger/recovery"
 	"github.com/baseproof/tooling/services/ledger/store"
 	optessera "github.com/baseproof/tooling/services/ledger/tessera"
 )
@@ -145,7 +146,7 @@ func main() {
 	logger.Info("rebuild-projection: head resolved", "tree_size", head.TreeSize, "tiles_from_bytestore", *tilesFromBS)
 
 	start := time.Now()
-	stats, err := Rebuild(ctx, RebuildDeps{
+	stats, err := recovery.Rebuild(ctx, recovery.RebuildDeps{
 		TileBackend: tileBackend,
 		Head:        head,
 		Bytestore:   bs,
