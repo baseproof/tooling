@@ -114,11 +114,18 @@ import (
 //	the bytestore at the same coordinates the live shipper
 //	writes them to.
 type RebuildDeps struct {
-	// TileDir is the filesystem path to the Tessera POSIX tile
-	// store (the directory that holds checkpoint, tile/entries/...,
-	// and tile/{L}/...). Same directory the writer's POSIX driver
-	// was configured with.
-	TileDir string
+	// TileBackend is the source of tile bytes (tile/entries/{N} + tile/{L}/...).
+	// A *POSIXTileBackend reads a local Tessera dir; a *ObjectTileBackend reads
+	// the shared object store the writer ships tiles to — the latter is the
+	// rebuild-from-object-store / DR path, needing no filesystem shared with the
+	// writer. Any optessera.TileBackend satisfies it.
+	TileBackend optessera.TileBackend
+
+	// Head is the published commitment for the log being rebuilt; its TreeSize is
+	// the upper bound for the seq walk. The caller sources it from the tessera
+	// signed checkpoint (POSIX dir) or the cosigned horizon (object store) — both
+	// report the same (TreeSize, RootHash) for a given log size.
+	Head types.TreeHead
 
 	// Bytestore is the canonical-byte store. The shipper writes
 	// `entries/<seq16>/<hash64>` blobs here as it advances; the
@@ -171,25 +178,18 @@ func Rebuild(ctx context.Context, deps RebuildDeps) (Stats, error) {
 		return Stats{}, fmt.Errorf("rebuild: Bytestore is required (tile/entries holds 32-byte hashes only; canonical envelope bytes live in the bytestore)")
 	}
 
-	// ── Step 1: Open the tile store + read the published checkpoint
+	// ── Step 1: Wire the tile reader + take the published head
 	//
-	// The checkpoint is the network's commitment to the size+root
-	// of the tree we're rebuilding. Its TreeSize is the upper bound
-	// for our seq walk; any leaf at seq >= TreeSize is not part of
+	// The head (sourced by the caller from the tessera signed checkpoint for a
+	// POSIX dir, or the cosigned horizon for the object store) is the network's
+	// commitment to the size+root of the tree we're rebuilding. Its TreeSize is
+	// the upper bound for our seq walk; any leaf at seq >= TreeSize is not part of
 	// the published log.
-	backend, err := optessera.NewPOSIXTileBackend(deps.TileDir)
-	if err != nil {
-		return Stats{}, fmt.Errorf("rebuild: open tile backend: %w", err)
+	if deps.TileBackend == nil {
+		return Stats{}, fmt.Errorf("rebuild: TileBackend is required")
 	}
-	tileReader := optessera.NewTileReader(backend, 1024)
-	cpBytes, err := backend.ReadCheckpoint(ctx)
-	if err != nil {
-		return Stats{}, fmt.Errorf("rebuild: read checkpoint: %w", err)
-	}
-	head, err := optessera.ParseCheckpoint(cpBytes)
-	if err != nil {
-		return Stats{}, fmt.Errorf("rebuild: parse checkpoint: %w", err)
-	}
+	tileReader := optessera.NewTileReader(deps.TileBackend, 1024)
+	head := deps.Head
 	treeSize := head.TreeSize
 	if treeSize == 0 {
 		deps.Logger.Info("rebuild: checkpoint reports empty log; nothing to rebuild")

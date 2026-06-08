@@ -65,7 +65,9 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build \
       -trimpath -buildvcs=false -o /audit ./cmd/audit && \
     CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build \
-      -trimpath -buildvcs=false -o /admission-authority ./cmd/admission-authority
+      -trimpath -buildvcs=false -o /admission-authority ./cmd/admission-authority && \
+    CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build \
+      -trimpath -buildvcs=false -o /rebuild-projection ./cmd/rebuild-projection
 
 # ── Runtime ────────────────────────────────────────────────────
 # Pinned base (not :latest) for reproducible, auditable rebuilds.
@@ -96,6 +98,10 @@ COPY --from=builder /audit /audit
 # admission-authority is the G-authorized publisher of the on-log admission
 # keyset (schema + admission_authority_v1 snapshot). `--entrypoint /admission-authority`.
 COPY --from=builder /admission-authority /admission-authority
+# rebuild-projection reconstructs the Postgres projection from tiles + bytestore
+# (POSIX dir, or --tiles-from-bytestore for the object-store / DR path).
+# `--entrypoint /rebuild-projection`.
+COPY --from=builder /rebuild-projection /rebuild-projection
 
 EXPOSE 8080
 
