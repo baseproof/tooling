@@ -266,7 +266,11 @@ func Rebuild(ctx context.Context, deps RebuildDeps) (Stats, error) {
 			return Stats{}, fmt.Errorf("rebuild: ProcessBatch [%d, %d): %w", batchStart, batchEnd, err)
 		}
 
-		dirtyNodes := overlayNodes.Mutations()
+		// ReachableMutations (not Mutations) drops the intermediate node versions
+		// SetLeaves buffers and supersedes mid-batch — unreachable from result.NewRoot,
+		// never tiled — so the rebuild's in-memory node store stays bounded to the live
+		// delta instead of accumulating O(inserts × depth) orphans (mirrors builder/loop.go).
+		dirtyNodes := overlayNodes.ReachableMutations(result.NewRoot)
 
 		// Atomic commit: entry_index + smt_leaves + cursor advance. Same atomicity
 		// shape as builder/loop.go. Nodes are NOT in this transaction — they are an

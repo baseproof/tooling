@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"crypto/sha256"
 	"testing"
 
 	"github.com/baseproof/baseproof/core/smt"
@@ -142,4 +143,165 @@ func TestEmitThenPrune_BoundsTailKeepsServable(t *testing.T) {
 			t.Fatalf("proof key#%d unservable from durable tiles after prune: %v", i, perr)
 		}
 	}
+}
+
+// TestProof_ResidualIsOrphanGarbage_EmitterComplete is the SAFETY PROOF that the tail
+// residual left by the durable-set prune is 100% orphaned intra-batch garbage — NOT a
+// live node the tile emitter silently dropped. It is the precondition for any fix that
+// DISCARDS the residual: if even one live node were stuck in the tail, discarding it
+// would be data loss. Two independent assertions, from a full graph traversal:
+//
+//	(a) residual ∩ live = ∅  — no node reachable from the final committed root is stuck
+//	    in the tail (the emitter did not drop a live node into a permanent tail trap);
+//	(b) emitter COMPLETE — the entire live tree reconstructs from the TILE STORE ALONE
+//	    (a fresh TiledNodeStore, no tail), and that tiles-only node set EQUALS the live
+//	    set. If the emitter had dropped a live node, this reconstruction would fault
+//	    ("missing node") or come up short.
+func TestProof_ResidualIsOrphanGarbage_EmitterComplete(t *testing.T) {
+	ctx := context.Background()
+	tiles := NewMemSMTTileStore()
+	tailed := NewTailedNodeStore(smt.NewTiledNodeStore(ctx, tiles, smt.NewTileCache(1<<16)))
+	tree := smt.NewTree(smt.NewInMemoryLeafStore(), tailed)
+	emitter := NewBuildTilesEmitter(tailed, tiles)
+	root := smt.EmptyHash
+
+	const batches, perBatch = 30, 64
+	total := 0
+	for b := 0; b < batches; b++ {
+		batch := make([]types.SMTLeaf, 0, perBatch)
+		for i := 0; i < perBatch; i++ {
+			k := sha256.Sum256([]byte{byte(total), byte(total >> 8), byte(total >> 16)})
+			batch = append(batch, types.SMTLeaf{Key: k, OriginTip: types.LogPosition{LogDID: "did:test", Sequence: uint64(total + 1)}})
+			total++
+		}
+		if err := tree.SetLeaves(ctx, batch); err != nil {
+			t.Fatalf("SetLeaves: %v", err)
+		}
+		var err error
+		if root, err = tree.Root(ctx); err != nil {
+			t.Fatalf("Root: %v", err)
+		}
+		durable, err := emitter.EmitDurable(ctx, smt.EmptyHash, root, uint64(total))
+		if err != nil {
+			t.Fatalf("EmitDurable: %v", err)
+		}
+		tailed.PruneTiled(ctx, func(_ context.Context, h [32]byte) (bool, error) { _, ok := durable[h]; return ok, nil })
+	}
+
+	// The exact LIVE set: a full graph traversal from the final committed root over the
+	// combined substrate (tail + tiles), so every reachable node is collected.
+	liveTiles, err := smt.BuildTiles(tailed, root, smt.TileHeight)
+	if err != nil {
+		t.Fatalf("BuildTiles(live): %v", err)
+	}
+	live := map[[32]byte]struct{}{}
+	for _, tile := range liveTiles {
+		for i := range tile.Nodes {
+			live[smt.HashNode(tile.Nodes[i])] = struct{}{}
+		}
+	}
+
+	// (a) NO live node is stuck in the residual tail.
+	stuck := 0
+	for h := range tailed.Tail() {
+		if _, ok := live[h]; ok {
+			stuck++
+		}
+	}
+	if stuck != 0 {
+		t.Fatalf("DATA-LOSS RISK: %d LIVE nodes are stuck in the tail — emitter dropped them; residual is NOT all garbage", stuck)
+	}
+
+	// (b) emitter COMPLETE: reconstruct the live tree from TILES ALONE. A dropped live
+	// node faults here; a short node set means the emitter under-emitted.
+	tilesOnly := smt.NewTiledNodeStore(ctx, tiles, smt.NewTileCache(1<<16))
+	rebuilt, err := smt.BuildTiles(tilesOnly, root, smt.TileHeight)
+	if err != nil {
+		t.Fatalf("EMITTER INCOMPLETE: live tree not reconstructable from tiles alone: %v", err)
+	}
+	got := map[[32]byte]struct{}{}
+	for _, tile := range rebuilt {
+		for i := range tile.Nodes {
+			got[smt.HashNode(tile.Nodes[i])] = struct{}{}
+		}
+	}
+	if len(got) != len(live) {
+		t.Fatalf("EMITTER MISMATCH: tiles-only reconstruct = %d nodes, live = %d", len(got), len(live))
+	}
+	for h := range live {
+		if _, ok := got[h]; !ok {
+			t.Fatalf("EMITTER DROPPED live node %x (absent from tiles-only reconstruct)", h[:6])
+		}
+	}
+
+	t.Logf("PROOF: entries=%d  residual=%d  live=%d  stuck(live∩residual)=0  tiles-only-reconstruct=%d",
+		total, tailed.TailLen(), len(live), len(got))
+	t.Logf("⇒ residual is 100%% orphaned intra-batch garbage; the emitter dropped ZERO live nodes (whole tree durable from tiles alone).")
+}
+
+// TestTailBound_ReachableMutationsEndToEnd is the end-to-end guard for the complete
+// fix: it drives the builder's EXACT commit→checkpoint loop — overlay SetLeaves,
+// PutBatch(overlayNodes.ReachableMutations(newRoot)) [the SDK orphan filter],
+// EmitDurable, durable-set prune — over many batches, and asserts the tail stays
+// BOUNDED (the un-tiled gap), not O(history). With plain Mutations() this same loop
+// leaks ~5.8 nodes/entry (the writer OOM); ReachableMutations + prune holds it flat.
+func TestTailBound_ReachableMutationsEndToEnd(t *testing.T) {
+	ctx := context.Background()
+	tiles := NewMemSMTTileStore()
+	tailed := NewTailedNodeStore(smt.NewTiledNodeStore(ctx, tiles, smt.NewTileCache(1<<16)))
+	leafStore := smt.NewInMemoryLeafStore()
+	emitter := NewBuildTilesEmitter(tailed, tiles)
+	root := smt.EmptyHash
+
+	const batches, perBatch = 40, 64
+	total, maxTail := 0, 0
+	for b := 0; b < batches; b++ {
+		// Builder shape: overlay over the tail; leaves persist directly.
+		overlayNodes := smt.NewOverlayNodeStore(tailed)
+		tree := smt.NewTree(leafStore, overlayNodes)
+		tree.SetRoot(root)
+		batch := make([]types.SMTLeaf, 0, perBatch)
+		for i := 0; i < perBatch; i++ {
+			k := sha256.Sum256([]byte{byte(total), byte(total >> 8), byte(total >> 16)})
+			batch = append(batch, types.SMTLeaf{Key: k, OriginTip: types.LogPosition{LogDID: "did:test", Sequence: uint64(total + 1)}})
+			total++
+		}
+		if err := tree.SetLeaves(ctx, batch); err != nil {
+			t.Fatalf("SetLeaves: %v", err)
+		}
+		var err error
+		if root, err = tree.Root(ctx); err != nil {
+			t.Fatalf("Root: %v", err)
+		}
+		// THE FIX: only the final-reachable delta enters the tail (orphans excluded).
+		dirty := overlayNodes.ReachableMutations(root)
+		nodes := make([]smt.Node, 0, len(dirty))
+		for _, n := range dirty {
+			nodes = append(nodes, n)
+		}
+		tailed.PutBatch(nodes)
+		// Checkpoint: emit + durable-set prune (the committed #1).
+		durable, err := emitter.EmitDurable(ctx, smt.EmptyHash, root, uint64(total))
+		if err != nil {
+			t.Fatalf("EmitDurable: %v", err)
+		}
+		tailed.PruneTiled(ctx, func(_ context.Context, h [32]byte) (bool, error) { _, ok := durable[h]; return ok, nil })
+		if tl := tailed.TailLen(); tl > maxTail {
+			maxTail = tl
+		}
+	}
+	// BOUNDED: with orphans filtered + durable-prune, the tail collapses to the gap.
+	// Generous ceiling (one batch's delta worth), FAR below the ~5.8*total leak.
+	if maxTail > 4*perBatch {
+		t.Fatalf("tail not bounded: maxTail=%d over %d entries (orphan filter or prune regressed) — want ≤ %d", maxTail, total, 4*perBatch)
+	}
+	// SERVABLE: every entry's proof resolves from the durable tiles alone.
+	fresh := smt.NewTiledNodeStore(ctx, tiles, smt.NewTileCache(1<<16))
+	for _, idx := range []int{0, total / 2, total - 1} {
+		k := sha256.Sum256([]byte{byte(idx), byte(idx >> 8), byte(idx >> 16)})
+		if _, perr := smt.GenerateProofAt(fresh, root, k); perr != nil {
+			t.Fatalf("proof idx=%d unservable from tiles after fix: %v", idx, perr)
+		}
+	}
+	t.Logf("BOUNDED: %d entries, maxTail=%d nodes (%.3f/entry) — vs ~5.8/entry unfixed", total, maxTail, float64(maxTail)/float64(total))
 }

@@ -643,12 +643,16 @@ func (bl *BuilderLoop) processBatch(ctx context.Context) (int, error) {
 		}
 	}
 
-	// Snapshot the overlay's node mutations BEFORE entering the
-	// atomic transaction. Iterating overlay.Mutations() returns a
-	// copy keyed by node hash — every entry must be carried into the
-	// in-memory node tail (and then tiled by the reconciler) or the
-	// committed root will reference a node no proof can be served from.
-	dirtyNodes := overlayNodes.Mutations()
+	// Snapshot the overlay's node mutations reachable from the new committed root,
+	// BEFORE entering the atomic transaction. ReachableMutations (NOT Mutations) excludes
+	// the intermediate node versions SetLeaves buffers and then supersedes mid-batch —
+	// each jellyfishInsert rewrites the root path, so a 64-entry batch buffers ~63 dead
+	// intermediate roots + their branches. Those are unreachable from newRoot and thus
+	// never tiled, so promoting them into the in-memory tail would leak O(inserts × depth)
+	// orphaned nodes the durability-gated prune can never reclaim (the writer-OOM). The
+	// reachable set is exactly the final-tree delta — every node the committed root
+	// references for a servable proof, and nothing else.
+	dirtyNodes := overlayNodes.ReachableMutations(newRoot)
 
 	// Pre-build the leaf slice and node slice OUTSIDE the atomic tx
 	// so the tx's wire critical section is as short as possible (a
