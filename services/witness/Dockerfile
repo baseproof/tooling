@@ -89,8 +89,17 @@ USER 65532:65532
 EXPOSE 8081
 
 # Healthcheck hits /healthz — the daemon's built-in liveness endpoint. Returns
-# "ok" with 200 when the cosign handler is wired and listening.
-HEALTHCHECK --interval=2s --timeout=2s --retries=10 --start-period=2s \
-    CMD wget -q -O- http://localhost:8081/healthz | grep -q '^ok$' || exit 1
+# "ok" with 200 when the cosign handler is wired and listening. The witness serves
+# HTTPS when -tls-cert/-tls-key are set (main.go: tlsEnabled), plain HTTP otherwise
+# — so probe BOTH schemes (HTTP first: the compose / e2e default; then HTTPS with
+# --no-check-certificate for the self-signed cert) and pass if either returns "ok".
+# -T 1 bounds each attempt under the 3s timeout.
+#
+# NOTE: Kubernetes IGNORES this directive — kubelet runs the chart probes. This
+# HEALTHCHECK governs docker / docker-compose / Swarm only.
+HEALTHCHECK --interval=2s --timeout=3s --retries=10 --start-period=2s \
+    CMD wget -q -T 1 -O- http://localhost:8081/healthz 2>/dev/null | grep -q '^ok$' \
+        || wget -q -T 1 --no-check-certificate -O- https://localhost:8081/healthz 2>/dev/null | grep -q '^ok$' \
+        || exit 1
 
 ENTRYPOINT ["/witness"]

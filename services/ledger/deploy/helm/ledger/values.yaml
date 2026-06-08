@@ -50,6 +50,13 @@ nodeSelector: {}
 tolerations: []
 affinity: {}
 
+# TLS posture. Set enabled=true when the ledger serves HTTPS (TLS cert/key set in
+# config below): it switches the liveness/readiness probe scheme to HTTPS so
+# kubelet probes the TLS listener instead of HTTP-handshake-failing →
+# CrashLoopBackoff. Leave false for a plain-HTTP listener.
+tls:
+  enabled: false
+
 container:
   ports:
     http: 8080
