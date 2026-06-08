@@ -169,15 +169,28 @@ horizon does not advance), mirroring `horizon_s3_test.go`'s
 ### Evidence (traced)
 Step 9a of the checkpoint loop withholds the horizon on a receipt-archive failure
 (`ledger/builder/checkpoint_loop.go`, the `checkpoint: receipt-commit archive at %d not
-durable, withholding horizon` path). But these comments still describe the old
-best-effort behavior:
+durable, withholding horizon` path). But these comments on the **forward** receipt-archive
+path still describe the old best-effort behavior (a code read found 8 spots, not the 4
+first catalogued):
 - `ledger/builder/checkpoint_loop.go:276` — `SetReceiptArchiver injects the best-effort
   archiver…`
 - `ledger/store/receipt_archive_writer.go:4` — `ReceiptArchiveWriter — best-effort
   writer…`
+- `ledger/store/receipt_archive_writer.go:12` — `Best-effort: …never stalls a checkpoint
+  …; the backfill job regenerates any gaps.`
 - `ledger/store/receipt_archive_writer.go:56` — `…treats archiving as best-effort and
   never stalls publish on it.`
+- `ledger/store/receipt_archive.go:12` — `…best-effort: the archive never gates a publish…`
 - `ledger/api/horizon.go:123` — `…the builder's best-effort write.`
+- `ledger/cmd/ledger/boot/wire/wire.go:374` — `best-effort archive …; an object-store
+  write error never stalls a checkpoint.`
+- `ledger/store/receipt_archive_writer_test.go:76` — `…(the loop logs it best-effort)…`
+
+The boundary matters: the **backfill** path (`ledger/store/archive_backfill.go`,
+`ledger/recovery/archive_backfill.go`) is GENUINELY best-effort per item by design (G1,
+off the hot path), and the POSIX per-size **checkpoint-head** archive in
+`ledger/tessera/embedded_appender.go` is the separate G3 fail-open gap — neither is a G4
+target.
 
 ### Why it matters
 The receipt archive being durable **before** the horizon is the invariant a PG-off
@@ -187,11 +200,16 @@ reopen the exact hole G1–G3 exist to close. Doc/code drift on a load-bearing i
 is a latent correctness regression.
 
 ### Fix
-Rewrite the four comments to state **fail-closed / withholds the horizon**. Pure doc,
-zero risk. (Done correctly, `grep best-effort` near the receipt archive returns nothing.)
+Rewrite these forward-path comments to state **fail-closed / withholds the horizon**,
+leaving the genuinely best-effort backfill comments untouched. Pure doc, zero risk.
+(Done correctly, `grep -i best-effort` over the forward receipt-archive surface returns
+nothing.)
 
 ### Acceptance
-Doc-only; no behavior change. A grep guard in review.
+Doc-only; no behavior change. A grep guard in review: no "best-effort" on the forward
+receipt-archive path (checkpoint_loop SetReceiptArchiver / Step 9a, receipt_archive_writer,
+receipt_archive, api/horizon receiptArchiveObject, the wire wiring) — while the backfill
+and POSIX-checkpoint paths keep theirs.
 
 ---
 

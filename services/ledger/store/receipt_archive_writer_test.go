@@ -73,7 +73,8 @@ func TestReceiptArchiveWriter_NoOpWhenUnwired(t *testing.T) {
 }
 
 // TestReceiptArchiveWriter_PutErrorPropagates: a put error is returned (the loop
-// logs it best-effort) — and a gather error short-circuits before any write.
+// withholds the horizon on it — fail-closed) — and a gather error short-circuits
+// before any write.
 func TestReceiptArchiveWriter_PutErrorPropagates(t *testing.T) {
 	w := &ReceiptArchiveWriter{ranger: stubGatherer{commits: nil}, obj: &capturePutter{err: errors.New("s3 down")}}
 	if err := w.ArchiveReceiptCommits(context.Background(), 8, 5, 7); err == nil {

@@ -120,7 +120,7 @@ type CheckpointArchiveReader interface {
 
 // receiptArchiveObject is the storage key for the per-checkpoint dense
 // receipt-commitment archive (1.2a) — MUST match store/horizon_s3.go
-// receiptArchiveKey and the builder's best-effort write.
+// receiptArchiveKey and the builder's fail-closed pre-horizon write.
 func receiptArchiveObject(coveringSize uint64) string {
 	return "receipts/" + strconv.FormatUint(coveringSize, 10)
 }
