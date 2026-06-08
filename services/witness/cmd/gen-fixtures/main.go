@@ -45,7 +45,9 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 
+	sdkdid "github.com/baseproof/baseproof/did"
 	"github.com/baseproof/baseproof/network"
 
 	"github.com/baseproof/tooling/services/witness/internal/blskey"
@@ -77,16 +79,25 @@ func main() {
 			"a BLS key cannot be a genesis did:key, so the bootstrap admits cosign "+
 			"scheme 0x02 and the BLS witnesses join the verifying set on-log via "+
 			"the WitnessEndpointDeclaration each daemon emits at boot).")
+	genesisAuditorDIDs := flag.String("genesis-auditor-did", "",
+		"comma-separated secp256k1 did:key(s) to declare as genesis auditors in the "+
+			"bootstrap (bound into the NetworkID). Each is recognized by the always-on "+
+			"auditor-scope gate, so its claim-class findings (equivocation, etc.) are "+
+			"admitted. Typically the ledger's gossip-originator did:key.")
+	genesisAuditorFindingsURL := flag.String("genesis-auditor-findings-url", "",
+		"findings-publishing URL stamped on every -genesis-auditor-did entry "+
+			"(required when -genesis-auditor-did is set).")
 	flag.Parse()
 
-	if err := run(*outDir, *outBootstrap, *logDID, *networkName, *witnessCount, *scheme, os.Stdout); err != nil {
+	if err := run(*outDir, *outBootstrap, *logDID, *networkName, *witnessCount, *scheme,
+		*genesisAuditorDIDs, *genesisAuditorFindingsURL, os.Stdout); err != nil {
 		log.Fatalf("gen-fixtures: %v", err)
 	}
 }
 
 // run is the testable body. It is exported via lowercase so
 // main_test.go can drive it without exec'ing a subprocess.
-func run(outDir, outBootstrap, logDID, networkName string, witnessCount int, scheme string, stdout *os.File) error {
+func run(outDir, outBootstrap, logDID, networkName string, witnessCount int, scheme, genesisAuditorDIDs, genesisAuditorFindingsURL string, stdout *os.File) error {
 	if witnessCount < 1 {
 		return fmt.Errorf("-witnesses must be >= 1 (got %d): a network without witnesses cannot finalise heads", witnessCount)
 	}
@@ -134,6 +145,15 @@ func run(outDir, outBootstrap, logDID, networkName string, witnessCount int, sch
 			MinSignaturesPerEntry:   1,
 		},
 	}
+
+	// Genesis auditors: secp256k1 did:key(s) the always-on auditor-scope gate
+	// recognizes from sequence 0 (bound into the NetworkID via the JCS bytes).
+	auditors, err := buildGenesisAuditors(genesisAuditorDIDs, genesisAuditorFindingsURL)
+	if err != nil {
+		return err
+	}
+	doc.GenesisAuditors = auditors
+
 	if _, err := doc.IDs(); err != nil {
 		return fmt.Errorf("validate bootstrap document: %w", err)
 	}
@@ -153,6 +173,45 @@ func run(outDir, outBootstrap, logDID, networkName string, witnessCount int, sch
 	fmt.Fprintf(stdout, "gen-fixtures: keys      = %v\n", keyPaths)
 	fmt.Fprintf(stdout, "gen-fixtures: bootstrap = %s\n", bootstrapPath)
 	return nil
+}
+
+// buildGenesisAuditors decodes each comma-separated secp256k1 did:key into a
+// network.GenesisAuditor recognized by the always-on auditor-scope gate. The
+// public key is taken from the did:key itself (self-certifying), so the
+// declaration is consistent with the originator's gossip identity. Scope is the
+// full set (ScopeAll) — a founding auditor is trusted for every finding kind.
+// Empty input yields no genesis auditors (the bootstrap then declares none, and
+// the gate has no genesis recognition anchor).
+func buildGenesisAuditors(didCSV, findingsURL string) ([]network.GenesisAuditor, error) {
+	didCSV = strings.TrimSpace(didCSV)
+	if didCSV == "" {
+		return nil, nil
+	}
+	if strings.TrimSpace(findingsURL) == "" {
+		return nil, errors.New("-genesis-auditor-findings-url is required when -genesis-auditor-did is set")
+	}
+	var out []network.GenesisAuditor
+	for _, raw := range strings.Split(didCSV, ",") {
+		did := strings.TrimSpace(raw)
+		if did == "" {
+			continue
+		}
+		if !strings.HasPrefix(did, "did:key:zQ3s") {
+			return nil, fmt.Errorf("genesis auditor %q must be a secp256k1 did:key (did:key:zQ3s…)", did)
+		}
+		pub, _, perr := sdkdid.ParseDIDKey(did)
+		if perr != nil {
+			return nil, fmt.Errorf("genesis auditor %q: %w", did, perr)
+		}
+		out = append(out, network.GenesisAuditor{
+			AuditorDID:  did,
+			PublicKey:   hex.EncodeToString(pub),
+			SchemeTag:   0x01, // SchemeECDSA (secp256k1 did:key)
+			FindingsURL: findingsURL,
+			Scope:       uint16(network.ScopeAll),
+		})
+	}
+	return out, nil
 }
 
 func ifGenerated(generated bool) string {
