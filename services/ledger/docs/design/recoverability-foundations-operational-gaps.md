@@ -136,9 +136,17 @@ actually stopped (guard against a false-green that secretly used PG).
 - **S3 is fail-closed.** `ledger/store/horizon_s3.go` (`PublishCosignedCheckpoint`):
   per-size archive + size index are written **before** the horizon and a failure is
   returned (the horizon never advances past non-durable cold data).
-- **Same class, rotation index:** `ledger/witnessclient/rotation_handler.go:369` — the
-  witness-rotation index archive is best-effort (a latent gap for **rotated** networks
-  served cold).
+- **Rotation index — fail-open, but a DIFFERENT structural class:**
+  `ledger/witnessclient/rotation_handler.go:364-371` (Step 6) refreshes the
+  witness-rotation index best-effort. Unlike the checkpoint archive it CANNOT be
+  fail-closed: Step 6 runs *after* the rotation is already committed on-log (Step 2b) and
+  in PG (Step 3), so there is no horizon to withhold and returning an error would falsely
+  fail a rotation that already applied — violating the handler's own contract ("Any
+  failure in steps 1–4 leaves the handler in its previous state"). Its cold-durability is
+  instead provided by the **backfill** (`store.RotationIndexArchiveJob`, run by
+  `recovery.ArchiveBackfill` / G1; a stale/v1 index is regenerated there). So the rotation
+  index is the *same symptom* (forward best-effort) but the *correct remedy is G1*, not a
+  fail-closed forward write.
 
 ### Why it matters
 A cold reader resolves a covering checkpoint from the **per-size archive**. If that
@@ -148,19 +156,22 @@ because the cold/PG-off path is S3-only (fail-closed), but the asymmetry is a tr
 future POSIX deployment that serves cold reads (or any rotated network relying on the
 rotation index) inherits a silent durability hole.
 
-### Fix
-Make POSIX symmetric: in `publishCheckpoint`, write the per-size archive **before** the
-horizon and **propagate** its error (fail-closed, matching S3); update
-`checkpoint_archive_test.go` to assert the publish now *withholds* on archive failure.
-Apply the same to the rotation-index archiver if rotated networks are to be served cold.
-*(Alternative, if POSIX cold-serve is explicitly out of scope: one comment declaring
-"POSIX deployments do not serve cold reads; the per-size archive is advisory" — but
-symmetry is the safer default.)*
+### Fix (DONE for the checkpoint archive)
+Made POSIX symmetric: `publishCheckpoint` now writes the per-size archive **before** the
+horizon and **propagates** its error (fail-closed, matching S3), withholding the horizon
+on an archive fault. The now-dead `ctx`/`logger` params (they only fed the swallowed
+warn-log) are dropped, matching the file's own FS helpers (`archiveCheckpoint`,
+`atomicWriteFile`). `checkpoint_archive_test.go` is inverted to assert the publish FAILS
+and the horizon is **not** written.
 
-### Acceptance
-A unit test: a forced POSIX per-size-archive write failure **fails the publish** (the
-horizon does not advance), mirroring `horizon_s3_test.go`'s
-`IndexFailureWithholdsHorizon`.
+The rotation index is deliberately **not** changed: as traced above it cannot be
+fail-closed (commit precedes the archive), and its cold-durability is the backfill's job
+(G1). No "POSIX is advisory" cop-out was needed — symmetry was the right default.
+
+### Acceptance (met)
+`tessera/checkpoint_archive_test.go::TestPublishCheckpoint_ArchiveFailure_WithholdsHorizon`:
+a forced POSIX per-size-archive write failure **fails the publish** and leaves the horizon
+absent — the POSIX mirror of `horizon_s3_test.go`'s index-failure-withholds-horizon test.
 
 ---
 
