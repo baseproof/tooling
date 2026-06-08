@@ -381,6 +381,12 @@ func Wire(ctx context.Context, cfg Config, d *deps.AppDeps) error {
 			checkpointLoop.SetReceiptArchiver(store.NewReceiptArchiveWriter(
 				store.NewEntryIndexReceiptRanger(d.PgPool.DB, cfg.LogDID), s3))
 		}
+		// Bound the in-memory SMT node tail: after each frontier advance the loop
+		// evicts the nodes it just made durable (store.TailedNodeStore.PruneTiled).
+		// Load-bearing — without it the tail accumulates every committed node
+		// (O(history)) and the writer OOMs (the node DAG is de-polluted out of PG and
+		// lives only in the tail until tiled).
+		checkpointLoop.SetTailPruner(d.NodeStore)
 		d.Logger.Info("checkpoint loop enabled", "tile_dir", tileDir, "quorum_k", cfg.WitnessQuorumK)
 	}
 
@@ -2242,6 +2248,22 @@ func installLateBoundGauges(
 			"Committed head tree_size minus the published witness-cosigned horizon tree_size.",
 			checkpointLoop.HorizonLag) {
 			d.Logger.Info("metrics: horizon lag gauge installed", "metric", "baseproof_horizon_lag_total")
+		}
+		// Memory-bounding watch surface: the un-tiled gap (committed − frontier, in
+		// entries) and the in-memory node tail it drives. A sustained climb in either
+		// means tiling is falling behind commit (the tail growing toward OOM) — the
+		// signal the sequencer's tail-backpressure gate also keys on.
+		if observability.RegisterInt64Gauge(builderMeter, "baseproof_smt_frontier_lag_total",
+			"Committed seq minus the durable SMT tile frontier seq (the un-tiled gap ≈ in-memory node tail, in entries).",
+			checkpointLoop.FrontierLag) {
+			d.Logger.Info("metrics: SMT frontier lag gauge installed", "metric", "baseproof_smt_frontier_lag_total")
+		}
+		if d.NodeStore != nil {
+			if observability.RegisterInt64Gauge(builderMeter, "baseproof_smt_tail_nodes",
+				"In-memory SMT node tail size in nodes (committed-but-not-tiled, plus restart-cleared orphans).",
+				func() int64 { return int64(d.NodeStore.TailLen()) }) {
+				d.Logger.Info("metrics: SMT tail-nodes gauge installed", "metric", "baseproof_smt_tail_nodes")
+			}
 		}
 	}
 }

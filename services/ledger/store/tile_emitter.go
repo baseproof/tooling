@@ -52,14 +52,20 @@ func NewBuildTilesEmitter(nodes smt.NodeStore, tiles SMTTileStore) *BuildTilesEm
 	return &BuildTilesEmitter{nodes: nodes, tiles: tiles}
 }
 
-// EmitDurable ensures every tile reachable from committedRoot is durably present.
-func (e *BuildTilesEmitter) EmitDurable(ctx context.Context, _ [32]byte, committedRoot [32]byte, _ uint64) error {
+// EmitDurable ensures every tile reachable from committedRoot is durably present,
+// and returns the content hashes of every node now durable in those tiles. The
+// reconciler evicts exactly that set from the in-memory tail (PruneTiled), bounding
+// the tail to the un-tiled gap — WITHOUT this signal the tail accumulates every
+// committed node (O(history)) and the writer OOMs. A nil/empty return (EmptyHash, or
+// an error) prunes nothing. Returning a non-nil error means NO tiles became durable
+// this call; the set is then nil so the caller evicts nothing (fail-closed).
+func (e *BuildTilesEmitter) EmitDurable(ctx context.Context, _ [32]byte, committedRoot [32]byte, _ uint64) (map[[32]byte]struct{}, error) {
 	if committedRoot == smt.EmptyHash {
-		return nil // empty tree → no tiles
+		return nil, nil // empty tree → no tiles, nothing durable
 	}
 	tileSet, err := e.buildTiles(ctx, committedRoot)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	for id, tile := range tileSet {
 		// Content-addressed: an already-present tile carries identical bytes, so skip
@@ -70,13 +76,23 @@ func (e *BuildTilesEmitter) EmitDurable(ctx context.Context, _ [32]byte, committ
 		}
 		enc, encErr := smt.EncodeTile(tile)
 		if encErr != nil {
-			return fmt.Errorf("store/tile-emitter: encode tile %x: %w", id[:6], encErr)
+			return nil, fmt.Errorf("store/tile-emitter: encode tile %x: %w", id[:6], encErr)
 		}
 		if perr := e.tiles.Put(ctx, id, enc); perr != nil {
-			return fmt.Errorf("store/tile-emitter: put tile %x: %w", id[:6], perr)
+			return nil, fmt.Errorf("store/tile-emitter: put tile %x: %w", id[:6], perr)
 		}
 	}
-	return nil
+	// Every node in every tile of tileSet is now durable (just-PUT, or already
+	// present and skipped above). Hash them so the reconciler can evict exactly these
+	// from the tail — a strictly fail-closed prune signal (evict iff durable). Empty
+	// for a no-tile committedRoot.
+	durable := make(map[[32]byte]struct{})
+	for _, tile := range tileSet {
+		for i := range tile.Nodes {
+			durable[smt.HashNode(tile.Nodes[i])] = struct{}{}
+		}
+	}
+	return durable, nil
 }
 
 // buildTiles selects the incremental dirty-set walk when the node substrate exposes

@@ -109,7 +109,7 @@ func TestIssue189_CrashStrandsPublishedRoot_GateMustNotTrustFrontier(t *testing.
 			if err := RecoverTail(ctx, leaves, tn, committedRoot); err != nil {
 				return err
 			}
-			if err := NewBuildTilesEmitter(tn, localTiles).
+			if _, err := NewBuildTilesEmitter(tn, localTiles).
 				EmitDurable(ctx, smt.EmptyHash, committedRoot, uint64(len(leaves))); err != nil {
 				return err
 			}
@@ -154,7 +154,7 @@ func TestIssue189_TilesCoverRoot_DetectsMissingSubstrate(t *testing.T) {
 	if err := RecoverTail(ctx, leaves, tn, committedRoot); err != nil {
 		t.Fatalf("RecoverTail: %v", err)
 	}
-	if err := NewBuildTilesEmitter(tn, tiles).
+	if _, err := NewBuildTilesEmitter(tn, tiles).
 		EmitDurable(ctx, smt.EmptyHash, committedRoot, uint64(len(leaves))); err != nil {
 		t.Fatalf("EmitDurable: %v", err)
 	}
