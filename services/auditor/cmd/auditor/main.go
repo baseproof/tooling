@@ -24,6 +24,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sort"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -110,27 +111,16 @@ type config struct {
 	// after this TTL so a rotated service endpoint is eventually picked up.
 	didwebTTL time.Duration
 
-	// v1.32.0+ auditor-scope gate (D2 + D7 + Ladder 2 D5).
+	// Auditor-scope gate. Recognition is always-on and network-governed:
+	// the recognized set is the bootstrap's genesis auditors merged with the
+	// on-log AuditorRegistrationV1 chain — there is no enforce flag and no
+	// registry file (authority comes from the log, not an operator manifest).
 	//
-	// enforceScopes (AUDITOR_ENFORCE_SCOPES, default false) is the
-	// backward-compat rollout flag: false preserves the pre-v1.32
-	// behavior (every verified finding flows through the reconciler's
-	// kind switch without consulting any auditor registry); true
-	// enables the scope check.
-	//
-	// auditorRegistryFile (AUDITOR_REGISTRY_FILE) is the path to the
-	// JSON manifest of network.AuditorRegistration entries the gate
-	// dispatches against. Required when enforceScopes is true; empty
-	// is a misconfig and main refuses to boot (#21 B3).
-	//
-	// auditorAmendmentFile (AUDITOR_AMENDMENT_FILE) is the path to the
-	// JSON manifest of network.AuditorScopeAmendmentV1 entries that
-	// merge with the registration stream at gate resolution (SDK Gap 2,
-	// v1.33.x). Optional — empty means "no amendments yet", equivalent
-	// to v1.32.0 registration-only behavior. Sorted on load (Ladder 2
-	// D5).
-	enforceScopes        bool
-	auditorRegistryFile  string
+	// auditorAmendmentFile (AUDITOR_AMENDMENT_FILE) is the path to the JSON
+	// manifest of network.AuditorScopeAmendmentV1 entries that merge with the
+	// registration stream at gate resolution. Optional — empty means "no
+	// amendments yet". Sorted on load. (Like the registry, this is slated to
+	// move on-log; until then it remains an optional operator manifest.)
 	auditorAmendmentFile string
 
 	// urlDriftInterval (AUDITOR_URL_DRIFT_INTERVAL, default 0 = disabled)
@@ -231,10 +221,7 @@ func loadConfig() config {
 		horizonInterval:    envDuration("AUDITOR_HORIZON_INTERVAL", 60*time.Second),
 		horizonSamples:     envInt("AUDITOR_HORIZON_SAMPLES", 8),
 		didwebTTL:          envDuration("AUDITOR_DIDWEB_TTL", 5*time.Minute),
-		// v1.32.0 — D7 backward-compat env var + D2 file path.
-		enforceScopes:       envBool("AUDITOR_ENFORCE_SCOPES", false),
-		auditorRegistryFile: os.Getenv("AUDITOR_REGISTRY_FILE"),
-		// v1.33.x Gap 2 (Ladder 2 D5): optional amendment manifest.
+		// Optional auditor scope-amendment manifest (slated to move on-log).
 		auditorAmendmentFile: os.Getenv("AUDITOR_AMENDMENT_FILE"),
 		// Ladder 2 D6 (#21): url_drift audit cadence.
 		urlDriftInterval:   envDuration("AUDITOR_URL_DRIFT_INTERVAL", 0),
@@ -483,45 +470,38 @@ func run(ctx context.Context, cfg config, logger *slog.Logger) error {
 			}, nil
 		}
 
-		// D2 + D7: load the v1.32.0+ auditor registry when enforcement
-		// is enabled AND a registry file is configured. When either
-		// is unset, registry stays nil and the reconciler keeps the
-		// pre-v1.32 dispatch behavior.
-		var auditorRegistry sdknetwork.AuditorRegistrationByPosition
-		if cfg.enforceScopes && cfg.auditorRegistryFile != "" {
-			auditorRegistry, err = app.LoadAuditorRegistryFromFile(cfg.auditorRegistryFile)
-			if err != nil {
-				return fmt.Errorf("auditor: load auditor registry: %w", err)
-			}
-			// B3 (#21): refuse to boot when enforce=true and the file
-			// loaded but produced zero auditors. The empty-non-nil slice
-			// is structurally distinct from the unset-file nil slice (the
-			// reconciler treats nil as "gate disabled, pre-v1.32 dispatch"
-			// and non-nil-empty as "gate enabled, no auditors registered,
-			// reject every event"). At 1K+ TPS, fail-closed on a typo'd
-			// file path means the gossip backlog grows unboundedly until
-			// the operator notices. Catch the misconfig at boot, not at
-			// first-rejected-event time.
-			if len(auditorRegistry) == 0 {
-				return fmt.Errorf(
-					"auditor: AUDITOR_ENFORCE_SCOPES=true but registry file %q "+
-						"loaded zero auditors — refusing to boot fail-closed "+
-						"(verify file path + contents; an empty JSON array is "+
-						"not a valid 'gate enabled' state)",
-					cfg.auditorRegistryFile)
-			}
-			logger.Info("auditor: auditor-scope gate ENABLED",
-				"registry_file", cfg.auditorRegistryFile,
-				"auditors", len(auditorRegistry))
-		} else if cfg.enforceScopes && cfg.auditorRegistryFile == "" {
-			// Explicit operator misconfiguration — enforce was on but
-			// no file was set. Refuse to boot rather than silently
-			// degrade (which is the failure mode the audit's D7 flag
-			// is designed to make impossible).
-			return fmt.Errorf("auditor: AUDITOR_ENFORCE_SCOPES=true but AUDITOR_REGISTRY_FILE empty — refusing to boot with a silent scope-gate downgrade")
-		} else {
-			logger.Info("auditor: auditor-scope gate DISABLED (AUDITOR_ENFORCE_SCOPES unset)")
+		// Always-on auditor recognition — network-governed, no admin flag or file.
+		// The recognized set is the network's GENESIS auditors (declared in the
+		// bootstrap and bound into the NetworkID) merged with any on-log
+		// AuditorRegistrationV1 records the resolver has materialized. The gate is
+		// ALWAYS on: an originator that is not a recognized auditor (or whose scope
+		// does not cover the finding kind) has its claim-class findings dropped. A
+		// network that declares no genesis auditors and has no on-log registrations
+		// resolves to the empty set, so the gate fail-closes every claim-class
+		// finding — the zero-trust default. Authority is the on-log
+		// AuditorRegistrationChain rooted at the bootstrap, never an operator file.
+		genesisAuditorRecords, gerr := bootstrapDoc.GenesisAuditorRecords(exchangeDID)
+		if gerr != nil {
+			return fmt.Errorf("auditor: genesis auditor records: %w", gerr)
 		}
+		auditorRegistry := make(sdknetwork.AuditorRegistrationByPosition, 0,
+			len(genesisAuditorRecords)+len(authoritativeResolver.AuditorRegistryRecords))
+		auditorRegistry = append(auditorRegistry, genesisAuditorRecords...)
+		auditorRegistry = append(auditorRegistry, authoritativeResolver.AuditorRegistryRecords...)
+		sort.Sort(auditorRegistry)
+		// Resolve recognition as of the latest record held: genesis records sit at
+		// sequence 0; on-log registrations advance this as the resolver
+		// materializes them.
+		auditorScopeAsOfSeq := uint64(0)
+		for _, rec := range auditorRegistry {
+			if rec.EffectivePos.Sequence > auditorScopeAsOfSeq {
+				auditorScopeAsOfSeq = rec.EffectivePos.Sequence
+			}
+		}
+		logger.Info("auditor: auditor-scope gate ENABLED (always-on, network-governed)",
+			"genesis_auditors", len(genesisAuditorRecords),
+			"onlog_auditors", len(authoritativeResolver.AuditorRegistryRecords),
+			"recognized_total", len(auditorRegistry))
 
 		// Ladder 2 D5: optional amendment manifest. When AUDITOR_AMENDMENT_FILE
 		// is set, load + sort + thread through Deps; otherwise nil → reconciler
@@ -590,18 +570,16 @@ func run(ctx context.Context, cfg config, logger *slog.Logger) error {
 			RetentionDays:     cfg.retentionDays,
 			PruneInterval:     cfg.pruneInterval,
 			Logger:            logger,
-			// v1.32.0+ auditor-scope gate inputs. nil when enforce=false
-			// or registry file is empty — preserves pre-v1.32 behavior.
+			// Always-on auditor-scope gate: the recognized set (genesis +
+			// on-log) and the position it is resolved at. Never nil —
+			// recognition is mandatory and network-governed.
 			AuditorRegistry: auditorRegistry,
-			// v1.33.x Gap 2 (Ladder 2 D5): optional amendment stream that
-			// merges with AuditorRegistry at gate resolution. nil when
-			// AUDITOR_AMENDMENT_FILE is unset.
+			// Optional scope-amendment stream merged with AuditorRegistry at
+			// gate resolution; nil when AUDITOR_AMENDMENT_FILE is unset.
 			AuditorAmendments: auditorAmendments,
-			// AuditorScopeAsOf left nil: the file-based registry is a
-			// fully-walked snapshot (every record is in-effect at any
-			// asOf >= EffectiveSeq). When a future on-log walker
-			// replaces the loader, wire AuditorScopeAsOf to the latest
-			// cosigned tree head's position.
+			AuditorScopeAsOf: func(context.Context) types.LogPosition {
+				return types.LogPosition{LogDID: exchangeDID, Sequence: auditorScopeAsOfSeq}
+			},
 
 			// Ladder 2 D6 (#21): periodic url_drift audit. Disabled by
 			// default — gated on AUDITOR_URL_DRIFT_INTERVAL > 0. When
@@ -681,7 +659,7 @@ func run(ctx context.Context, cfg config, logger *slog.Logger) error {
 			// Proves which DID methods can resolve STH originators — an empty
 			// list here is the "registers nothing" bug that rejected every event.
 			"did_methods", didRegistry.RegisteredMethods(),
-			"auditor_scope_gate", auditorRegistry != nil)
+			"recognized_auditors", len(auditorRegistry))
 	} else {
 		logger.Warn("auditor: AUDITOR_GOSSIP_DSN unset — running health-only (no custody/feed)")
 	}
