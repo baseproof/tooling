@@ -185,86 +185,38 @@ func runAuditor(t *testing.T, env []string, deadline time.Duration) (combined st
 	return combined, exitCode
 }
 
-// TestBoot_RefusesOnEmptyRegistryFileUnderEnforceScopes pins the B3
-// invariant: AUDITOR_ENFORCE_SCOPES=true + a registry file that
-// loads zero auditors → exit non-zero + a stderr message naming the
-// file path. The B3 refusal block in main.run reads:
-//
-//	if len(auditorRegistry) == 0 {
-//	    return fmt.Errorf("auditor: AUDITOR_ENFORCE_SCOPES=true but registry file %q
-//	        loaded zero auditors — refusing to boot fail-closed ...")
-//	}
-//
-// At 1K+ TPS the fail-closed gate without this refusal would produce
-// unbounded gossip backlog before an operator noticed. The test
-// EXISTS to lock the refusal AT BOOT TIME, where the operator's
-// next step is to fix the manifest.
-func TestBoot_RefusesOnEmptyRegistryFileUnderEnforceScopes(t *testing.T) {
+// TestBoot_AuditorScopeGateAlwaysOn pins the post-rc5 posture: the auditor-scope
+// gate is ALWAYS on and network-governed — there is no AUDITOR_ENFORCE_SCOPES
+// flag and no AUDITOR_REGISTRY_FILE. The recognized set is the bootstrap's
+// genesis auditors merged with the on-log AuditorRegistrationV1 chain; a
+// bootstrap that declares no genesis auditors (and has no on-log registrations)
+// resolves to the EMPTY set, so the gate fail-closes every claim-class finding.
+// The binary boots into the gate unconditionally — proven by the
+// "always-on, network-governed" log line, which fires before the (dummy)
+// gossip-store dial. A refactor that re-introduced a silent pass-through or a
+// boot flag fails here.
+func TestBoot_AuditorScopeGateAlwaysOn(t *testing.T) {
 	bootstrapPath := writeFile(t, "bootstrap.json", minimalBootstrapDoc(t))
-	emptyRegistry := writeFile(t, "auditors.json", `[]`)
 
 	env := []string{
 		"PATH=" + os.Getenv("PATH"),
-		// Force the binary into the pipeline path (requires DSN). The
-		// DSN doesn't have to work — the B3 refusal fires BEFORE the
-		// sql.Open call.
 		"AUDITOR_GOSSIP_DSN=postgres://dummy@localhost/dummy",
 		"AUDITOR_NETWORK_BOOTSTRAP_FILE=" + bootstrapPath,
 		"AUDITOR_WITNESS_QUORUM_K=1",
-		"AUDITOR_ENFORCE_SCOPES=true",
-		"AUDITOR_REGISTRY_FILE=" + emptyRegistry,
-		// Quiet down outbound — no peers to resolve, no mTLS material. A
-		// non-transport boot test, so opt out of secure-by-default require-mTLS.
+		// No AUDITOR_ENFORCE_SCOPES, no AUDITOR_REGISTRY_FILE — the gate is on regardless.
 		"AUDITOR_PEERS=",
 		"AUDITOR_PEER_ALLOW_PLAINTEXT=true",
 	}
 
-	out, exit := runAuditor(t, env, 10*time.Second)
+	out, _ := runAuditor(t, env, 10*time.Second)
 
-	if exit == 0 {
-		t.Fatalf("expected non-zero exit; got 0\nout: %s", out)
+	if !strings.Contains(out, "always-on, network-governed") {
+		t.Errorf("gate must be always-on with no flag/file; got: %s", out)
 	}
-	if !strings.Contains(out, "AUDITOR_ENFORCE_SCOPES=true") {
-		t.Errorf("output must name the env var; got: %s", out)
-	}
-	if !strings.Contains(out, emptyRegistry) {
-		t.Errorf("output must name the file path %q; got: %s", emptyRegistry, out)
-	}
-	if !strings.Contains(out, "zero auditors") {
-		t.Errorf("output must explain the failure ('zero auditors'); got: %s", out)
-	}
-}
-
-// TestBoot_RefusesOnEnforceScopesWithoutFile pins the other half of
-// the B3 invariant: AUDITOR_ENFORCE_SCOPES=true + AUDITOR_REGISTRY_FILE
-// unset → exit non-zero with a different diagnostic. This was the
-// pre-Ladder-1 misconfiguration shape the audit's D7 flag was designed
-// to catch; the test exists so a refactor that re-introduced the
-// silent-disable behavior fails here.
-func TestBoot_RefusesOnEnforceScopesWithoutFile(t *testing.T) {
-	bootstrapPath := writeFile(t, "bootstrap.json", minimalBootstrapDoc(t))
-
-	env := []string{
-		"PATH=" + os.Getenv("PATH"),
-		"AUDITOR_GOSSIP_DSN=postgres://dummy@localhost/dummy",
-		"AUDITOR_NETWORK_BOOTSTRAP_FILE=" + bootstrapPath,
-		"AUDITOR_WITNESS_QUORUM_K=1",
-		"AUDITOR_ENFORCE_SCOPES=true",
-		// AUDITOR_REGISTRY_FILE deliberately unset.
-		"AUDITOR_PEERS=",
-		"AUDITOR_PEER_ALLOW_PLAINTEXT=true", // non-transport boot test: opt out of require-mTLS
-	}
-
-	out, exit := runAuditor(t, env, 10*time.Second)
-
-	if exit == 0 {
-		t.Fatalf("expected non-zero exit; got 0\nout: %s", out)
-	}
-	if !strings.Contains(out, "AUDITOR_ENFORCE_SCOPES=true") {
-		t.Errorf("output must name the env var; got: %s", out)
-	}
-	if !strings.Contains(out, "AUDITOR_REGISTRY_FILE empty") {
-		t.Errorf("output must name the missing env var; got: %s", out)
+	// minimalBootstrapDoc declares no genesis auditors → empty recognized set
+	// (the fail-closed posture), proving recognition is never silently disabled.
+	if !strings.Contains(out, `"genesis_auditors":0`) {
+		t.Errorf("expected genesis_auditors:0 for a bootstrap with no genesis auditors; got: %s", out)
 	}
 }
 
@@ -426,7 +378,6 @@ func TestBoot_MaterializedCache_LoadedFromDisk(t *testing.T) {
 	const exchangeDID = "did:web:test-exchange.example.org"
 
 	bootstrapPath := writeFile(t, "bootstrap.json", minimalBootstrapDoc(t))
-	emptyRegistry := writeFile(t, "auditors.json", `[]`)
 	cacheRoot := t.TempDir()
 	seedMaterializedSnapshot(t, cacheRoot, exchangeDID, 1234)
 
@@ -435,8 +386,6 @@ func TestBoot_MaterializedCache_LoadedFromDisk(t *testing.T) {
 		"AUDITOR_GOSSIP_DSN=postgres://dummy@localhost/dummy",
 		"AUDITOR_NETWORK_BOOTSTRAP_FILE=" + bootstrapPath,
 		"AUDITOR_WITNESS_QUORUM_K=1",
-		"AUDITOR_ENFORCE_SCOPES=true",
-		"AUDITOR_REGISTRY_FILE=" + emptyRegistry,
 		"AUDITOR_PEERS=",
 		"AUDITOR_PEER_ALLOW_PLAINTEXT=true", // non-transport boot test: opt out of require-mTLS
 		"AUDITOR_MATERIALIZED_CACHE_DIR=" + cacheRoot,
@@ -445,10 +394,10 @@ func TestBoot_MaterializedCache_LoadedFromDisk(t *testing.T) {
 
 	out, exit := runAuditor(t, env, 10*time.Second)
 
-	// B3 refusal still fires; the cache log line MUST land BEFORE the
-	// fatal error.
+	// The dummy gossip-store dial fails after boot; the cache log line MUST
+	// land BEFORE that fatal (the cache loads early in the boot sequence).
 	if exit == 0 {
-		t.Fatalf("expected non-zero exit (B3 refusal still applies); got 0\nout: %s", out)
+		t.Fatalf("expected non-zero exit (dummy gossip DSN dial fails); got 0\nout: %s", out)
 	}
 	if !strings.Contains(out, "materialized cache loaded") {
 		t.Errorf("expected 'materialized cache loaded' in output; got:\n%s", out)
@@ -472,7 +421,6 @@ func TestBoot_MaterializedCache_LoadedFromDisk(t *testing.T) {
 // expected ErrNotExist.
 func TestBoot_MaterializedCache_ColdBoot(t *testing.T) {
 	bootstrapPath := writeFile(t, "bootstrap.json", minimalBootstrapDoc(t))
-	emptyRegistry := writeFile(t, "auditors.json", `[]`)
 	cacheRoot := t.TempDir()
 
 	env := []string{
@@ -480,8 +428,6 @@ func TestBoot_MaterializedCache_ColdBoot(t *testing.T) {
 		"AUDITOR_GOSSIP_DSN=postgres://dummy@localhost/dummy",
 		"AUDITOR_NETWORK_BOOTSTRAP_FILE=" + bootstrapPath,
 		"AUDITOR_WITNESS_QUORUM_K=1",
-		"AUDITOR_ENFORCE_SCOPES=true",
-		"AUDITOR_REGISTRY_FILE=" + emptyRegistry,
 		"AUDITOR_PEERS=",
 		"AUDITOR_PEER_ALLOW_PLAINTEXT=true", // non-transport boot test: opt out of require-mTLS
 		"AUDITOR_MATERIALIZED_CACHE_DIR=" + cacheRoot,
@@ -490,7 +436,7 @@ func TestBoot_MaterializedCache_ColdBoot(t *testing.T) {
 	out, exit := runAuditor(t, env, 10*time.Second)
 
 	if exit == 0 {
-		t.Fatalf("expected non-zero exit (B3 refusal still applies); got 0\nout: %s", out)
+		t.Fatalf("expected non-zero exit (dummy gossip DSN dial fails); got 0\nout: %s", out)
 	}
 	if !strings.Contains(out, "materialized cache empty (cold boot)") {
 		t.Errorf("expected 'materialized cache empty (cold boot)' in output; got:\n%s", out)
