@@ -220,6 +220,13 @@ type CheckpointLoop struct {
 	// the metric-scrape goroutine — hence atomic. lag = committed - published.
 	metricCommitted atomic.Uint64
 	metricPublished atomic.Uint64
+
+	// metricFrontierLag mirrors committed_seq − frontier_seq (the un-tiled gap ≈ the
+	// in-memory SMT node tail size in entries). Written from the loop goroutine each
+	// working cycle (including a hold, where it grows), read from the metric-scrape
+	// goroutine AND the sequencer's backpressure gate — hence atomic. This is the
+	// memory-bounding signal: if tiling stalls, this climbs and admission backs off.
+	metricFrontierLag atomic.Uint64
 }
 
 // HorizonLag returns committed head tree_size minus the published (witness-
@@ -234,6 +241,16 @@ func (l *CheckpointLoop) HorizonLag() int64 {
 		return 0
 	}
 	return int64(c - p)
+}
+
+// FrontierLag returns committed_seq − frontier_seq: the number of committed entries
+// whose SMT tiles are not yet durable — the un-tiled gap that lives in the in-memory
+// node tail. ~0 in steady state; a sustained climb means tiling (EmitDurable → object
+// store) is falling behind commit, so the tail is growing toward an OOM. It is the
+// gauge AND the sequencer's tail-backpressure trigger. Reads a cached value updated
+// each working cycle, so it is cheap and lock-free (safe to call from the drain gate).
+func (l *CheckpointLoop) FrontierLag() int64 {
+	return int64(l.metricFrontierLag.Load())
 }
 
 // NewCheckpointLoop wires the loop. interval <= 0 defaults to 1s. receipts may be
@@ -391,6 +408,13 @@ func (l *CheckpointLoop) CheckpointOnce(ctx context.Context) error {
 	fSeq, fRoot, err := l.frontier.ReadFrontier(ctx)
 	if err != nil {
 		return fmt.Errorf("checkpoint: read frontier: %w", err)
+	}
+	// Frontier-lag (un-tiled gap, in entries) for the gauge + the sequencer's
+	// tail-backpressure gate. Updated every working cycle, INCLUDING a hold (where cSeq
+	// advances but fSeq is frozen, so this climbs — exactly when admission must back
+	// off). The frontier never leads the commit cursor, so cSeq ≥ fSeq.
+	if cSeq >= fSeq {
+		l.metricFrontierLag.Store(cSeq - fSeq)
 	}
 	// fromRoot == cRoot is an empty delta, so pass the empty-hash sentinel to force
 	// a full (idempotent) BuildTiles of the committed subtree.
