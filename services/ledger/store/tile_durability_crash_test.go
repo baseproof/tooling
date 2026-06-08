@@ -11,7 +11,7 @@ package store
 //
 //   RED  — the watermark gate ("skip when committed == frontier", in both
 //          cmd/ledger/boot/wire/wire.go::recoverTailOnBoot and
-//          builder/tile_reconciler.go::ReconcileOnce) leaves the published root
+//          builder/checkpoint_loop.go::CheckpointOnce) leaves the published root
 //          with NO servable proof: smt.GenerateProofAt returns ErrUnknownRoot
 //          (the source of the live 500 {"anchored checkpoint root not present in
 //          node store"}).

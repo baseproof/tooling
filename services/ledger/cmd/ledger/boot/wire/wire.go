@@ -319,7 +319,7 @@ func Wire(ctx context.Context, cfg Config, d *deps.AppDeps) error {
 	// The CheckpointLoop is the single authoritative position of the log: it
 	// tiles the latest committed root durable, then cosigns + publishes THAT root
 	// as the horizon, lagging the commit cursor (builder/checkpoint_loop.go). It
-	// replaces both the legacy TileReconciler→HorizonPublisher seam AND the
+	// replaces both the legacy reconciler→publisher seam AND the
 	// builder's pre-commit cosign. Enabled when SMT tile emission is configured
 	// (the substrate the horizon is served from) — the same boundary the legacy
 	// reconciler used.
