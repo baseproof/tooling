@@ -59,10 +59,47 @@ func (g *realGather) FetchWitnessRotationChain(context.Context, uint64) ([]sdkbu
 	return nil, nil
 }
 
+// realFixture is a complete genesis-only network fixture built from real crypto:
+// the bootstrap doc + its derived ids, the n genesis witnesses, a real signed entry
+// committed in a real RFC-6962 tree + a real Jellyfish SMT, and the cosigned head
+// over both roots. It backs BOTH the offline fake-gather test (mustRealGather) and
+// the live-HTTP e2e (live_http_test.go serves these exact artifacts over the real
+// ledger read endpoints, so the libs HTTP gather is exercised end to end).
+type realFixture struct {
+	bdoc          *network.BootstrapDocument
+	canonical     []byte // bdoc.CanonicalBytes — what /v1/network/bootstrap serves
+	nid           cosign.NetworkID
+	networkDID    string // ids.DID — a non-empty log DID for the fetcher
+	bootstrapHash [32]byte
+	dids          []string // genesis witness DIDs
+	k             int      // quorum
+	entryBytes    []byte   // canonical wire bytes of the target entry
+	seq           uint64   // the entry's chronological position
+	smtKey        [32]byte // the entry's SMT key (the witnessed presence key)
+	smtRoot       [32]byte
+	head          types.CosignedTreeHead // cosigned by all n witnesses
+	inc           *types.MerkleProof
+	smtProof      *types.SMTProof
+	logTime       time.Time
+	trustRoots    map[cosign.NetworkID]protocol.GenesisTrustRoot
+}
+
 // mustRealGather assembles a genesis-only fixture with n witnesses and quorum k
 // (all n cosign), returning the gather, the genesis trust root, and the target
 // entry's sequence. It mirrors the SDK's own v2 fixture, using only public APIs.
 func mustRealGather(t *testing.T, n, k int) (*realGather, map[cosign.NetworkID]protocol.GenesisTrustRoot, uint64) {
+	fx := buildRealFixture(t, n, k)
+	g := &realGather{
+		bdoc: fx.bdoc, k: fx.k, entry: fx.entryBytes, logTime: fx.logTime,
+		head: fx.head, inc: *fx.inc, smt: *fx.smtProof,
+	}
+	return g, fx.trustRoots, fx.seq
+}
+
+// buildRealFixture assembles the genesis-only real-crypto fixture (n witnesses,
+// quorum k). Extracted from mustRealGather so the live-HTTP e2e can serve the same
+// artifacts; mirrors the SDK's own v2 fixture, using only public APIs.
+func buildRealFixture(t *testing.T, n, k int) *realFixture {
 	t.Helper()
 	ctx := context.Background()
 
@@ -183,14 +220,15 @@ func mustRealGather(t *testing.T, n, k int) (*realGather, map[cosign.NetworkID]p
 		head.Signatures = append(head.Signatures, wsig)
 	}
 
-	g := &realGather{
-		bdoc: bdoc, k: k, entry: entryBytes, logTime: time.Unix(1700000000, 0).UTC(),
-		head: head, inc: *merkleProof, smt: *smtProof,
-	}
 	trustRoots := map[cosign.NetworkID]protocol.GenesisTrustRoot{
 		nid: {NetworkID: nid, GenesisWitnessDIDs: append([]string(nil), dids...), QuorumK: k, BootstrapDocumentHash: bootstrapHash},
 	}
-	return g, trustRoots, pos
+	return &realFixture{
+		bdoc: bdoc, canonical: canonical, nid: nid, networkDID: ids.DID, bootstrapHash: bootstrapHash,
+		dids: dids, k: k, entryBytes: entryBytes, seq: pos, smtKey: leafKey, smtRoot: smtRoot,
+		head: head, inc: merkleProof, smtProof: smtProof,
+		logTime: time.Unix(1700000000, 0).UTC(), trustRoots: trustRoots,
+	}
 }
 
 // TestProofVerify_RealCryptoPositive proves the happy path end to end: a real
