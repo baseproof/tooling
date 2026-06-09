@@ -77,6 +77,7 @@ type realFixture struct {
 	seq           uint64   // the entry's chronological position
 	smtKey        [32]byte // the entry's SMT key (the witnessed presence key)
 	smtRoot       [32]byte
+	smtTree       *smt.Tree // the live tree, to serve membership/non-membership for ANY key
 	head          types.CosignedTreeHead // cosigned by all n witnesses
 	inc           *types.MerkleProof
 	smtProof      *types.SMTProof
@@ -226,7 +227,7 @@ func buildRealFixture(t *testing.T, n, k int) *realFixture {
 	return &realFixture{
 		bdoc: bdoc, canonical: canonical, nid: nid, networkDID: ids.DID, bootstrapHash: bootstrapHash,
 		dids: dids, k: k, entryBytes: entryBytes, seq: pos, smtKey: leafKey, smtRoot: smtRoot,
-		head: head, inc: merkleProof, smtProof: smtProof,
+		smtTree: smtTree, head: head, inc: merkleProof, smtProof: smtProof,
 		logTime: time.Unix(1700000000, 0).UTC(), trustRoots: trustRoots,
 	}
 }

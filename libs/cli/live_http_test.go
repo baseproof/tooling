@@ -29,6 +29,9 @@ import (
 
 	sdkbundle "github.com/baseproof/baseproof/log/bundle"
 	"github.com/baseproof/baseproof/types"
+
+	"github.com/baseproof/tooling/libs/clitools"
+	"github.com/baseproof/tooling/libs/networkbundle"
 )
 
 // startFixtureServer serves the gather's read endpoints from the fixture's real
@@ -70,10 +73,33 @@ func (fx *realFixture) startFixtureServer(t *testing.T) *httptest.Server {
 		})
 	})
 
-	// GET /v1/smt/proof/{key}?smt_root=hex — Jellyfish membership proof, anchored on
-	// the cosigned SMT root (fx.smtRoot == fx.head.SMTRoot).
-	mux.HandleFunc("GET /v1/smt/proof/{key}", func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(w, map[string]any{"type": "membership", "proof": fx.smtProof})
+	// GET /v1/smt/proof/{key}?smt_root=hex — a REAL Jellyfish proof for the requested
+	// key against the cosigned SMT root (fx.smtRoot == fx.head.SMTRoot): membership
+	// for a present key (the target entry), non-membership for any other key (the
+	// random keys VerifyHorizon samples). Generated live from the fixture's tree.
+	mux.HandleFunc("GET /v1/smt/proof/{key}", func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
+		raw, err := hex.DecodeString(r.PathValue("key"))
+		if err != nil || len(raw) != 32 {
+			http.Error(w, "bad key", http.StatusBadRequest)
+			return
+		}
+		var key [32]byte
+		copy(key[:], raw)
+		typ := "membership"
+		p, err := fx.smtTree.GenerateMembershipProof(ctx, key)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if p == nil { // absent key ⇒ non-membership
+			typ = "non_membership"
+			if p, err = fx.smtTree.GenerateNonMembershipProof(ctx, key); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+		}
+		writeJSON(w, map[string]any{"type": typ, "proof": p})
 	})
 
 	// GET /v1/receipt/proof/{seq} — genesis network asserts no receipt leg ⇒ null
@@ -169,4 +195,38 @@ func TestProof_LiveGatherOverHTTP(t *testing.T) {
 	if _, _, err := verifyProofFile(ctx, badPath, ""); err == nil {
 		t.Fatal("a tampered live proof verified — fail-closed broken")
 	}
+}
+
+// TestInfoVerify_HorizonOverHTTP exercises the verify-on-fetch core of `info
+// --verify` against the real cosigned horizon: it builds the network's witness set
+// the same way info does (networkbundle.Build) and runs clitools.VerifyHorizon over
+// real HTTP — K-of-N cosignature recompute on /v1/tree/horizon plus sampled
+// SMT proofs (non-membership for random keys) bound to the witnessed smt_root.
+func TestInfoVerify_HorizonOverHTTP(t *testing.T) {
+	ctx := context.Background()
+	fx := buildRealFixture(t, 3, 2)
+	srv := fx.startFixtureServer(t)
+
+	// The witness set, built exactly as info.go does (info.go:199).
+	nb, err := networkbundle.Build(fx.bdoc, srv.URL, fx.k, networkbundle.Vocabulary{})
+	if err != nil {
+		t.Fatalf("networkbundle.Build: %v", err)
+	}
+
+	hc := &http.Client{Timeout: 5 * time.Second}
+	hr, err := clitools.VerifyHorizon(ctx, srv.URL, nb.Witnesses, 6, hc)
+	if err != nil {
+		t.Fatalf("VerifyHorizon over real HTTP failed: %v", err)
+	}
+	if hr.ValidCosigs < hr.Quorum {
+		t.Fatalf("cosigs %d < quorum %d", hr.ValidCosigs, hr.Quorum)
+	}
+	if hr.ProofsOK != hr.ProofsTotal || hr.ProofsTotal != 6 {
+		t.Fatalf("sampled proofs %d/%d, want 6/6", hr.ProofsOK, hr.ProofsTotal)
+	}
+	if hr.SMTRoot != fx.smtRoot || hr.TreeSize != fx.head.TreeSize {
+		t.Fatalf("horizon anchor mismatch: smt_root/%x tree_size/%d", hr.SMTRoot[:8], hr.TreeSize)
+	}
+	t.Logf("horizon verified OVER HTTP: %d-of-%d cosigs, %d/%d sampled proofs against witnessed smt_root, tree_size=%d",
+		hr.ValidCosigs, hr.Quorum, hr.ProofsOK, hr.ProofsTotal, hr.TreeSize)
 }
