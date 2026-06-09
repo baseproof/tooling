@@ -36,7 +36,10 @@ func TestArchiveBackfill_WalksLadderWithCorrectRanges(t *testing.T) {
 	j := NewArchiveBackfillJob(
 		fakeLadder{sizes: []uint64{10, 25, 40}}, 1,
 		func(_ context.Context, size uint64) error { cps = append(cps, size); return nil },
-		func(_ context.Context, cover, from, to uint64) error { rcs = append(rcs, rng{cover, from, to}); return nil },
+		func(_ context.Context, cover, from, to uint64) error {
+			rcs = append(rcs, rng{cover, from, to})
+			return nil
+		},
 		func(_ context.Context) error { rotations++; return nil },
 		nil)
 
