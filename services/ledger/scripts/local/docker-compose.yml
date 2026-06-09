@@ -1,3 +1,14 @@
+# Minimal local-dev stack for the ledger daemon (cmd/ledger).
+#
+# Every var below is a CANONICAL LEDGER_* name the binary actually reads
+# (cmd/ledger/config.go) — the SAME contract the Helm chart sets, so one image is
+# configured identically here and in k8s. (The pre-fix file set BASEPROOF_* names
+# the daemon ignores, plus a `tessera-personality` service with no Dockerfile —
+# both removed: Tessera runs IN-PROCESS, there is no external tessera URL.)
+#
+# This is the SMALLEST runnable stack (postgres + ledger). For the full local
+# topology (object store, witnesses, bootstrap, mTLS) use docker-compose.e2e.yml
+# or docker-compose.integration.yml.
 services:
   postgres:
     image: postgres:18-alpine
@@ -15,41 +26,29 @@ services:
       timeout: 5s
       retries: 5
 
-  tessera-personality:
-    build:
-      context: ../../
-      dockerfile: tessera-personality/Dockerfile
-    command:
-      - "--storage_dir=/data"
-      - "--listen=:8081"
-    ports:
-      - "8081:8081"
-    volumes:
-      - tessera_data:/data
-    healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8081/healthz"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
-
   ledger:
     build:
       context: ../../
       dockerfile: scripts/local/Dockerfile
     environment:
-      - BASEPROOF_LOG_DID=did:baseproof:ledger:local:001
-      - BASEPROOF_POSTGRES_DSN=postgres://baseproof:baseproofpassword@postgres:5432/baseproof?sslmode=disable
-      - BASEPROOF_TESSERA_URL=http://tessera-personality:8081
-      - BASEPROOF_SERVER_ADDR=:8080
-      - LOG_LEVEL=debug
+      # Canonical LEDGER_* contract (cmd/ledger/config.go).
+      - LEDGER_LOG_DID=did:baseproof:ledger:local:001
+      - LEDGER_DATABASE_URL=postgres://baseproof:baseproofpassword@postgres:5432/baseproof?sslmode=disable
+      - LEDGER_ADDR=:8080
+      - LEDGER_LOG_LEVEL=debug
+      # Tessera + tiles are in-process on local POSIX dirs (the image creates and
+      # owns /var/lib/baseproof/* as uid 65532). No external tessera service.
+      - LEDGER_TILE_BACKEND=posix
+      # Certs/keys/bootstrap follow the standard injection convention: drop them
+      # at /etc/ledger/{tls,keys,bootstrap.json} (uncomment the mount) and the
+      # daemon picks them up with ZERO extra env. Plain HTTP when absent.
+      # volumes:
+      #   - ./.run/ledger:/etc/ledger:ro
     ports:
       - "8080:8080"
     depends_on:
       postgres:
         condition: service_healthy
-      tessera-personality:
-        condition: service_healthy
 
 volumes:
   postgres_data:
-  tessera_data:

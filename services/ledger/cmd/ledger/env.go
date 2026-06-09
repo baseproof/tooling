@@ -35,6 +35,27 @@ func envOr(key, fallback string) string {
 	return fallback
 }
 
+// resolveFile implements the orchestrator-agnostic cert/key/bootstrap
+// injection convention: an EXPLICITLY-configured path (the env var) always
+// wins — and, being explicit, is honored verbatim so a downstream open fails
+// loudly if it is missing. Otherwise, if a file exists at the conventional
+// mount path (stdPath), use it: a Secret/ConfigMap volume (k8s) or bind mount
+// (compose) dropped at /etc/ledger/... is picked up with ZERO env wiring.
+// Otherwise return "" — the feature stays unconfigured, byte-identical to the
+// pre-convention behavior (no env, no mount ⇒ off). The single stat is
+// boot-only.
+func resolveFile(envKey, stdPath string) string {
+	if v := strings.TrimSpace(os.Getenv(envKey)); v != "" {
+		return v
+	}
+	if stdPath != "" {
+		if info, err := os.Stat(stdPath); err == nil && !info.IsDir() {
+			return stdPath
+		}
+	}
+	return ""
+}
+
 // envIntOr reads an env var as a base-10 integer; returns fallback
 // if the var is unset or unparseable.
 func envIntOr(key string, fallback int) int {

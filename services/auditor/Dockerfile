@@ -69,7 +69,12 @@ RUN --mount=type=secret,id=ca_bundle \
       cat /run/secrets/ca_bundle >> /etc/ssl/certs/ca-certificates.crt; \
     fi; \
     apk --no-cache add ca-certificates tzdata wget \
-    && adduser -D -H -u 65532 auditor
+    && adduser -D -H -u 65532 auditor \
+    # Standard config-injection root; Secrets mounted at /etc/auditor/keys and
+    # /etc/auditor/bootstrap.json are auto-detected by the daemon. Pre-created +
+    # owned so subPath/dir mounts have a parent on a read-only rootfs.
+    && mkdir -p /etc/auditor/keys \
+    && chown -R 65532:65532 /etc/auditor
 
 WORKDIR /
 COPY --from=builder /auditor /auditor

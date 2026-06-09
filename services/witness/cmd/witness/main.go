@@ -52,6 +52,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -70,37 +71,70 @@ import (
 // -ldflags "-X main.version=<tag>". "dev" for un-stamped builds.
 var version = "dev"
 
+// envOr returns the env var value, or fallback when unset/blank. It makes every
+// flag below ALSO settable by a WITNESS_* env var, so a k8s ConfigMap/Secret
+// (envFrom) or a docker-compose `environment:` configures the witness identically
+// to the CLI — the same image runs anywhere. An explicit flag still wins, because
+// the flag default IS the env value (a passed flag overrides it).
+func envOr(key, fallback string) string {
+	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
+		return v
+	}
+	return fallback
+}
+
+// resolveFile implements the standard cert/key/bootstrap injection convention:
+// an explicit value (flag or WITNESS_* env) wins; otherwise, if a file exists at
+// the conventional mount path, use it (a Secret/volume dropped at /etc/witness/…
+// is picked up with zero flags/env); otherwise "" (byte-identical to the prior
+// behavior). The stat is boot-only.
+func resolveFile(explicit, stdPath string) string {
+	if explicit != "" {
+		return explicit
+	}
+	if stdPath != "" {
+		if info, err := os.Stat(stdPath); err == nil && !info.IsDir() {
+			return stdPath
+		}
+	}
+	return ""
+}
+
 func main() {
-	addr := flag.String("addr", ":8081",
-		"HTTP listen address (e.g., :8081)")
-	keyFile := flag.String("key-file", "",
-		"path to the witness private key in PEM form (required). secp256k1 "+
+	addr := flag.String("addr", envOr("WITNESS_ADDR", ":8081"),
+		"HTTP listen address (env: WITNESS_ADDR)")
+	keyFile := flag.String("key-file", os.Getenv("WITNESS_KEY_FILE"),
+		"path to the witness private key in PEM form (env: WITNESS_KEY_FILE; "+
+			"default /etc/witness/keys/witness.pem if mounted). secp256k1 "+
 			"(witkey) for -cosign-scheme=ecdsa; BLS12-381 (blskey) for "+
 			"-cosign-scheme=bls — the PEM type is checked, so a key of the "+
 			"wrong scheme fails loudly at boot.")
-	cosignScheme := flag.String("cosign-scheme", "ecdsa",
-		"witness cosignature scheme: ecdsa (secp256k1, the default; key is a "+
+	cosignScheme := flag.String("cosign-scheme", envOr("WITNESS_COSIGN_SCHEME", "ecdsa"),
+		"witness cosignature scheme (env: WITNESS_COSIGN_SCHEME): ecdsa (secp256k1, the default; key is a "+
 			"genesis did:key in the bootstrap) or bls (BLS12-381 G2; the witness "+
 			"is NOT a genesis did:key — it joins the verifying set on-log via the "+
 			"WitnessEndpointDeclaration emitted at boot, see -public-url).")
-	publicURL := flag.String("public-url", "",
-		"the witness's externally-reachable base https:// URL. Used only with "+
+	publicURL := flag.String("public-url", os.Getenv("WITNESS_PUBLIC_URL"),
+		"the witness's externally-reachable base https:// URL (env: WITNESS_PUBLIC_URL). Used only with "+
 			"-cosign-scheme=bls to build the on-log WitnessEndpointDeclaration "+
 			"(scheme/key/PoP) the daemon logs at boot for submission; consumers "+
 			"resolve this witness's BLS key by it. Ignored for ecdsa.")
-	bootstrapFile := flag.String("bootstrap", "",
-		"path to the network BootstrapDocument JSON (required, for NetworkID)")
-	cosignPurposes := flag.String("cosign-purposes", "tree-head",
-		"comma-separated cosign purposes this witness will sign: "+
+	bootstrapFile := flag.String("bootstrap", os.Getenv("WITNESS_BOOTSTRAP_FILE"),
+		"path to the network BootstrapDocument JSON (env: WITNESS_BOOTSTRAP_FILE; "+
+			"default /etc/witness/bootstrap.json if mounted), for NetworkID")
+	cosignPurposes := flag.String("cosign-purposes", envOr("WITNESS_COSIGN_PURPOSES", "tree-head"),
+		"comma-separated cosign purposes this witness will sign (env: WITNESS_COSIGN_PURPOSES): "+
 			"tree-head (default), rotation, escrow-override. Tree-head-only is "+
 			"the least-privilege default; widen to e.g. 'tree-head,rotation' only "+
 			"if this witness contributes its own witness-set rotation cosignature "+
 			"over /v1/cosign (in this ecosystem rotation is gossip-collected, so "+
 			"the default is correct).")
-	tlsCert := flag.String("tls-cert", "",
-		"path to the TLS certificate (PEM); enables HTTPS when set with -tls-key")
-	tlsKey := flag.String("tls-key", "",
-		"path to the TLS private key (PEM); required with -tls-cert")
+	tlsCert := flag.String("tls-cert", os.Getenv("WITNESS_TLS_CERT_FILE"),
+		"path to the TLS certificate, PEM (env: WITNESS_TLS_CERT_FILE; default "+
+			"/etc/witness/tls/tls.crt if mounted); enables HTTPS when set with -tls-key")
+	tlsKey := flag.String("tls-key", os.Getenv("WITNESS_TLS_KEY_FILE"),
+		"path to the TLS private key, PEM (env: WITNESS_TLS_KEY_FILE; default "+
+			"/etc/witness/tls/tls.key if mounted); required with -tls-cert")
 	maxRPS := flag.Float64("max-rps", 0,
 		"token-bucket rate limit for /v1/cosign in requests/sec; 0 disables")
 	burst := flag.Int("burst", 0,
@@ -114,6 +148,14 @@ func main() {
 		fmt.Println(version)
 		return
 	}
+
+	// Standard-path fallback (after parse, so an explicit flag/env still wins):
+	// a Secret/volume mounted at the conventional /etc/witness/… path is picked
+	// up with zero flags/env — the "drop the certs and it just works" convention.
+	*keyFile = resolveFile(*keyFile, "/etc/witness/keys/witness.pem")
+	*bootstrapFile = resolveFile(*bootstrapFile, "/etc/witness/bootstrap.json")
+	*tlsCert = resolveFile(*tlsCert, "/etc/witness/tls/tls.crt")
+	*tlsKey = resolveFile(*tlsKey, "/etc/witness/tls/tls.key")
 
 	if *keyFile == "" || *bootstrapFile == "" {
 		fmt.Fprintln(os.Stderr, "standalone-witness: -key-file and -bootstrap are required")

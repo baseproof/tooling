@@ -1,0 +1,42 @@
+{{/*
+Non-secret AUDITOR_* environment. Sourced via envFrom (deployment.yaml). The
+gossip DSN is NOT here — it is a Secret injected via secretKeyRef. The bootstrap
+doc, gossip signing key, and amendment manifest are NOT here either — they are
+mounted Secrets the binary auto-detects at the standard /etc/auditor paths.
+*/}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "auditor.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "auditor.labels" . | nindent 4 }}
+data:
+  AUDITOR_LISTEN_ADDR: {{ .Values.config.listenAddr | quote }}
+  {{- if .Values.config.witnessQuorumK }}
+  AUDITOR_WITNESS_QUORUM_K: {{ .Values.config.witnessQuorumK | quote }}
+  {{- end }}
+  {{- if .Values.config.peers }}
+  AUDITOR_PEERS: {{ .Values.config.peers | quote }}
+  {{- end }}
+  {{- if .Values.config.pollInterval }}
+  AUDITOR_POLL_INTERVAL: {{ .Values.config.pollInterval | quote }}
+  {{- end }}
+  {{- if .Values.config.equivocationScanInterval }}
+  AUDITOR_EQUIVOCATION_SCAN_INTERVAL: {{ .Values.config.equivocationScanInterval | quote }}
+  {{- end }}
+  {{- if .Values.config.horizonInterval }}
+  AUDITOR_HORIZON_INTERVAL: {{ .Values.config.horizonInterval | quote }}
+  {{- end }}
+  {{- if .Values.config.gossipRetentionDays }}
+  AUDITOR_GOSSIP_RETENTION_DAYS: {{ .Values.config.gossipRetentionDays | quote }}
+  {{- end }}
+  {{- if .Values.config.pruneInterval }}
+  AUDITOR_PRUNE_INTERVAL: {{ .Values.config.pruneInterval | quote }}
+  {{- end }}
+  {{- if .Values.config.otlpTracesEndpoint }}
+  AUDITOR_OTLP_TRACES_ENDPOINT: {{ .Values.config.otlpTracesEndpoint | quote }}
+  {{- end }}
+  {{- range $k, $v := .Values.extraEnv }}
+  {{ $k }}: {{ $v | quote }}
+  {{- end }}

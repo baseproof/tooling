@@ -213,6 +213,22 @@ signerKeys:
   tesseraSignerFile: "tessera-signer.pem"
   mountPath: "/etc/ledger/keys"
 
+# Server TLS + the shared network bootstrap, injected via the STANDARD mount-path
+# convention: when an existingSecret is set the chart mounts it at the path the
+# binary auto-detects (/etc/ledger/tls, /etc/ledger/bootstrap.json), so NO
+# *_FILE env is needed. Set tls.enabled=true alongside serverTLS so the probe
+# scheme flips to HTTPS.
+#
+# A kubernetes.io/tls Secret carries tls.crt + tls.key. To ALSO enforce inbound
+# mTLS, add a `client-ca.crt` key to the same Secret (the binary reads
+# /etc/ledger/tls/client-ca.crt — a dedicated name so a stray ca.crt never
+# silently turns on client-cert enforcement).
+serverTLS:
+  existingSecret: ""
+bootstrap:
+  existingSecret: ""
+  key: "bootstrap.json"
+
 # Prometheus Operator integration (CRDs must already be installed).
 serviceMonitor:
   enabled: false

@@ -142,6 +142,19 @@ spec:
               mountPath: {{ .Values.signerKeys.mountPath }}
               readOnly: true
             {{- end }}
+            {{- if .Values.serverTLS.existingSecret }}
+            # Standard path — the binary auto-detects /etc/ledger/tls/{tls.crt,
+            # tls.key[,client-ca.crt]}; no LEDGER_TLS_*_FILE env is set.
+            - name: server-tls
+              mountPath: /etc/ledger/tls
+              readOnly: true
+            {{- end }}
+            {{- if .Values.bootstrap.existingSecret }}
+            - name: bootstrap
+              mountPath: /etc/ledger/bootstrap.json
+              subPath: bootstrap.json
+              readOnly: true
+            {{- end }}
           {{- /* The probe scheme MUST match the listener. The ledger serves HTTPS
                  whenever TLS certs are set (wire.go ServeTLSWithListener), so an HTTP
                  probe against it fails the TLS handshake → liveness fails →
@@ -179,4 +192,17 @@ spec:
         - name: signer-keys
           secret:
             secretName: {{ .Values.signerKeys.existingSecret }}
+        {{- end }}
+        {{- if .Values.serverTLS.existingSecret }}
+        - name: server-tls
+          secret:
+            secretName: {{ .Values.serverTLS.existingSecret }}
+        {{- end }}
+        {{- if .Values.bootstrap.existingSecret }}
+        - name: bootstrap
+          secret:
+            secretName: {{ .Values.bootstrap.existingSecret }}
+            items:
+              - key: {{ .Values.bootstrap.key }}
+                path: bootstrap.json
         {{- end }}

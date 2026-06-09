@@ -77,7 +77,17 @@ RUN --mount=type=secret,id=ca_bundle \
     if [ -s /run/secrets/ca_bundle ]; then \
       cat /run/secrets/ca_bundle >> /etc/ssl/certs/ca-certificates.crt; \
     fi; \
-    apk --no-cache add ca-certificates tzdata wget
+    apk --no-cache add ca-certificates tzdata wget \
+    && adduser -D -H -u 65532 ledger \
+    # Data dirs (LEDGER_WAL_PATH / TESSERA_STORAGE_DIR / TESSERA_ANTISPAM_PATH
+    # defaults) and the standard config-injection root /etc/ledger, owned by the
+    # non-root uid so a PVC (k8s, via fsGroup) or bind mount (compose) is writable
+    # and mounted Secrets/ConfigMaps at /etc/ledger/{tls,keys,peer,bootstrap.json}
+    # are readable. No config is baked in — only the empty, correctly-owned dirs.
+    && mkdir -p /var/lib/baseproof/wal /var/lib/baseproof/tessera \
+                /var/lib/baseproof/tessera-antispam \
+                /etc/ledger/tls /etc/ledger/keys /etc/ledger/peer \
+    && chown -R 65532:65532 /var/lib/baseproof /etc/ledger
 
 WORKDIR /
 COPY --from=builder /ledger /ledger
@@ -120,5 +130,11 @@ HEALTHCHECK --interval=5s --timeout=3s --retries=10 --start-period=5s \
     CMD wget -q -T 2 -O- http://localhost:8080/healthz 2>/dev/null | grep -q '^ok$' \
         || wget -q -T 2 --no-check-certificate -O- https://localhost:8080/healthz 2>/dev/null | grep -q '^ok$' \
         || exit 1
+
+# Run non-root (uid 65532, the distroless "nonroot" id) — matches witness /
+# auditor / aggregator, and satisfies a k8s runAsNonRoot PodSecurityContext. The
+# data dirs + /etc/ledger were chown'd to 65532 above; mounted Secrets/PVCs must
+# be readable/writable by this uid (k8s: fsGroup; compose: a matching mount).
+USER 65532:65532
 
 ENTRYPOINT ["/ledger"]

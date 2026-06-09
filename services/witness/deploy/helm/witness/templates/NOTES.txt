@@ -1,0 +1,14 @@
+Witness {{ .Chart.AppVersion }} deployed as {{ include "witness.fullname" . }}.
+
+Cosign scheme : {{ .Values.config.cosignScheme }}
+TLS           : {{ ternary "HTTPS" "plain HTTP (terminate at a proxy/mesh)" .Values.tls.enabled }}
+Listen        : {{ .Values.config.addr }}  (Service {{ include "witness.fullname" . }}:{{ .Values.service.port }})
+
+Injected at the standard paths (auto-detected, no env):
+  /etc/witness/keys/witness.pem   ← Secret {{ .Values.signingKey.existingSecret }}
+  /etc/witness/bootstrap.json     ← Secret {{ .Values.bootstrap.existingSecret }}
+{{- if .Values.serverTLS.existingSecret }}
+  /etc/witness/tls/{tls.crt,tls.key} ← Secret {{ .Values.serverTLS.existingSecret }}
+{{- end }}
+
+Liveness: GET /healthz on the {{ ternary "https" "http" .Values.tls.enabled }} listener.

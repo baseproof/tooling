@@ -1,0 +1,110 @@
+{{- include "witness.validate" . -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "witness.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "witness.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicas }}
+  selector:
+    matchLabels:
+      {{- include "witness.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "witness.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        # Roll the pod when non-secret env changes.
+        checksum/configmap: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "witness.serviceAccountName" . }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: witness
+          image: "{{ .Values.image.repository }}:{{ default .Chart.AppVersion .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- with .Values.extraArgs }}
+          args:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.container.port }}
+          envFrom:
+            - configMapRef:
+                name: {{ include "witness.fullname" . }}
+          {{- with .Values.container.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- $scheme := ternary "HTTPS" "HTTP" .Values.tls.enabled }}
+          livenessProbe:
+            {{- $live := deepCopy .Values.container.livenessProbe }}
+            {{- $_ := set $live.httpGet "scheme" $scheme }}
+            {{- toYaml $live | nindent 12 }}
+          readinessProbe:
+            {{- $ready := deepCopy .Values.container.readinessProbe }}
+            {{- $_ := set $ready.httpGet "scheme" $scheme }}
+            {{- toYaml $ready | nindent 12 }}
+          resources:
+            {{- toYaml .Values.container.resources | nindent 12 }}
+          volumeMounts:
+            # Standard cert/key/bootstrap mount paths — the binary auto-detects
+            # these, so NO *_FILE env is set (the orchestrator-agnostic convention).
+            - name: signing-key
+              mountPath: /etc/witness/keys
+              readOnly: true
+            - name: bootstrap
+              mountPath: /etc/witness/bootstrap.json
+              subPath: bootstrap.json
+              readOnly: true
+            {{- if .Values.serverTLS.existingSecret }}
+            - name: server-tls
+              mountPath: /etc/witness/tls
+              readOnly: true
+            {{- end }}
+      volumes:
+        - name: signing-key
+          secret:
+            secretName: {{ .Values.signingKey.existingSecret }}
+            items:
+              - key: {{ .Values.signingKey.key }}
+                path: witness.pem
+        - name: bootstrap
+          secret:
+            secretName: {{ .Values.bootstrap.existingSecret }}
+            items:
+              - key: {{ .Values.bootstrap.key }}
+                path: bootstrap.json
+        {{- if .Values.serverTLS.existingSecret }}
+        - name: server-tls
+          secret:
+            secretName: {{ .Values.serverTLS.existingSecret }}
+        {{- end }}
