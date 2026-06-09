@@ -56,7 +56,13 @@ func (c *Committer) GCBelowRetention(ctx context.Context) (int, error) {
 	cutoff := hwm - c.cfg.RetentionBuffer // delete shipped seqs in [1, cutoff]
 
 	reclaimed := 0
-	fromSeq := uint64(0)
+	// INCREMENTAL: resume from the last reclaim cursor, not 0. Everything below
+	// gcResumeSeq is already shipped-and-deleted, so re-walking it each cycle only
+	// re-skips tombstones across the LSM — O(history) work that tapers throughput.
+	// Resuming makes each pass scan only the newly-aged [gcResumeSeq, cutoff] range,
+	// i.e. ~O(RetentionBuffer) regardless of total history. (Seek tolerates a
+	// gcResumeSeq whose own key was already deleted — it lands on the next live key.)
+	fromSeq := c.gcResumeSeq
 	for {
 		if err := ctx.Err(); err != nil {
 			return reclaimed, err
@@ -74,6 +80,11 @@ func (c *Committer) GCBelowRetention(ctx context.Context) (int, error) {
 		reclaimed += len(batch)
 		fromSeq = nextSeq
 	}
+	// The full [gcResumeSeq, cutoff] range is now processed (all shipped seqs ≤
+	// cutoff deleted); advance the cursor so the next pass starts above it. Only on
+	// a clean completion — an early ctx/error return above leaves the cursor put,
+	// so the next pass safely (idempotently) redoes the bounded partial range.
+	c.gcResumeSeq = cutoff
 
 	// Reclaim freed space: RunValueLogGC rewrites one log file when >= ratio of it is
 	// stale, returning ErrNoRewrite when there is nothing left. Bounded passes.

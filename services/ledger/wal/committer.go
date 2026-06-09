@@ -127,6 +127,17 @@ type Committer struct {
 	// observe-site, not the data, and matches the sequencer's
 	// tesseraLatency pattern.
 	submitLatency *latency.Histogram
+
+	// gcResumeSeq is the retention-GC's incremental scan cursor: the highest seq
+	// below which everything has already been reclaimed, so the next GC pass seeks
+	// from here instead of re-walking seq_index from 0 (which re-skips every
+	// accumulated tombstone across the LSM each cycle — O(history) work that tapers
+	// throughput at scale). Touched only by GCBelowRetention on the single GC
+	// scheduler goroutine. In-memory: a restart re-derives it with one full scan,
+	// then resumes incrementally. Everything below it is shipped-and-deleted (the
+	// cutoff never exceeds the contiguous shipped HWM), so resuming never strands
+	// an entry.
+	gcResumeSeq uint64
 }
 
 // submission is a per-Submit record handed to the commit goroutine.
