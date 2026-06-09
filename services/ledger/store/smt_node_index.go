@@ -129,3 +129,64 @@ var (
 	_ smt.NodeIndex  = (*PGNodeIndex)(nil)
 	_ NodeIndexStore = (*PGNodeIndex)(nil)
 )
+
+// tileLister is the minimal surface BackfillNodeIndex needs: enumerate every
+// durable tile id and fetch its bytes. The Posix and S3 tile stores satisfy it.
+type tileLister interface {
+	SMTTileLister
+	Fetch(ctx context.Context, id [32]byte) ([]byte, error)
+}
+
+// BackfillNodeIndex rebuilds the durable node index from the durable tile set —
+// the DB-loss / fresh-index recovery path the index is otherwise filled forward
+// from at emit time. For every tile it records node→owning-top for each interior.
+//
+// O(tiles): it reads the checkpoint-attested tiles, NOT a replay of entry history
+// — the index is fully derivable from the tiles the cosigned checkpoints already
+// pin, so there is no need to "walk from year 0". Idempotent (PutNodes is ON
+// CONFLICT DO NOTHING), so it is safe to re-run and to run alongside a live
+// emitter. flushEvery bounds the in-flight batch (<=0 ⇒ the default chunk).
+// Returns (tilesScanned, interiorsIndexed).
+func BackfillNodeIndex(ctx context.Context, tiles tileLister, index NodeIndexStore, flushEvery int) (int, int, error) {
+	if flushEvery <= 0 {
+		flushEvery = nodeIndexPutChunk
+	}
+	var buf []NodeIndexEntry
+	var nTiles, nNodes int
+	flush := func() error {
+		if len(buf) == 0 {
+			return nil
+		}
+		if err := index.PutNodes(ctx, buf); err != nil {
+			return err
+		}
+		buf = buf[:0]
+		return nil
+	}
+	err := tiles.ListTiles(ctx, func(top [32]byte) error {
+		raw, ferr := tiles.Fetch(ctx, top)
+		if ferr != nil {
+			return fmt.Errorf("store/node-index backfill: fetch tile %x: %w", top[:6], ferr)
+		}
+		tile, derr := smt.DecodeTile(raw)
+		if derr != nil {
+			return fmt.Errorf("store/node-index backfill: decode tile %x: %w", top[:6], derr)
+		}
+		nTiles++
+		for i := range tile.Nodes {
+			h := smt.HashNode(tile.Nodes[i])
+			if h != top { // interiors only; tops resolve by direct fetch
+				buf = append(buf, NodeIndexEntry{Node: h, Top: top})
+				nNodes++
+			}
+		}
+		if len(buf) >= flushEvery {
+			return flush()
+		}
+		return nil
+	})
+	if err != nil {
+		return nTiles, nNodes, err
+	}
+	return nTiles, nNodes, flush()
+}

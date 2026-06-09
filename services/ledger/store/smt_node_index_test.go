@@ -113,6 +113,69 @@ func TestBuildTilesEmitter_PopulatesNodeIndex_ResolvesInterior(t *testing.T) {
 	}
 }
 
+// TestBackfillNodeIndex_RebuildsFromTilesAlone is the recovery path: tiles exist
+// but the index is empty (DB-loss / fresh index). A scan of the durable tiles —
+// no entry replay, no tree walk from genesis — rebuilds the complete index, and
+// every interior then resolves through it. Re-running is a no-op (idempotent).
+func TestBackfillNodeIndex_RebuildsFromTilesAlone(t *testing.T) {
+	ctx := context.Background()
+	tailed := NewTailedNodeStore(smt.NewInMemoryNodeStore())
+	tree := smt.NewTree(smt.NewInMemoryLeafStore(), tailed)
+	for i := 0; i < 64; i++ {
+		k := key3band(i)
+		if err := tree.SetLeaf(ctx, k, types.SMTLeaf{
+			Key: k, OriginTip: types.LogPosition{LogDID: "did:test", Sequence: uint64(i + 1)},
+		}); err != nil {
+			t.Fatalf("SetLeaf %d: %v", i, err)
+		}
+	}
+	root, err := tree.Root(ctx)
+	if err != nil {
+		t.Fatalf("root: %v", err)
+	}
+	// Emit tiles WITHOUT an index attached — simulating tiles that predate it.
+	tiles := NewMemSMTTileStore()
+	if _, err := NewBuildTilesEmitter(tailed, tiles).EmitDurable(ctx, smt.EmptyHash, root, 64); err != nil {
+		t.Fatalf("EmitDurable: %v", err)
+	}
+
+	// Rebuild the index purely by scanning the durable tiles.
+	idx := newMemNodeIndex()
+	nTiles, nNodes, err := BackfillNodeIndex(ctx, tiles, idx, 0)
+	if err != nil {
+		t.Fatalf("BackfillNodeIndex: %v", err)
+	}
+	if nTiles == 0 || nNodes == 0 || idx.len() != nNodes {
+		t.Fatalf("backfill scanned %d tiles, indexed %d nodes, index has %d — want >0 and equal", nTiles, nNodes, idx.len())
+	}
+
+	// An interior unresolvable from tiles alone now resolves through the backfilled index.
+	var interior [32]byte
+	idx.mu.Lock()
+	for n := range idx.m {
+		interior = n
+		break
+	}
+	idx.mu.Unlock()
+	if n, _ := smt.NewTiledNodeStore(ctx, tiles, nil).Get(interior); n != nil {
+		t.Fatalf("node %x resolvable WITHOUT index — not an interior", interior[:6])
+	}
+	ts := smt.NewTiledNodeStore(ctx, tiles, nil)
+	ts.SetNodeIndex(idx)
+	if n, err := ts.Get(interior); err != nil || n == nil || smt.HashNode(n) != interior {
+		t.Fatalf("backfilled index did not resolve interior %x (nil=%v, err=%v)", interior[:6], n == nil, err)
+	}
+
+	// Idempotent re-run.
+	before := idx.len()
+	if _, _, err := BackfillNodeIndex(ctx, tiles, idx, 0); err != nil {
+		t.Fatalf("re-backfill: %v", err)
+	}
+	if idx.len() != before {
+		t.Fatalf("re-backfill changed index size %d → %d", before, idx.len())
+	}
+}
+
 // TestPGNodeIndex_RoundTrip exercises the durable index against a real Postgres
 // schema (skips without BASEPROOF_TEST_DSN): put/lookup, an unknown-node miss, and
 // the first-writer-wins idempotency that makes re-emit safe.

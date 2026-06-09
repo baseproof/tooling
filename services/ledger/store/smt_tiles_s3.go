@@ -29,6 +29,7 @@ package store
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 
 	"github.com/baseproof/baseproof/core/smt"
@@ -91,3 +92,29 @@ func (s *S3SMTTileStore) Fetch(ctx context.Context, id [32]byte) ([]byte, error)
 func (s *S3SMTTileStore) Exists(ctx context.Context, id [32]byte) (bool, error) {
 	return s.obj.HeadObject(ctx, smt.TilePath(id))
 }
+
+// objectLister is the OPTIONAL enumeration surface ListTiles needs (kept separate
+// from objectPutGetter so the Put/Get/Head fakes are unaffected). *bytestore.S3
+// satisfies it via ListObjectsV2.
+type objectLister interface {
+	ListObjects(ctx context.Context, prefix string, fn func(key string) error) error
+}
+
+// ListTiles enumerates every durable tile id by listing the content-addressed
+// smt/tile/ keyspace and parsing each key's trailing hash. Implements
+// SMTTileLister; returns an error if the backing object store cannot list.
+func (s *S3SMTTileStore) ListTiles(ctx context.Context, fn func(id [32]byte) error) error {
+	l, ok := s.obj.(objectLister)
+	if !ok {
+		return fmt.Errorf("store/smt_tiles_s3: backing object store does not support listing")
+	}
+	return l.ListObjects(ctx, "smt/tile/", func(key string) error {
+		if id, ok := tileIDFromKey(key); ok {
+			return fn(id)
+		}
+		return nil
+	})
+}
+
+// Compile-time proof the S3 store can be enumerated for the node-index backfill.
+var _ SMTTileLister = (*S3SMTTileStore)(nil)

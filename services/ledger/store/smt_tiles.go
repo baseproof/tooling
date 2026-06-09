@@ -27,8 +27,10 @@ package store
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -119,11 +121,41 @@ type SMTTileStore interface {
 	Exists(ctx context.Context, id [32]byte) (bool, error)
 }
 
-// Compile-time proof the store is usable as an smt.TileFetcher.
+// SMTTileLister enumerates the id (top hash) of every durable tile. It is the
+// optional capability the node-index backfill needs to rebuild the index from the
+// durable tile set (the DB-loss / fresh-index recovery path) — O(tiles), reading
+// the checkpoint-attested tiles rather than replaying entry history. fn returning
+// an error aborts the scan. All three tile stores implement it.
+type SMTTileLister interface {
+	ListTiles(ctx context.Context, fn func(id [32]byte) error) error
+}
+
+// Compile-time proof the store is usable as an smt.TileFetcher + lister.
 var (
 	_ smt.TileFetcher = (*MemSMTTileStore)(nil)
 	_ smt.TileFetcher = (*PosixSMTTileStore)(nil)
+	_ SMTTileLister   = (*MemSMTTileStore)(nil)
+	_ SMTTileLister   = (*PosixSMTTileStore)(nil)
 )
+
+// tileIDFromKey parses a tile's 32-byte id from the trailing 64-hex segment of an
+// object key or filesystem path (smt.TilePath's …/<aa>/<bb>/<64-hex> layout).
+// ok=false for any key whose last segment is not a 32-byte hex hash (so unrelated
+// objects under the prefix are skipped, not misread).
+func tileIDFromKey(key string) ([32]byte, bool) {
+	key = filepath.ToSlash(key)
+	last := key[strings.LastIndex(key, "/")+1:]
+	if len(last) != 64 {
+		return [32]byte{}, false
+	}
+	raw, err := hex.DecodeString(last)
+	if err != nil || len(raw) != 32 {
+		return [32]byte{}, false
+	}
+	var id [32]byte
+	copy(id[:], raw)
+	return id, true
+}
 
 // TilesCoverRoot reports whether the SMT structure rooted at `root` is ACTUALLY
 // readable from the tile store — the true "tiles durable" signal. The
@@ -200,6 +232,23 @@ func (s *MemSMTTileStore) Len() int {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return len(s.m)
+}
+
+// ListTiles calls fn for each resident tile id. Ids are snapshotted under the
+// lock and fn is invoked OUTSIDE it (fn may be slow, e.g. a PG write).
+func (s *MemSMTTileStore) ListTiles(_ context.Context, fn func(id [32]byte) error) error {
+	s.mu.RLock()
+	ids := make([][32]byte, 0, len(s.m))
+	for id := range s.m {
+		ids = append(ids, id)
+	}
+	s.mu.RUnlock()
+	for _, id := range ids {
+		if err := fn(id); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // PosixSMTTileStore is a filesystem tile store using the canonical
@@ -282,4 +331,30 @@ func (s *PosixSMTTileStore) Fetch(_ context.Context, id [32]byte) ([]byte, error
 		return nil, fmt.Errorf("store/smt_tiles: read: %w", err)
 	}
 	return b, nil
+}
+
+// ListTiles walks <root>/smt/tile/ and calls fn for each tile file's id (parsed
+// from its content-hash filename). A missing tile tree (nothing emitted yet) is
+// not an error — the scan is simply empty.
+func (s *PosixSMTTileStore) ListTiles(_ context.Context, fn func(id [32]byte) error) error {
+	base := filepath.Join(s.root, "smt", "tile")
+	err := filepath.WalkDir(base, func(path string, d fs.DirEntry, werr error) error {
+		if werr != nil {
+			if errors.Is(werr, os.ErrNotExist) {
+				return nil // no tiles emitted yet
+			}
+			return werr
+		}
+		if d.IsDir() {
+			return nil
+		}
+		if id, ok := tileIDFromKey(path); ok {
+			return fn(id)
+		}
+		return nil // skip temp files / non-tile entries
+	})
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	return err
 }
