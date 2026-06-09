@@ -83,6 +83,51 @@ func overwriteFormat(t *testing.T, path, format string) error {
 	return os.WriteFile(path, out, 0o644)
 }
 
+// TestClientBundle_MessagesAndFederation covers the self-describing sections: the
+// accepted-message set is validated against the foundational catalog, schemas +
+// federation parse, an unconstrained bundle accepts anything, and bad inputs are
+// rejected at load.
+func TestClientBundle_MessagesAndFederation(t *testing.T) {
+	nid := strings.Repeat("ab", 32)
+	fed := strings.Repeat("cd", 32)
+
+	path := writeBundle(t, ClientBundle{
+		NetworkID: nid, Endpoint: "https://l:8443", LogDID: "did:web:x", QuorumK: 2,
+		Messages:   []string{"entity", "amendment", "delegation", "schema"},
+		Schemas:    map[string]uint64{"signature_policy": 42},
+		Federation: []FederatedNet{{Name: "peer", NetworkID: fed, Endpoint: "https://p:8443"}},
+	})
+	b, err := LoadClientBundle(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if !b.AcceptsMessage("entity") || b.AcceptsMessage("mirror") {
+		t.Errorf("AcceptsMessage wrong: entity=%v mirror=%v", b.AcceptsMessage("entity"), b.AcceptsMessage("mirror"))
+	}
+	if b.Schemas["signature_policy"] != 42 || len(b.Federation) != 1 || b.Federation[0].Name != "peer" {
+		t.Errorf("messages/schemas/federation not parsed: %+v", b)
+	}
+
+	// No messages list ⇒ unconstrained (accepts anything).
+	open := writeBundle(t, ClientBundle{NetworkID: nid, Endpoint: "https://x"})
+	ob, _ := LoadClientBundle(open)
+	if !ob.AcceptsMessage("anything") {
+		t.Error("a bundle with no messages list must not constrain")
+	}
+
+	// An unknown message name is rejected at load (catalog-validated).
+	badMsg := writeBundle(t, ClientBundle{NetworkID: nid, Endpoint: "https://x", Messages: []string{"entity", "not-a-real-structure"}})
+	if _, err := LoadClientBundle(badMsg); err == nil {
+		t.Error("expected unknown-message rejection")
+	}
+
+	// A malformed federation network_id is rejected at load.
+	badFed := writeBundle(t, ClientBundle{NetworkID: nid, Endpoint: "https://x", Federation: []FederatedNet{{Name: "p", NetworkID: "xyz"}}})
+	if _, err := LoadClientBundle(badFed); err == nil {
+		t.Error("expected bad-federation-id rejection")
+	}
+}
+
 // fakeLedger is a minimal in-memory ledger: accept entry → assign monotonic
 // sequence → answer hash→sequence lookups.
 func fakeLedger() *httptest.Server {

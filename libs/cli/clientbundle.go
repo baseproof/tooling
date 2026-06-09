@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/baseproof/tooling/libs/clienttls"
+	"github.com/baseproof/tooling/libs/messages"
 )
 
 // ClientBundleFormat tags the artifact so a reader rejects an unknown vintage.
@@ -50,6 +51,25 @@ type ClientBundle struct {
 	BootstrapHash string    `json:"bootstrap_document_hash,omitempty"` // 64-hex genesis pin
 	Transport     Transport `json:"transport"`
 	Admission     Admission `json:"admission,omitempty"`
+
+	// Messages is the set of foundational message structures this network admits
+	// (canonical names from libs/messages). Empty ⇒ unconstrained. A client checks
+	// AcceptsMessage before submitting; `info` prints the set so an operator can
+	// see "what can I say to this network".
+	Messages []string `json:"messages,omitempty"`
+	// Schemas maps a governance/vocabulary section name to the sequence on THIS
+	// network's log where its schema lives — the per-network payload vocabulary.
+	Schemas map[string]uint64 `json:"schemas,omitempty"`
+	// Federation lists the networks this one cites (cross-log anchors), so a
+	// client can see the whole federation, not just one log.
+	Federation []FederatedNet `json:"federation,omitempty"`
+}
+
+// FederatedNet names a network cited by this one in the federation.
+type FederatedNet struct {
+	Name      string `json:"name,omitempty"`
+	NetworkID string `json:"network_id"`         // 64-hex
+	Endpoint  string `json:"endpoint,omitempty"` // optional ledger base URL
 }
 
 // LoadClientBundle reads and validates a client bundle JSON file.
@@ -78,7 +98,40 @@ func (b *ClientBundle) validate() error {
 	if b.Endpoint == "" {
 		return fmt.Errorf("client bundle: endpoint is required")
 	}
+	if bad := messages.Unknown(b.Messages); len(bad) > 0 {
+		return fmt.Errorf("client bundle: unknown message structure(s) %v — not in the foundational catalog", bad)
+	}
+	for i, f := range b.Federation {
+		if _, err := hexID(f.NetworkID); err != nil {
+			return fmt.Errorf("client bundle: federation[%d] (%q) network_id %w", i, f.Name, err)
+		}
+	}
 	return nil
+}
+
+// hexID decodes a 64-hex (32-byte) identifier.
+func hexID(s string) ([32]byte, error) {
+	var id [32]byte
+	raw, err := hex.DecodeString(s)
+	if err != nil || len(raw) != 32 {
+		return id, fmt.Errorf("must be 64 hex chars (32 bytes), got %q", s)
+	}
+	copy(id[:], raw)
+	return id, nil
+}
+
+// AcceptsMessage reports whether the network admits the named foundational
+// structure. A bundle with no Messages list does not constrain (returns true).
+func (b *ClientBundle) AcceptsMessage(name string) bool {
+	if len(b.Messages) == 0 {
+		return true
+	}
+	for _, m := range b.Messages {
+		if m == name {
+			return true
+		}
+	}
+	return false
 }
 
 // RequireLogDID returns the destination log DID or an error naming what the
@@ -93,12 +146,10 @@ func (b *ClientBundle) RequireLogDID() (string, error) {
 // NetworkID32 decodes the 64-hex NetworkID. Required for proof verification (the
 // resolver + the verify-time pin).
 func (b *ClientBundle) NetworkID32() ([32]byte, error) {
-	var id [32]byte
-	raw, err := hex.DecodeString(b.NetworkID)
-	if err != nil || len(raw) != 32 {
-		return id, fmt.Errorf("client bundle: network_id must be 64 hex chars (32 bytes), got %q", b.NetworkID)
+	id, err := hexID(b.NetworkID)
+	if err != nil {
+		return id, fmt.Errorf("client bundle: network_id %w", err)
 	}
-	copy(id[:], raw)
 	return id, nil
 }
 
