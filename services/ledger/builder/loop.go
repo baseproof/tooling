@@ -68,6 +68,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"runtime"
 	"sync/atomic"
 	"time"
@@ -697,6 +698,13 @@ func (bl *BuilderLoop) processBatch(ctx context.Context) (int, error) {
 	// reachable set is exactly the final-tree delta — every node the committed root
 	// references for a servable proof, and nothing else.
 	dirtyNodes := overlayNodes.ReachableMutations(newRoot)
+	// DIAGNOSTIC (LEDGER_COMMIT_ALL_NODES=1): commit the FULL overlay delta instead of
+	// the reachable subset — reintroduces the orphan leak, but isolates whether
+	// ReachableMutations is dropping nodes the committed root still references (if the
+	// leaf-loss vanishes under this, ReachableMutations is the dropper).
+	if os.Getenv("LEDGER_COMMIT_ALL_NODES") != "" {
+		dirtyNodes = overlayNodes.Mutations()
+	}
 
 	// Pre-build the leaf slice and node slice OUTSIDE the atomic tx
 	// so the tx's wire critical section is as short as possible (a
@@ -708,6 +716,54 @@ func (bl *BuilderLoop) processBatch(ctx context.Context) (int, error) {
 	nodesToWrite := make([]smt.Node, 0, len(dirtyNodes))
 	for _, n := range dirtyNodes {
 		nodesToWrite = append(nodesToWrite, n)
+	}
+
+	// BATCH DUMP + COMMIT-INTEGRITY (LEDGER_TRACE_COMMIT=1). One structured line per
+	// batch showing the FULL lifecycle transition (entries in → SMT classification →
+	// leaves/nodes to commit → root), plus a self-consistency check of the root we are
+	// about to commit: a committed dirty node may reference a child that is neither in
+	// this batch's delta nor durable in the backing store — i.e. the root references a
+	// node we did NOT persist. That is the leaf-loss SOURCE (a later batch's SetLeaves
+	// then faults "missing node (referenced by ancestor)"); this names the node + the
+	// seq range at the source, before the cascade. O(delta), debug-gated.
+	if os.Getenv("LEDGER_TRACE_COMMIT") != "" {
+		unresolvable, sample := 0, ""
+		for _, n := range dirtyNodes {
+			bn, isBranch := n.(*smt.BranchNode)
+			if !isBranch {
+				continue
+			}
+			for _, ch := range [][32]byte{bn.LeftHash, bn.RightHash} {
+				if ch == smt.EmptyHash {
+					continue
+				}
+				if _, inDelta := dirtyNodes[ch]; inDelta {
+					continue
+				}
+				if got, _ := bl.nodeStore.Get(ch); got == nil {
+					unresolvable++
+					if sample == "" {
+						sample = fmt.Sprintf("%x", ch[:8])
+					}
+				}
+			}
+		}
+		first, last := uint64(0), uint64(0)
+		if len(positions) > 0 {
+			first, last = positions[0].Sequence, positions[len(positions)-1].Sequence
+		}
+		bl.logger.Info("batch-dump",
+			"seqs", fmt.Sprintf("%d..%d", first, last), "entries", len(entries),
+			"new_leaf", result.NewLeafCounts, "path_a", result.PathACounts, "path_b", result.PathBCounts,
+			"path_c", result.PathCCounts, "commentary", result.CommentaryCounts,
+			"path_d", result.PathDCounts, "rejected", len(result.RejectedPositions),
+			"leaves_to_write", len(leavesToWrite), "nodes_to_write", len(nodesToWrite),
+			"root", fmt.Sprintf("%x", newRoot[:8]), "unresolvable_boundary_nodes", unresolvable)
+		if unresolvable > 0 {
+			bl.logger.Error("batch-dump: committed root NOT fully resolvable — LEAF-LOSS SOURCE (committed a root referencing a node not persisted)",
+				"unresolvable", unresolvable, "sample_node", sample,
+				"seqs", fmt.Sprintf("%d..%d", first, last))
+		}
 	}
 
 	// ── Step 8: Atomic commit ───────────────────────────────────
