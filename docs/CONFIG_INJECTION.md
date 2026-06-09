@@ -113,7 +113,7 @@ Set the `*_*` env and bind-mount the cert dir at the standard path:
 ```yaml
 services:
   witness:
-    image: ghcr.io/baseproof/tooling/witness:0.1.5
+    image: ghcr.io/baseproof/tooling/witness:0.1.6
     environment:
       WITNESS_ADDR: ":8081"
       WITNESS_COSIGN_SCHEME: "ecdsa"
