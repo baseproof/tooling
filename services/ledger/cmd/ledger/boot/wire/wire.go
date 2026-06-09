@@ -342,10 +342,18 @@ func Wire(ctx context.Context, cfg Config, d *deps.AppDeps) error {
 			}
 			checkpointPub = tessera.NewShippingPublisher(checkpointPub, shipper)
 		}
+		emitter := store.NewBuildTilesEmitter(d.NodeStore, smtTileStore(d.ByteStore, tileDir))
+		if nodeIndexEnabled() {
+			// The SAME durable node index as the builder read-through: the emitter
+			// both POPULATES it (every interior it makes durable, before the tail is
+			// pruned) and consults it on its per-emit read-through — closing the
+			// emitter face of the leaf-loss fault.
+			emitter.SetNodeIndex(store.NewPGNodeIndex(ctx, d.PgPool.DB))
+		}
 		checkpointLoop = builder.NewCheckpointLoop(
 			store.NewSMTCommitCursor(store.NewSMTRootStateStore(d.PgPool.DB)),
 			store.NewPgTileFrontier(d.PgPool.DB),
-			store.NewBuildTilesEmitter(d.NodeStore, smtTileStore(d.ByteStore, tileDir)),
+			emitter,
 			tesseraAdapter, // CheckpointRooter — RootAtSize from durable Merkle tiles
 			checkpointPub,  // CheckpointPublisher — POSIX (tessera) or shared S3
 			cosigner,       // WitnessCosigner — K-of-N over the durable head
@@ -561,13 +569,35 @@ func composeStores(ctx context.Context, cfg Config, d *deps.AppDeps) *tessera.Te
 		tileDir = "/var/lib/ledger/tiles"
 	}
 	smtTiles := smtTileStore(d.ByteStore, tileDir)
-	d.NodeStore = store.NewTailedNodeStore(
-		smt.NewTiledNodeStore(ctx, smtTiles, smt.NewTileCache(cacheSize)),
-	)
+	tiled := smt.NewTiledNodeStore(ctx, smtTiles, smt.NewTileCache(cacheSize))
+	if nodeIndexEnabled() {
+		// Make the durable read-through COMPLETE: a band-interior reached by a
+		// compressed pointer resolves via its owning tile top (the node index)
+		// instead of faulting "missing node (referenced by ancestor)" → PathD →
+		// lost leaf. The emitter populates this same index at emit time.
+		tiled.SetNodeIndex(store.NewPGNodeIndex(ctx, pool))
+	}
+	d.NodeStore = store.NewTailedNodeStore(tiled)
 	d.NodeStore.SetMissProbe(smtTiles) // leaf-loss trace: classify Get misses (tile-top vs interior)
 	d.TreeHeadStore = store.NewTreeHeadStore(pool)
 	d.SMTRootState = store.NewSMTRootStateStore(pool)
 	return tessera.NewTesseraAdapter(ctx, d.TesseraEmbedded, d.TileReader, d.Logger)
+}
+
+// nodeIndexEnabled reports whether the durable SMT node→tile-top index is active
+// (LEDGER_NODE_INDEX; default ON). It is the completeness backstop that makes any
+// emitted node resolvable by hash, regardless of walk order — the fix for the
+// leaf-loss / tiling-stall fault. Set LEDGER_NODE_INDEX=0 only to roll back the
+// added emit-time index writes in an emergency; with it off, the node store
+// reverts to top-only resolution (the prior behavior) and a compressed top-skip
+// can again fault — caught loudly by the builder's MissingNodeError halt.
+func nodeIndexEnabled() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("LEDGER_NODE_INDEX"))) {
+	case "0", "false", "off", "no":
+		return false
+	default:
+		return true
+	}
 }
 
 func smtTileStore(bs bytestore.Backend, tileDir string) store.SMTTileStore {
