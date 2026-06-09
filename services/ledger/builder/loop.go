@@ -762,7 +762,10 @@ func (bl *BuilderLoop) processBatch(ctx context.Context) (int, error) {
 	// De-pollution handoff: the batch's dirty nodes go to the in-memory tail (NOT
 	// PG), so the next batch reads them as siblings until the reconciler tiles them
 	// and prunes. Lost on crash → re-derived from smt_leaves on boot (recovery).
-	bl.nodeStore.PutBatch(nodesToWrite)
+	// PutBatchCommitted (not PutBatch): record newRoot atomically with the nodes so
+	// the checkpoint loop's orphan-prune can walk from a root always consistent
+	// with the tail (race-free; see TailedNodeStore.PruneOrphans).
+	bl.nodeStore.PutBatchCommitted(nodesToWrite, newRoot)
 	nodesAffected = int64(len(nodesToWrite))
 
 	// ───────────────────────────────────────────────────────────────────────

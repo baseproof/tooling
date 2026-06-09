@@ -35,6 +35,14 @@ type TailedNodeStore struct {
 	mu    sync.RWMutex
 	tail  map[[32]byte]smt.Node
 	tiles smt.NodeStore // durable read-through (a *smt.TiledNodeStore)
+
+	// committedRoot is the SMT root of the LATEST batch handed to the tail, set
+	// ATOMICALLY with that batch's nodes (PutBatchCommitted) so PruneOrphans can
+	// walk from a root that is always consistent with the tail's contents — the
+	// race-free coupling that lets the orphan-prune drop cross-batch orphans
+	// without ever stranding a just-committed, not-yet-tiled node. Zero until the
+	// first committed batch.
+	committedRoot [32]byte
 }
 
 var _ smt.NodeStore = (*TailedNodeStore)(nil)
@@ -78,6 +86,54 @@ func (s *TailedNodeStore) PutBatch(nodes []smt.Node) {
 		s.tail[smt.HashNode(n)] = n
 	}
 	s.mu.Unlock()
+}
+
+// PutBatchCommitted is PutBatch plus, in the SAME critical section, recording the
+// batch's committed SMT root. This atomicity is load-bearing for PruneOrphans: a
+// reader holding the lock always sees committedRoot consistent with the nodes in
+// the tail, so the orphan-prune can never walk from a stale root and drop a
+// just-committed node. The builder uses this (one writer); plain PutBatch remains
+// for tests/primitives that don't drive the prune.
+func (s *TailedNodeStore) PutBatchCommitted(nodes []smt.Node, committedRoot [32]byte) {
+	s.mu.Lock()
+	for _, n := range nodes {
+		s.tail[smt.HashNode(n)] = n
+	}
+	s.committedRoot = committedRoot
+	s.mu.Unlock()
+}
+
+// PruneOrphans evicts every tail node NOT reachable from the latest committed
+// root — the cross-batch ORPHANS (interior-node versions superseded by a later
+// batch, so on no committed path and never tiled, hence invisible to PruneTiled's
+// durability check). It is the O(entries)→O(gap) bound that keeps the tail flat.
+//
+// SAFE (validated by TailGCAudit in soak): a tail node unreachable from the
+// committed root is either durable in tiles (servable there) or referenced by no
+// published root (published ⇒ durable). RACE-FREE: walks from s.committedRoot —
+// the tail's own notion, set atomically with the nodes by PutBatchCommitted —
+// under the write lock, so a concurrent commit cannot make it drop a live node.
+// Fails toward RETENTION (keeps everything reachable) and is a no-op until the
+// first committed batch. The tail is rebuildable from smt_leaves regardless, so a
+// mis-drop is at worst a transient recompute, never data loss. Returns the count
+// dropped. Bounded by the un-tiled gap, not history.
+func (s *TailedNodeStore) PruneOrphans() (dropped int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	// Never drop blindly: the zero value means no batch has set a root yet, and
+	// EmptyHash means an empty tree — in either degenerate case a walk would reach
+	// nothing and evict the whole tail. Fail toward retention and no-op.
+	if s.committedRoot == ([32]byte{}) || s.committedRoot == smt.EmptyHash {
+		return 0
+	}
+	reachable := s.reachableInTail(s.committedRoot)
+	for h := range s.tail {
+		if _, keep := reachable[h]; !keep {
+			delete(s.tail, h)
+			dropped++
+		}
+	}
+	return dropped
 }
 
 // PruneTiled evicts tail nodes that are now durably present in tiles. Called by

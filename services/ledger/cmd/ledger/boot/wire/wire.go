@@ -403,6 +403,13 @@ func Wire(ctx context.Context, cfg Config, d *deps.AppDeps) error {
 			})
 			d.Logger.Info("tail-gc safety audit enabled (LEDGER_TAIL_GC_AUDIT=1, non-destructive)")
 		}
+		// Tail orphan prune (LEDGER_TAIL_GC_PRUNE=1): the O(history)→O(gap) fix —
+		// evict cross-batch orphans each checkpoint so the in-memory tail stays flat.
+		// Opt-in; keep LEDGER_TAIL_GC_AUDIT=1 on alongside as a live safety net.
+		if os.Getenv("LEDGER_TAIL_GC_PRUNE") == "1" {
+			checkpointLoop.EnableTailOrphanPrune()
+			d.Logger.Info("tail orphan prune enabled (LEDGER_TAIL_GC_PRUNE=1): tail bounded to the un-tiled gap")
+		}
 		d.Logger.Info("checkpoint loop enabled", "tile_dir", tileDir, "quorum_k", cfg.WitnessQuorumK)
 	}
 
@@ -2273,6 +2280,18 @@ func installLateBoundGauges(
 			"Committed seq minus the durable SMT tile frontier seq (the un-tiled gap ≈ in-memory node tail, in entries).",
 			checkpointLoop.FrontierLag) {
 			d.Logger.Info("metrics: SMT frontier lag gauge installed", "metric", "baseproof_smt_frontier_lag_total")
+		}
+		// Tail-GC observability: cumulative orphans evicted by the prune, and the
+		// audit violation count (the scrape-able gate — MUST stay 0).
+		if observability.RegisterInt64Gauge(builderMeter, "baseproof_tail_gc_orphans_dropped_total",
+			"Cumulative cross-batch orphan nodes evicted from the in-memory SMT tail by the tail-GC prune.",
+			checkpointLoop.OrphansDropped) {
+			d.Logger.Info("metrics: tail-gc orphans-dropped gauge installed", "metric", "baseproof_tail_gc_orphans_dropped_total")
+		}
+		if observability.RegisterInt64Gauge(builderMeter, "baseproof_tail_gc_audit_violations_total",
+			"Cumulative tail-GC audit violations (a published root reaching a non-durable would-drop node). MUST stay 0.",
+			checkpointLoop.AuditViolations) {
+			d.Logger.Info("metrics: tail-gc audit-violations gauge installed", "metric", "baseproof_tail_gc_audit_violations_total")
 		}
 		if d.NodeStore != nil {
 			if observability.RegisterInt64Gauge(builderMeter, "baseproof_smt_tail_nodes",

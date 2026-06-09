@@ -117,6 +117,16 @@ type TailGCAuditor interface {
 	TailGCAudit(committedRoot [32]byte, publishedRoots [][32]byte) (candidates, violations int, sample [32]byte)
 }
 
+// TailOrphanPruner (optional, satisfied by *store.TailedNodeStore) evicts tail
+// nodes unreachable from the latest committed root — the cross-batch orphans —
+// bounding the in-memory tail to the un-tiled gap (O(gap), not O(history)). Safe
+// per the published⇒durable invariant (proven by the always-on TailGCAudit); the
+// tail is rebuildable from smt_leaves regardless. Returns the count dropped.
+// Enabled only when EnableTailOrphanPrune is set (LEDGER_TAIL_GC_PRUNE).
+type TailOrphanPruner interface {
+	PruneOrphans() (dropped int)
+}
+
 // CheckpointRooter derives the deterministic RFC 6962 Merkle root at a tree size
 // from durable tiles, and reports the integrated (durable) tree size. Satisfied
 // by *tessera.TesseraAdapter (RootAtSize + IntegratedSize).
@@ -249,7 +259,24 @@ type CheckpointLoop struct {
 	// root behind LEDGER_TAIL_GC_AUDIT so the core loop stays metrics-free; nil ⇒
 	// the audit does not run.
 	onTailGCAudit func(ctx context.Context, candidates, violations int, sample [32]byte)
+
+	// pruneOrphans, when true (EnableTailOrphanPrune / LEDGER_TAIL_GC_PRUNE), makes
+	// Step 5a additionally evict cross-batch orphans from the tail — the O(history)
+	// fix. Off by default; the audit stays on as a live safety net when enabled.
+	pruneOrphans bool
+
+	// metricOrphansDropped / metricAuditViolations mirror the cumulative tail-GC
+	// orphan evictions and the audit violation count for the metric scrape (the
+	// scrape-able gate for a long soak). Written from the loop goroutine, read from
+	// the scrape goroutine — hence atomic. metricAuditViolations MUST stay 0.
+	metricOrphansDropped  atomic.Uint64
+	metricAuditViolations atomic.Uint64
 }
+
+// OrphansDropped / AuditViolations expose the cumulative tail-GC counters for the
+// metric scrape. AuditViolations must remain 0 (published ⇒ durable holds).
+func (l *CheckpointLoop) OrphansDropped() int64  { return int64(l.metricOrphansDropped.Load()) }
+func (l *CheckpointLoop) AuditViolations() int64 { return int64(l.metricAuditViolations.Load()) }
 
 const maxRecentPublishedRoots = 64
 
@@ -258,6 +285,13 @@ const maxRecentPublishedRoots = 64
 // proves the orphan-prune is safe (zero violations) before that prune is enabled.
 func (l *CheckpointLoop) OnTailGCAudit(fn func(ctx context.Context, candidates, violations int, sample [32]byte)) {
 	l.onTailGCAudit = fn
+}
+
+// EnableTailOrphanPrune turns on the cross-batch orphan eviction in Step 5a (the
+// O(history)→O(gap) tail bound). Set before Run. The audit should stay wired as a
+// live safety net while this is on. Requires the tail to satisfy TailOrphanPruner.
+func (l *CheckpointLoop) EnableTailOrphanPrune() {
+	l.pruneOrphans = true
 }
 
 // HorizonLag returns committed head tree_size minus the published (witness-
@@ -561,7 +595,26 @@ func (l *CheckpointLoop) CheckpointOnce(ctx context.Context) error {
 	if l.onTailGCAudit != nil {
 		if auditor, ok := l.tail.(TailGCAuditor); ok && len(l.recentPublishedRoots) > 0 {
 			cand, viol, sample := auditor.TailGCAudit(cRoot, l.recentPublishedRoots)
+			if viol > 0 {
+				l.metricAuditViolations.Add(uint64(viol))
+			}
 			l.onTailGCAudit(ctx, cand, viol, sample)
+		}
+	}
+
+	// ── Step 5b (LEDGER_TAIL_GC_PRUNE): evict CROSS-BATCH orphans — tail nodes
+	// unreachable from the latest committed root. PruneTiled (Step 5a) only drops
+	// nodes that became durable; nodes superseded across batches are never tiled,
+	// so without this they accumulate O(history). This bounds the tail to the
+	// un-tiled gap. Safe per the published⇒durable invariant the always-on audit
+	// verifies; the tail is rebuildable from smt_leaves regardless. ──
+	if l.pruneOrphans {
+		if pruner, ok := l.tail.(TailOrphanPruner); ok {
+			if dropped := pruner.PruneOrphans(); dropped > 0 {
+				l.metricOrphansDropped.Add(uint64(dropped))
+				l.logger.DebugContext(ctx, "checkpoint step: tail orphan prune",
+					"dropped", dropped, "committed_root", fmt.Sprintf("%x", cRoot[:8]))
+			}
 		}
 	}
 
