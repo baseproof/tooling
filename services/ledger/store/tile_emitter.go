@@ -121,9 +121,46 @@ func (e *BuildTilesEmitter) buildTiles(ctx context.Context, fromRoot, committedR
 		present, eerr := e.tiles.Exists(ctx, top)
 		return eerr == nil && present
 	}
-	tiles, err := smt.BuildDirtyTiles(e.nodes, tailed.Tail(), committedRoot, fromRoot, smt.TileHeight, known)
+	// Read the dirty walk through a FRESH, UNBOUNDED per-emit read-through — NOT the
+	// long-lived proof-serving store. BuildDirtyTiles re-reads a dirty band's CLEAN
+	// interiors (warmed from the same-position prior tile) AFTER loading the deeper
+	// boundary tiles below them; a BOUNDED read-through (the memory-capped store) can
+	// evict such an interior mid-band-walk, faulting "interior node missing from node
+	// store" once a pass exceeds the cap (the pruned-tail tiling stall — proven in
+	// baseproof tile_pruned_cap_test.go: a smaller cap strands at a smaller tree).
+	// This store holds the whole pass working set and is discarded on return, so it
+	// holds NO O(history) memory — the cap stays on the long-lived proof path.
+	emitNodes := &tailReadThrough{
+		tail:  tailed.Tail(),
+		tiled: smt.NewTiledNodeStoreCapped(ctx, e.tiles, nil, 0),
+	}
+	tiles, err := smt.BuildDirtyTiles(emitNodes, emitNodes.tail, committedRoot, fromRoot, smt.TileHeight, known)
 	if err != nil {
 		return nil, fmt.Errorf("store/tile-emitter: build dirty tiles at %x: %w", committedRoot[:8], err)
 	}
 	return tiles, nil
 }
+
+// tailReadThrough is a per-emit NodeStore view: the committed-but-not-tiled tail
+// (a snapshot) first, then an UNBOUNDED durable tile read-through. BuildDirtyTiles
+// needs its full pass working set resident — a bounded read-through evicts a
+// band's interiors mid-walk and strands them — so this store does not cap; being
+// per-emit (discarded after each EmitDurable) it never accumulates O(history).
+type tailReadThrough struct {
+	tail  map[[32]byte]smt.Node
+	tiled smt.NodeStore
+}
+
+func (v *tailReadThrough) Get(h [32]byte) (smt.Node, error) {
+	if h == smt.EmptyHash {
+		return nil, nil
+	}
+	if n, ok := v.tail[h]; ok {
+		return n, nil
+	}
+	return v.tiled.Get(h)
+}
+
+// Put is unused: BuildDirtyTiles only reads. Return the content hash without
+// storing (NodeStore requires the method).
+func (v *tailReadThrough) Put(n smt.Node) ([32]byte, error) { return smt.HashNode(n), nil }

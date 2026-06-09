@@ -169,6 +169,7 @@ func TestProof_ResidualIsOrphanGarbage_EmitterComplete(t *testing.T) {
 	const batches, perBatch = 30, 64
 	total := 0
 	for b := 0; b < batches; b++ {
+		prevRoot := root // prior committed+tiled root (EmptyHash at genesis) — the warm-walk anchor production threads
 		batch := make([]types.SMTLeaf, 0, perBatch)
 		for i := 0; i < perBatch; i++ {
 			k := sha256.Sum256([]byte{byte(total), byte(total >> 8), byte(total >> 16)})
@@ -182,7 +183,7 @@ func TestProof_ResidualIsOrphanGarbage_EmitterComplete(t *testing.T) {
 		if root, err = tree.Root(ctx); err != nil {
 			t.Fatalf("Root: %v", err)
 		}
-		durable, err := emitter.EmitDurable(ctx, smt.EmptyHash, root, uint64(total))
+		durable, err := emitter.EmitDurable(ctx, prevRoot, root, uint64(total))
 		if err != nil {
 			t.Fatalf("EmitDurable: %v", err)
 		}
@@ -257,6 +258,7 @@ func TestTailBound_ReachableMutationsEndToEnd(t *testing.T) {
 	const batches, perBatch = 40, 64
 	total, maxTail := 0, 0
 	for b := 0; b < batches; b++ {
+		prevRoot := root // prior committed+tiled root (EmptyHash at genesis) — the warm-walk anchor production threads
 		// Builder shape: overlay over the tail; leaves persist directly.
 		overlayNodes := smt.NewOverlayNodeStore(tailed)
 		tree := smt.NewTree(leafStore, overlayNodes)
@@ -282,7 +284,7 @@ func TestTailBound_ReachableMutationsEndToEnd(t *testing.T) {
 		}
 		tailed.PutBatch(nodes)
 		// Checkpoint: emit + durable-set prune (the committed #1).
-		durable, err := emitter.EmitDurable(ctx, smt.EmptyHash, root, uint64(total))
+		durable, err := emitter.EmitDurable(ctx, prevRoot, root, uint64(total))
 		if err != nil {
 			t.Fatalf("EmitDurable: %v", err)
 		}
@@ -394,3 +396,105 @@ func runFreshStoreEmit(t *testing.T, batches, perBatch int, warm bool) (int, err
 	}
 	return -1, nil
 }
+
+// TestTileEmitter_CappedEmitNodes_ResolvesViaFreshStore is the direct guard for the
+// fresh-unbounded-read-through fix, and it pins the fix to the EMIT path — where the
+// bug lives — not the tree path.
+//
+// The tree is built on an UNBOUNDED store. That is faithful: in production the
+// long-lived cache (65 536) dwarfs a single tile (≤256 nodes), and SetLeaves walks
+// TOP-DOWN addressing only tile TOPS, which a TiledNodeStore can always re-fetch from
+// the sink — so an eviction there costs a re-fetch, never an ErrNodeMissing. The tree
+// path is structurally not the fault site; only the emit walk is.
+//
+// The emitter is handed an e.nodes whose durable read-through is capped at 64 NODES —
+// below one tiling pass's working set; the production stall (cap 65 536 → strand at
+// ~172k entries) writ small. The emit walk re-reads warm-walked CLEAN INTERIORS BY
+// HASH, which a TiledNodeStore cannot re-fetch once their tile is evicted, so the
+// pre-fix emit — BuildDirtyTiles(e.nodes, ...) — strands here exactly as in
+// production. Because the fix reads the tiling walk through a FRESH UNBOUNDED store
+// over the tile sink (never e.nodes' capped Get), every batch must resolve and the
+// tree must be tiles-complete. Revert the fix and the 64-node cap strands it: the
+// trap that holds the fix in place.
+func TestTileEmitter_CappedEmitNodes_ResolvesViaFreshStore(t *testing.T) {
+	ctx := context.Background()
+	tiles := NewMemSMTTileStore()
+	// Tree substrate: UNBOUNDED. SetLeaves (top-down, tile-top addressed, re-fetchable)
+	// is never the fault — in production its cache is always >> a tile, so the bug, and
+	// thus this guard, lives strictly on the emit path below.
+	tailed := NewTailedNodeStore(smt.NewTiledNodeStore(ctx, tiles, smt.NewTileCache(1<<16)))
+	leafStore := smt.NewInMemoryLeafStore()
+
+	const batches, perBatch = 40, 64
+	root, total := smt.EmptyHash, 0
+	for b := 0; b < batches; b++ {
+		prevRoot := root
+		overlay := smt.NewOverlayNodeStore(tailed)
+		tree := smt.NewTree(leafStore, overlay)
+		tree.SetRoot(root)
+		batch := make([]types.SMTLeaf, 0, perBatch)
+		for i := 0; i < perBatch; i++ {
+			k := sha256.Sum256([]byte{byte(total), byte(total >> 8), byte(total >> 16)})
+			batch = append(batch, types.SMTLeaf{Key: k, OriginTip: types.LogPosition{LogDID: "did:test", Sequence: uint64(total + 1)}})
+			total++
+		}
+		if err := tree.SetLeaves(ctx, batch); err != nil {
+			t.Fatalf("SetLeaves b=%d: %v", b, err)
+		}
+		var err error
+		if root, err = tree.Root(ctx); err != nil {
+			t.Fatalf("Root: %v", err)
+		}
+		dirty := overlay.ReachableMutations(root)
+		nodes := make([]smt.Node, 0, len(dirty))
+		for _, n := range dirty {
+			nodes = append(nodes, n)
+		}
+		tailed.PutBatch(nodes)
+
+		// EMIT through an adversarial e.nodes: its Tail() is the live committed-but-not-
+		// tiled dirty set, but its Get reads through a 64-node-capped durable store that
+		// evicts a band's interiors mid-walk. The fix's fresh unbounded store must make
+		// that cap irrelevant.
+		emitNodes := &cappedEmitNodes{
+			tail:   tailed.Tail(),
+			capped: smt.NewTiledNodeStoreCapped(ctx, tiles, nil, 64),
+		}
+		durable, err := NewBuildTilesEmitter(emitNodes, tiles).EmitDurable(ctx, prevRoot, root, uint64(total))
+		if err != nil {
+			t.Fatalf("EmitDurable stranded at batch %d with a 64-node e.nodes read-through cap — the fresh-store fix regressed (emit is reading the tiling walk through e.nodes' bounded cache again): %v", b, err)
+		}
+		tailed.PruneTiled(ctx, func(_ context.Context, h [32]byte) (bool, error) { _, ok := durable[h]; return ok, nil })
+	}
+	// Tiles-complete: every entry's proof reconstructs from the durable tiles alone.
+	fresh := smt.NewTiledNodeStore(ctx, tiles, smt.NewTileCache(1<<16))
+	for _, idx := range []int{0, total / 2, total - 1} {
+		k := sha256.Sum256([]byte{byte(idx), byte(idx >> 8), byte(idx >> 16)})
+		if _, perr := smt.GenerateProofAt(fresh, root, k); perr != nil {
+			t.Fatalf("proof idx=%d unservable from tiles after a capped-emit run: %v", idx, perr)
+		}
+	}
+}
+
+// cappedEmitNodes is an adversarial emitter substrate: Tail() is the live committed-
+// but-not-tiled dirty set, while Get reads through a TIGHTLY capped durable store.
+// It exists to pin the fresh-store fix to the emit path. The emitter must read its
+// tiling walk through its OWN fresh unbounded store (over the tile sink), never this
+// capped Get — so a 64-node cap here is invisible to the fix but strands the pre-fix
+// BuildDirtyTiles(e.nodes, ...) on an evicted, un-re-fetchable interior.
+type cappedEmitNodes struct {
+	tail   map[[32]byte]smt.Node
+	capped smt.NodeStore
+}
+
+func (v *cappedEmitNodes) Tail() map[[32]byte]smt.Node { return v.tail }
+func (v *cappedEmitNodes) Get(h [32]byte) (smt.Node, error) {
+	if h == smt.EmptyHash {
+		return nil, nil
+	}
+	if n, ok := v.tail[h]; ok {
+		return n, nil
+	}
+	return v.capped.Get(h)
+}
+func (v *cappedEmitNodes) Put(n smt.Node) ([32]byte, error) { return smt.HashNode(n), nil }
