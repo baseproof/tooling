@@ -24,8 +24,10 @@ package store
 
 import (
 	"context"
-
+	"fmt"
+	"log/slog"
 	"sync"
+	"sync/atomic"
 
 	"github.com/baseproof/baseproof/core/smt"
 )
@@ -43,7 +45,21 @@ type TailedNodeStore struct {
 	// without ever stranding a just-committed, not-yet-tiled node. Zero until the
 	// first committed batch.
 	committedRoot [32]byte
+
+	// probe + missLogged: leaf-loss tracing (LEDGER_TILE_VERIFY_FETCH=1, via the
+	// emitter's tileVerifyFetch). When set, a Get that resolves to neither the tail
+	// nor a fetchable tile — the exact point jellyfishInsert faults "missing node X
+	// (referenced by ancestor)" → PathD → leaf loss — is classified against the tile
+	// store: Exists(X) HEAD true ⇒ X is a durable tile-TOP that GET could not read
+	// (a builder-side fetch / HEAD-GET issue); false ⇒ X is a tile INTERIOR the walk
+	// reached without its top (the compression top-skip). probe nil ⇒ trace off.
+	probe      SMTTileStore
+	missLogged atomic.Int64
 }
+
+// SetMissProbe wires the durable tile store used to classify a Get miss under the
+// leaf-loss trace (see probe). nil disables it. Set once at boot, before serving.
+func (s *TailedNodeStore) SetMissProbe(p SMTTileStore) { s.probe = p }
 
 var _ smt.NodeStore = (*TailedNodeStore)(nil)
 
@@ -65,7 +81,33 @@ func (s *TailedNodeStore) Get(hash [32]byte) (smt.Node, error) {
 	if ok {
 		return n, nil
 	}
-	return s.tiles.Get(hash)
+	tn, err := s.tiles.Get(hash)
+	if tileVerifyFetch && s.probe != nil && err == nil && tn == nil {
+		s.probeMiss(hash) // the leaf-loss point: classify X (tile-top vs interior)
+	}
+	return tn, err
+}
+
+// probeMiss classifies a node X that resolved from neither the tail nor a fetchable
+// tile — the "missing node X (referenced by ancestor)" the SDK insert faults on.
+// Exists(X) (HEAD) true ⇒ X is a durable tile-TOP that GET could not read (builder
+// fetch / HEAD-GET issue); false ⇒ X is a tile INTERIOR reached without its top
+// (compression top-skip). Detailed logging is capped so a 6k-miss soak does not
+// flood; the classification from the first samples is sufficient.
+func (s *TailedNodeStore) probeMiss(hash [32]byte) {
+	if s.missLogged.Add(1) > 64 {
+		return
+	}
+	ctx := context.Background()
+	isTop, _ := s.probe.Exists(ctx, hash) // HEAD
+	gb, gerr := s.probe.Fetch(ctx, hash)  // GET
+	slog.Default().Error("BUILDER NODE MISS: not in tail, not fetchable from tiles (leaf-loss point)",
+		"node", fmt.Sprintf("%x", hash[:]),
+		"tile_path", smt.TilePath(hash),
+		"is_tile_top_HEAD", isTop, // true=durable TOP but GET failed; false=INTERIOR (top-skip)
+		"get_bytes", len(gb),
+		"get_err", fmt.Sprintf("%v", gerr),
+	)
 }
 
 // Put appends a node to the tail (content-addressed; dedup by hash).
