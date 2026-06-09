@@ -2,28 +2,39 @@ package cli
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"os"
+	"strings"
 	"time"
 
 	"github.com/baseproof/baseproof/core/smt"
-	"github.com/baseproof/baseproof/crypto/cosign"
+	sdkbundle "github.com/baseproof/baseproof/log/bundle"
+	"github.com/baseproof/baseproof/network"
 	"github.com/baseproof/baseproof/types"
 
-	"github.com/baseproof/tooling/libs/bundle"
+	libsbundle "github.com/baseproof/tooling/libs/bundle"
+	"github.com/baseproof/tooling/libs/clitools"
+	"github.com/baseproof/tooling/libs/networkbundle"
 )
 
-// RunProof fetches the entry's proof bundle from the network, verifies it
-// (witness quorum + RFC-6962 inclusion + SMT membership, all via the SDK
-// verifier), renders it, and reports the verdict. The SMT key defaults to the one
-// derived from (log DID, seq), so the usual case is just `--seq N`.
+// RunProof generates a v2 self-anchored proof of an entry over the live ledger,
+// SELF-VERIFIES it offline before doing anything with it (a proof we cannot
+// verify is never emitted — fail-closed), and either writes it to --out (a
+// portable file anyone can `baseproof verify`) or renders the verdict.
 func RunProof(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("proof", flag.ContinueOnError)
 	var (
 		bundlePath = fs.String("bundle", "", "client bundle JSON — REQUIRED")
 		seq        = fs.Uint64("seq", 0, "entry sequence to prove — REQUIRED")
 		smtKeyHex  = fs.String("smt-key", "", "64-hex SMT key (default: derived from log DID + seq)")
+		out        = fs.String("out", "", "write the portable v2 proof to this file (else verify + render)")
 		timeout    = fs.Duration("timeout", 30*time.Second, "per-request HTTP timeout")
 	)
 	if err := fs.Parse(args); err != nil {
@@ -36,15 +47,12 @@ func RunProof(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	networkID, err := b.NetworkID32()
+	logDID, err := b.RequireLogDID()
 	if err != nil {
 		return err
 	}
-	if b.QuorumK <= 0 {
-		return fmt.Errorf("client bundle quorum_k must be > 0 to verify a proof")
-	}
 
-	// Resolve the SMT key: explicit --smt-key, else derive from (log DID, seq).
+	// SMT key: explicit --smt-key, else derived from (log DID, seq).
 	var smtKey [32]byte
 	if *smtKeyHex != "" {
 		raw, derr := hex.DecodeString(*smtKeyHex)
@@ -53,34 +61,144 @@ func RunProof(ctx context.Context, args []string) error {
 		}
 		copy(smtKey[:], raw)
 	} else {
-		if b.LogDID == "" {
-			return fmt.Errorf("client bundle has no log_did; pass --smt-key explicitly")
-		}
-		smtKey = smt.DeriveKey(types.LogPosition{LogDID: b.LogDID, Sequence: *seq})
+		smtKey = smt.DeriveKey(types.LogPosition{LogDID: logDID, Sequence: *seq})
 	}
 
-	hc, err := b.HTTPClient(*timeout)
+	httpClient, err := b.HTTPClient(*timeout)
+	if err != nil {
+		return err
+	}
+	ledger, err := ledgerReaderFor(b, logDID)
+	if err != nil {
+		return err
+	}
+	doc, err := fetchBootstrap(ctx, httpClient, b.Endpoint, b.BootstrapHash)
+	if err != nil {
+		return err
+	}
+	nb, err := networkbundle.Build(doc, b.Endpoint, b.QuorumK, networkbundle.Vocabulary{
+		GovernanceSchemas: governanceSchemas(b, logDID),
+		CitedMemberKey:    smtKey,
+	})
+	if err != nil {
+		return err
+	}
+	gather, err := libsbundle.NewBundleGather(ctx, nb, ledger, httpClient, *seq, smtKey)
+	if err != nil {
+		return fmt.Errorf("build gather: %w", err)
+	}
+
+	proof, err := generateProof(ctx, gather, *seq)
 	if err != nil {
 		return err
 	}
 
-	bundleObj, err := bundle.FetchBundle(ctx, hc, b.Endpoint, *seq, smtKey)
+	// SELF-VERIFY offline before emitting — never hand out an unverifiable proof.
+	trustRoots, err := trustRootFromProof(proof)
 	if err != nil {
-		return fmt.Errorf("fetch bundle (seq=%d): %w", *seq, err)
+		return err
 	}
-	resolver, err := bundle.NewHTTPWitnessSetResolver(b.Endpoint, hc, cosign.NetworkID(networkID), b.QuorumK)
-	if err != nil {
-		return fmt.Errorf("witness-set resolver: %w", err)
+	res, err := sdkbundle.VerifyStandalone(ctx, proof, trustRoots)
+	if err != nil || res == nil || !res.Valid {
+		return fmt.Errorf("generated proof did not self-verify (fail-closed): %w", err)
 	}
 
-	verdict := bundle.VerifyBundleWithResolver(ctx, bundleObj, resolver, networkID)
-	fmt.Print(bundle.Render(bundleObj))
-	fmt.Printf("proof: verdict=%s\n", verdict.Outcome)
-	if verdict.Err != nil {
-		fmt.Printf("proof: detail=%v\n", verdict.Err)
-	}
-	if verdict.Outcome != bundle.OutcomeVerified {
-		return fmt.Errorf("bundle did not verify (verdict=%s)", verdict.Outcome)
+	nid := proof.NetworkID
+	fmt.Printf("proof: v2 seq=%d network=%s verified offline — sections %v\n",
+		*seq, hex.EncodeToString(nid[:]), res.Coverage.Verified)
+	if *out != "" {
+		if err := writeProofFile(proof, *out); err != nil {
+			return err
+		}
+		fmt.Printf("proof: wrote %s (portable — verify it anywhere with `baseproof verify %s`)\n", *out, *out)
 	}
 	return nil
+}
+
+// generateProof builds a v2 standalone proof from a gather. Pure orchestration —
+// the testable core (a fake gather drives it without a live ledger).
+func generateProof(ctx context.Context, gather sdkbundle.StandaloneGather, seq uint64) (*sdkbundle.StandaloneProof, error) {
+	proof, err := sdkbundle.BuildStandalone(ctx, gather, seq)
+	if err != nil {
+		return nil, fmt.Errorf("build standalone proof (seq=%d): %w", seq, err)
+	}
+	return proof, nil
+}
+
+// writeProofFile encodes a proof as JCS-canonical bytes and writes it to a file.
+func writeProofFile(proof *sdkbundle.StandaloneProof, path string) error {
+	raw, err := sdkbundle.EncodeStandalone(proof)
+	if err != nil {
+		return fmt.Errorf("encode proof: %w", err)
+	}
+	if err := os.WriteFile(path, raw, 0o644); err != nil {
+		return fmt.Errorf("write proof %q: %w", path, err)
+	}
+	return nil
+}
+
+// ledgerReaderFor builds the LedgerReader the gather drives, from the bundle's
+// transport: a pinned CA ⇒ open-HTTPS server-verify; otherwise plaintext.
+func ledgerReaderFor(b *ClientBundle, logDID string) (*clitools.LedgerClient, error) {
+	if b.Transport.CAFile != "" {
+		server := ""
+		if u, err := url.Parse(b.Endpoint); err == nil {
+			server = u.Hostname()
+		}
+		if logDID != "" {
+			return clitools.NewServerVerifyLedgerClient(b.Endpoint, b.Transport.CAFile, server, logDID)
+		}
+		return clitools.NewServerVerifyLedgerClient(b.Endpoint, b.Transport.CAFile, server)
+	}
+	if logDID != "" {
+		return clitools.NewLedgerClient(b.Endpoint, logDID)
+	}
+	return clitools.NewLedgerClient(b.Endpoint)
+}
+
+// governanceSchemas projects the bundle's per-network schema positions (sequence
+// on the network's own log) into the SDK's vocabulary shape.
+func governanceSchemas(b *ClientBundle, logDID string) map[string]types.LogPosition {
+	if len(b.Schemas) == 0 {
+		return nil
+	}
+	out := make(map[string]types.LogPosition, len(b.Schemas))
+	for name, seq := range b.Schemas {
+		out[name] = types.LogPosition{LogDID: logDID, Sequence: seq}
+	}
+	return out
+}
+
+// fetchBootstrap GETs the network's genesis bootstrap (JCS-canonical bytes) and,
+// when expectHashHex is set, fails closed unless SHA-256(bytes) matches it — the
+// Zero-Trust confirmation that the endpoint serves the network the bundle pins.
+func fetchBootstrap(ctx context.Context, httpClient *http.Client, endpoint, expectHashHex string) (*network.BootstrapDocument, error) {
+	u := strings.TrimRight(endpoint, "/") + "/v1/network/bootstrap"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("GET %s: %w", u, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("bootstrap HTTP %d from %s", resp.StatusCode, u)
+	}
+	if expectHashHex != "" {
+		got := sha256.Sum256(raw)
+		if hex.EncodeToString(got[:]) != strings.ToLower(expectHashHex) {
+			return nil, fmt.Errorf("bootstrap hash mismatch: endpoint %s serves a different network than the bundle pins (fail-closed)", endpoint)
+		}
+	}
+	var doc network.BootstrapDocument
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		return nil, fmt.Errorf("decode bootstrap: %w", err)
+	}
+	return &doc, nil
 }
