@@ -25,6 +25,8 @@ func Main(argv []string) int {
 		err = RunProof(ctx, args)
 	case "verify":
 		err = RunVerify(ctx, args)
+	case "info":
+		err = RunInfo(ctx, args)
 	case "load":
 		err = RunLoad(ctx, args)
 	case "-h", "--help", "help":
@@ -62,6 +64,12 @@ usage:
         Verify a v2 proof FILE fully offline (zero network calls): recompute the
         witness K-of-N cosignatures, inclusion and SMT membership — fail-closed.
         Network-agnostic (self-anchored); --pin binds it to a network you trust.
+
+  baseproof info --bundle b.json [--verify] [--federation] [--depth N]
+        Understand a network in one view: identity (recomputed), trust root,
+        witnesses + K-of-N, auditors (live + in-sync), horizon, admission,
+        accepted messages, mirrors, and the federation. --verify recomputes the
+        crypto; --federation walks + verifies the cited peers (bounded, cycle-guarded).
 
   baseproof load   --bundle b.json -n <count> [--amend-ratio r] [--workers w]
                    [--batch-size b] [--token t] [--seed s] [--manifest oracle.jsonl]
