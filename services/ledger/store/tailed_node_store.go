@@ -98,15 +98,14 @@ func (s *TailedNodeStore) probeMiss(hash [32]byte) {
 	if s.missLogged.Add(1) > 64 {
 		return
 	}
-	ctx := context.Background()
-	isTop, _ := s.probe.Exists(ctx, hash) // HEAD
-	gb, gerr := s.probe.Fetch(ctx, hash)  // GET
+	v := ClassifyTileMiss(context.Background(), s.probe, hash)
 	slog.Default().Error("BUILDER NODE MISS: not in tail, not fetchable from tiles (leaf-loss point)",
 		"node", fmt.Sprintf("%x", hash[:]),
 		"tile_path", smt.TilePath(hash),
-		"is_tile_top_HEAD", isTop, // true=durable TOP but GET failed; false=INTERIOR (top-skip)
-		"get_bytes", len(gb),
-		"get_err", fmt.Sprintf("%v", gerr),
+		"verdict", v.Kind, // INTERIOR_TOP_SKIP | STRANDED_TOP_HEAD_GET | RESOLVES_NOW
+		"is_tile_top_HEAD", v.IsTileTopHEAD, // false ⇒ band INTERIOR (compression top-skip)
+		"get_bytes", v.GetBytes,
+		"get_err", v.GetErr,
 	)
 }
 
