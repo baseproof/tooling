@@ -232,6 +232,10 @@ type BuilderLoop struct {
 	totalEntries   atomic.Int64
 	totalErrors    atomic.Int64
 	consecutiveErr atomic.Int32
+	// leafFailures counts entries ProcessBatch could not apply — processEntry
+	// errored and was silently demoted to PathD (no leaf mutation). A non-zero
+	// value means the committed AND cosigned root omits those authorities' leaves.
+	leafFailures atomic.Int64
 }
 
 // NewBuilderLoop creates a builder loop with all dependencies.
@@ -581,6 +585,46 @@ func (bl *BuilderLoop) processBatch(ctx context.Context) (int, error) {
 		return 0, fmt.Errorf("ProcessBatch: %w", err)
 	}
 	processDur := time.Since(processStart)
+
+	// ── INSTRUMENTATION: surface entries ProcessBatch silently dropped ──
+	// rc9 ProcessBatch demotes any entry whose processEntry returns an error to
+	// PathD (builder/api.go), which records NO leaf mutation — so a validation
+	// failure (tip regression / missing|foreign intermediate / scope cycle)
+	// becomes a missing smt_leaves row with no signal beyond an elevated path_d
+	// count, and the resulting root is still committed and cosigned as VALID. Log
+	// the swallowed reasons so the leaf loss is attributable. Pure observability —
+	// no behavior change; the bounded per-batch slices never panic the writer.
+	var failedSeqs []uint64
+	var sampleReasons []string
+	seenReason := make(map[string]bool)
+	for i, rerr := range result.PathFailureReasons {
+		if rerr == nil {
+			continue
+		}
+		if i < len(seqs) {
+			failedSeqs = append(failedSeqs, seqs[i])
+		}
+		if msg := rerr.Error(); !seenReason[msg] && len(sampleReasons) < 3 {
+			seenReason[msg] = true
+			sampleReasons = append(sampleReasons, msg)
+		}
+	}
+	if len(failedSeqs) > 0 || len(result.RejectedPositions) > 0 {
+		bl.leafFailures.Add(int64(len(failedSeqs)))
+		sampleSeqs := failedSeqs
+		if len(sampleSeqs) > 10 {
+			sampleSeqs = sampleSeqs[:10]
+		}
+		bl.logger.Warn("processEntry failures demoted to PathD — committed root omits these leaves",
+			"failed_entries", len(failedSeqs),
+			"rejected", len(result.RejectedPositions),
+			"leaf_failures_cumulative", bl.leafFailures.Load(),
+			"first_seq", firstSeq,
+			"last_seq", lastSeq,
+			"sample_failed_seqs", sampleSeqs,
+			"sample_reasons", sampleReasons,
+		)
+	}
 
 	// ── Step 5: Append entry identities to the Merkle tree ────────────
 	//

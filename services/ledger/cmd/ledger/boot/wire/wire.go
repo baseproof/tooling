@@ -560,9 +560,11 @@ func composeStores(ctx context.Context, cfg Config, d *deps.AppDeps) *tessera.Te
 	if tileDir == "" {
 		tileDir = "/var/lib/ledger/tiles"
 	}
+	smtTiles := smtTileStore(d.ByteStore, tileDir)
 	d.NodeStore = store.NewTailedNodeStore(
-		smt.NewTiledNodeStore(ctx, smtTileStore(d.ByteStore, tileDir), smt.NewTileCache(cacheSize)),
+		smt.NewTiledNodeStore(ctx, smtTiles, smt.NewTileCache(cacheSize)),
 	)
+	d.NodeStore.SetMissProbe(smtTiles) // leaf-loss trace: classify Get misses (tile-top vs interior)
 	d.TreeHeadStore = store.NewTreeHeadStore(pool)
 	d.SMTRootState = store.NewSMTRootStateStore(pool)
 	return tessera.NewTesseraAdapter(ctx, d.TesseraEmbedded, d.TileReader, d.Logger)
