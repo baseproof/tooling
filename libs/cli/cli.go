@@ -27,6 +27,10 @@ func Main(argv []string) int {
 		err = RunVerify(ctx, args)
 	case "info":
 		err = RunInfo(ctx, args)
+	case "network":
+		err = RunNetwork(ctx, args)
+	case "config":
+		err = RunConfig(ctx, args)
 	case "load":
 		err = RunLoad(ctx, args)
 	case "-h", "--help", "help":
@@ -51,8 +55,15 @@ A client bundle (--bundle <file.json>) binds the CLI to ONE network: its ledger
 endpoint, trust root (network id, quorum, bootstrap hash), destination log DID,
 and transport pinning. Ship one bundle per network.
 
+A network can be the active default instead of repeating --bundle every time:
+  baseproof network add <name> --from-ledger <url> --quorum K   # author + store a bundle
+  baseproof network add <name> --from <bundle.json|url>          # import a bundle
+  baseproof network use <name>     |  baseproof config set network <name>
+  baseproof network list | show    |  baseproof config list
+Commands below take --bundle <file> or --network <name>, else use the active one.
+
 usage:
-  baseproof submit --bundle b.json --payload <text> [--amend <seq>] [--key-file f] [--out-key f] [--token t]
+  baseproof submit [--network n | --bundle b.json] --payload <text> [--amend <seq>] [--key-file f] [--out-key f] [--token t]
         Submit ONE entry to the network: a new entity, or an amendment of an
         existing entity (--amend <seq>, signed by its key via --key-file).
 

@@ -23,15 +23,29 @@ import (
 // already trust, failing closed on mismatch. Zero network calls.
 func RunVerify(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("verify", flag.ContinueOnError)
-	pin := fs.String("pin", "", "require the proof's network id to equal this 64-hex id (external trust anchor)")
+	pin := fs.String("pin", "", "require the proof's network id to equal this 64-hex id")
+	bundlePath := fs.String("bundle", "", "pin against this network bundle's id (content-addressed anchor)")
+	network := fs.String("network", "", "pin against this stored/active network")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return fmt.Errorf("usage: baseproof verify <proof-file> [--pin <64hex-network-id>]")
+		return fmt.Errorf("usage: baseproof verify <proof-file> [--pin <64hex> | --network <name> | --bundle <file>]")
 	}
 
-	proof, res, err := verifyProofFile(ctx, fs.Arg(0), *pin)
+	// A network bundle is the cleaner ZT anchor than a raw --pin: its network id is
+	// content-addressed to its bootstrap, so pinning the proof to it binds "this is
+	// the network I trust". --pin (raw id) still works; neither ⇒ self-anchored TOFU.
+	effectivePin := *pin
+	if *bundlePath != "" || *network != "" {
+		b, berr := resolveBundle(*bundlePath, *network)
+		if berr != nil {
+			return berr
+		}
+		effectivePin = b.NetworkID
+	}
+
+	proof, res, err := verifyProofFile(ctx, fs.Arg(0), effectivePin)
 	if err != nil {
 		return err
 	}
@@ -42,10 +56,10 @@ func RunVerify(ctx context.Context, args []string) error {
 	if len(res.Coverage.NotAsserted) > 0 {
 		fmt.Printf("proof: not asserted (absent sections): %v\n", res.Coverage.NotAsserted)
 	}
-	if *pin == "" {
-		fmt.Println("proof: ✔ VERIFIED (self-anchored / trust-on-first-use — pass --pin <network-id> to bind to a network you already trust)")
+	if effectivePin == "" {
+		fmt.Println("proof: ✔ VERIFIED (self-anchored / trust-on-first-use — pass --network/--bundle/--pin to bind to a network you already trust)")
 	} else {
-		fmt.Printf("proof: ✔ VERIFIED and pinned to network %s\n", *pin)
+		fmt.Printf("proof: ✔ VERIFIED and pinned to network %s\n", short(effectivePin))
 	}
 	return nil
 }

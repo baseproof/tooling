@@ -122,7 +122,8 @@ type netInfo struct {
 func RunInfo(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("info", flag.ContinueOnError)
 	var (
-		bundlePath = fs.String("bundle", "", "client bundle JSON (the trust anchor) — REQUIRED")
+		bundlePath = fs.String("bundle", "", "client bundle JSON (else --network or the active network)")
+		network    = fs.String("network", "", "stored network name (else the active network)")
 		verify     = fs.Bool("verify", false, "recompute the cryptographic checks (horizon K-of-N, auditor liveness, peer ids)")
 		federation = fs.Bool("federation", false, "walk + verify the cited federation peers")
 		depth      = fs.Int("depth", 1, "federation walk depth (bounded)")
@@ -131,10 +132,7 @@ func RunInfo(ctx context.Context, args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if *bundlePath == "" {
-		return fmt.Errorf("--bundle is required")
-	}
-	b, err := LoadClientBundle(*bundlePath)
+	b, err := resolveBundle(*bundlePath, *network)
 	if err != nil {
 		return err
 	}

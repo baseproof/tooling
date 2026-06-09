@@ -26,7 +26,8 @@ import (
 func RunSubmit(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("submit", flag.ContinueOnError)
 	var (
-		bundlePath = fs.String("bundle", "", "client bundle JSON — REQUIRED")
+		bundlePath = fs.String("bundle", "", "client bundle JSON (else --network or the active network)")
+		network    = fs.String("network", "", "stored network name (else the active network)")
 		payload    = fs.String("payload", "", "entry payload (UTF-8) — REQUIRED")
 		amend      = fs.Int64("amend", -1, "amend the entity at this sequence (signed by its key); omit to create a new entity")
 		keyFile    = fs.String("key-file", "", "32-byte hex secp256k1 signer key; REQUIRED for --amend, optional for a new root")
@@ -38,10 +39,10 @@ func RunSubmit(ctx context.Context, args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if *bundlePath == "" || *payload == "" {
-		return fmt.Errorf("--bundle and --payload are required")
+	if *payload == "" {
+		return fmt.Errorf("--payload is required")
 	}
-	b, err := LoadClientBundle(*bundlePath)
+	b, err := resolveBundle(*bundlePath, *network)
 	if err != nil {
 		return err
 	}

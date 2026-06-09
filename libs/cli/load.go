@@ -17,7 +17,8 @@ import (
 func RunLoad(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("load", flag.ContinueOnError)
 	var (
-		bundlePath = fs.String("bundle", "", "client bundle JSON (network identity + transport) — REQUIRED")
+		bundlePath = fs.String("bundle", "", "client bundle JSON (else --network or the active network)")
+		network    = fs.String("network", "", "stored network name (else the active network)")
 		n          = fs.Int("n", 1000, "total entries to submit (roots + delegations + amendments)")
 		amendRatio = fs.Float64("amend-ratio", 0.5, "fraction of entries that amend a recent root")
 		delegRatio = fs.Float64("delegate-ratio", 0, "fraction of new entities given a delegation ⇒ their amendments use delegated authority; 0 = all same-signer, 1 = all delegated")
@@ -33,10 +34,7 @@ func RunLoad(ctx context.Context, args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if *bundlePath == "" {
-		return fmt.Errorf("--bundle is required")
-	}
-	b, err := LoadClientBundle(*bundlePath)
+	b, err := resolveBundle(*bundlePath, *network)
 	if err != nil {
 		return err
 	}

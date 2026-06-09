@@ -31,7 +31,8 @@ import (
 func RunProof(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("proof", flag.ContinueOnError)
 	var (
-		bundlePath = fs.String("bundle", "", "client bundle JSON — REQUIRED")
+		bundlePath = fs.String("bundle", "", "client bundle JSON (else --network or the active network)")
+		network    = fs.String("network", "", "stored network name (else the active network)")
 		seq        = fs.Uint64("seq", 0, "entry sequence to prove — REQUIRED")
 		smtKeyHex  = fs.String("smt-key", "", "64-hex SMT key (default: derived from log DID + seq)")
 		out        = fs.String("out", "", "write the portable v2 proof to this file (else verify + render)")
@@ -40,10 +41,7 @@ func RunProof(ctx context.Context, args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if *bundlePath == "" {
-		return fmt.Errorf("--bundle is required")
-	}
-	b, err := LoadClientBundle(*bundlePath)
+	b, err := resolveBundle(*bundlePath, *network)
 	if err != nil {
 		return err
 	}
