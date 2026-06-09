@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/baseproof/baseproof/core/smt"
+	sdklog "github.com/baseproof/baseproof/log"
 	sdkbundle "github.com/baseproof/baseproof/log/bundle"
 	"github.com/baseproof/baseproof/network"
 	"github.com/baseproof/baseproof/types"
@@ -102,8 +103,12 @@ func RunProof(ctx context.Context, args []string) error {
 	}
 
 	nid := proof.NetworkID
-	fmt.Printf("proof: v2 seq=%d network=%s verified offline — sections %v\n",
-		*seq, hex.EncodeToString(nid[:]), res.Coverage.Verified)
+	fmt.Printf("proof: v2  network=%s  seq=%d  tree_size=%d  quorum=%d-of-%d  (verified offline)\n",
+		hex.EncodeToString(nid[:]), *seq, res.TreeSize, res.WitnessQuorum.Have, res.WitnessQuorum.Need)
+	fmt.Printf("proof: verified: %v\n", res.Coverage.Verified)
+	if len(res.Coverage.NotAsserted) > 0 {
+		fmt.Printf("proof: not asserted (absent sections): %v\n", res.Coverage.NotAsserted)
+	}
 	if *out != "" {
 		if err := writeProofFile(proof, *out); err != nil {
 			return err
@@ -136,22 +141,34 @@ func writeProofFile(proof *sdkbundle.StandaloneProof, path string) error {
 }
 
 // ledgerReaderFor builds the LedgerReader the gather drives, from the bundle's
-// transport: a pinned CA ⇒ open-HTTPS server-verify; otherwise plaintext.
+// transport posture: a client cert+key ⇒ mTLS; else a pinned CA ⇒ open-HTTPS
+// server-verify; else plaintext.
 func ledgerReaderFor(b *ClientBundle, logDID string) (*clitools.LedgerClient, error) {
-	if b.Transport.CAFile != "" {
-		server := ""
-		if u, err := url.Parse(b.Endpoint); err == nil {
-			server = u.Hostname()
-		}
-		if logDID != "" {
-			return clitools.NewServerVerifyLedgerClient(b.Endpoint, b.Transport.CAFile, server, logDID)
-		}
-		return clitools.NewServerVerifyLedgerClient(b.Endpoint, b.Transport.CAFile, server)
-	}
+	t := b.Transport
+	var dids []string
 	if logDID != "" {
-		return clitools.NewLedgerClient(b.Endpoint, logDID)
+		dids = []string{logDID}
 	}
-	return clitools.NewLedgerClient(b.Endpoint)
+	switch {
+	case t.ClientCertFile != "" && t.ClientKeyFile != "":
+		tlsCfg := sdklog.ClientTLSConfig{
+			ClientCertFile: t.ClientCertFile, ClientKeyFile: t.ClientKeyFile,
+			RootCAFile: t.CAFile, ServerName: hostOf(b.Endpoint),
+		}
+		return clitools.NewMTLSLedgerClient(b.Endpoint, tlsCfg, dids...)
+	case t.CAFile != "":
+		return clitools.NewServerVerifyLedgerClient(b.Endpoint, t.CAFile, hostOf(b.Endpoint), dids...)
+	default:
+		return clitools.NewLedgerClient(b.Endpoint, dids...)
+	}
+}
+
+// hostOf returns an endpoint URL's host (for the TLS ServerName / SNI).
+func hostOf(endpoint string) string {
+	if u, err := url.Parse(endpoint); err == nil {
+		return u.Hostname()
+	}
+	return ""
 }
 
 // governanceSchemas projects the bundle's per-network schema positions (sequence

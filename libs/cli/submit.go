@@ -30,7 +30,9 @@ func RunSubmit(ctx context.Context, args []string) error {
 		network    = fs.String("network", "", "stored network name (else the active network)")
 		payload    = fs.String("payload", "", "entry payload (UTF-8) — REQUIRED")
 		amend      = fs.Int64("amend", -1, "amend the entity at this sequence (signed by its key); omit to create a new entity")
-		keyFile    = fs.String("key-file", "", "32-byte hex secp256k1 signer key; REQUIRED for --amend, optional for a new root")
+		delegateTo = fs.String("delegate-to", "", "mint a delegation: the entity (--key-file) grants authority to this delegate DID")
+		delegation = fs.Int64("delegation", -1, "with --amend: a DELEGATED amendment citing the delegation at this sequence (--key-file is the delegate)")
+		keyFile    = fs.String("key-file", "", "32-byte hex secp256k1 signer key; REQUIRED for --amend/--delegate-to/delegated, optional for a new entity")
 		outKey     = fs.String("out-key", "", "write the generated signer key (hex) here (new root only)")
 		token      = fs.String("token", "", "Mode A credit token; empty ⇒ Mode B PoW")
 		difficulty = fs.Int("difficulty", 0, "Mode B PoW difficulty (0 ⇒ query the ledger)")
@@ -66,8 +68,8 @@ func RunSubmit(ctx context.Context, args []string) error {
 		if id, err = loadgen.IdentityFromScalar(raw); err != nil {
 			return err
 		}
-	case *amend >= 0:
-		return fmt.Errorf("--amend requires --key-file (an amendment must be signed by the root's original key)")
+	case *amend >= 0 || *delegation >= 0 || *delegateTo != "":
+		return fmt.Errorf("this operation requires --key-file (the signer: the entity for --amend/--delegate-to, the delegate for a delegated amendment)")
 	default:
 		kp, gerr := sdkdid.GenerateDIDKeySecp256k1()
 		if gerr != nil {
@@ -84,20 +86,33 @@ func RunSubmit(ctx context.Context, args []string) error {
 
 	// Build the entry.
 	var entry *envelope.Entry
-	if *amend >= 0 {
-		entry, err = builder.BuildAmendment(builder.AmendmentParams{
-			Destination: logDID,
-			SignerDID:   id.DID,
-			TargetRoot:  types.LogPosition{LogDID: logDID, Sequence: uint64(*amend)},
-			Payload:     []byte(*payload),
-			EventTime:   time.Now().UTC().UnixMicro(),
+	kind := "entity"
+	switch {
+	case *delegateTo != "":
+		kind = "delegation→" + short(*delegateTo)
+		entry, err = builder.BuildDelegation(builder.DelegationParams{
+			Destination: logDID, SignerDID: id.DID, DelegateDID: *delegateTo,
+			Payload: []byte(*payload), EventTime: time.Now().UTC().UnixMicro(),
 		})
-	} else {
+	case *amend >= 0 && *delegation >= 0:
+		kind = fmt.Sprintf("delegated-amendment-of-%d-via-%d", *amend, *delegation)
+		entry, err = builder.BuildPathBEntry(builder.PathBParams{
+			Destination: logDID, SignerDID: id.DID,
+			TargetRoot:         types.LogPosition{LogDID: logDID, Sequence: uint64(*amend)},
+			DelegationPointers: []types.LogPosition{{LogDID: logDID, Sequence: uint64(*delegation)}},
+			Payload:            []byte(*payload), EventTime: time.Now().UTC().UnixMicro(),
+		})
+	case *amend >= 0:
+		kind = fmt.Sprintf("amendment-of-%d", *amend)
+		entry, err = builder.BuildAmendment(builder.AmendmentParams{
+			Destination: logDID, SignerDID: id.DID,
+			TargetRoot: types.LogPosition{LogDID: logDID, Sequence: uint64(*amend)},
+			Payload:    []byte(*payload), EventTime: time.Now().UTC().UnixMicro(),
+		})
+	default:
 		entry, err = builder.BuildRootEntity(builder.RootEntityParams{
-			Destination: logDID,
-			SignerDID:   id.DID,
-			Payload:     []byte(*payload),
-			EventTime:   time.Now().UTC().UnixMicro(),
+			Destination: logDID, SignerDID: id.DID,
+			Payload: []byte(*payload), EventTime: time.Now().UTC().UnixMicro(),
 		})
 	}
 	if err != nil {
@@ -116,10 +131,6 @@ func RunSubmit(ctx context.Context, args []string) error {
 		return err
 	}
 
-	kind := "root"
-	if *amend >= 0 {
-		kind = fmt.Sprintf("amendment-of-%d", *amend)
-	}
 	key := smt.DeriveKey(types.LogPosition{LogDID: logDID, Sequence: seq})
 	fmt.Printf("submit: %s sequenced — seq=%d signer=%s smt_key=%s\n", kind, seq, id.DID, hex.EncodeToString(key[:]))
 	return nil
