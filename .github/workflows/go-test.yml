@@ -153,4 +153,9 @@ jobs:
       # Proves the production image builds (non-root, pinned base,
       # version-stamped) on every PR.
       - name: docker build
-        run: docker build --build-arg VERSION=ci -t standalone-witness:ci .
+        # The witness Dockerfile COPYs libs/ + services/witness/, so the build
+        # CONTEXT must be the REPO ROOT — not services/witness, this workflow's
+        # default working-directory (set for the Go steps). Override to the
+        # workspace root and pass -f, matching the Dockerfile's documented build.
+        working-directory: ${{ github.workspace }}
+        run: docker build -f services/witness/Dockerfile --build-arg VERSION=ci -t standalone-witness:ci .
