@@ -101,8 +101,16 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          # latest=false: the upstream variant must NEVER own the bare `:latest`
+          # tag. metadata-action's `suffix` defaults to onlatest=false, so a
+          # `latest=auto` here emits an UN-suffixed `:latest` that — this step
+          # running AFTER the fork build+push — overwrites `:latest` to point at
+          # the upstream image. Pinning latest=false keeps `:latest` owned solely
+          # by the fork (default) build; the upstream image is reachable only via
+          # its `-upstream`-suffixed tags (e.g. 0.1.0-upstream), which is exactly
+          # what the e2e selects via E2E_TESSERA=upstream.
           flavor: |
-            latest=auto
+            latest=false
             suffix=-upstream
           tags: |
             type=semver,pattern={{version}}
