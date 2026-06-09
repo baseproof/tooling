@@ -74,7 +74,13 @@ RUN --mount=type=secret,id=ca_bundle \
       cat /run/secrets/ca_bundle >> /etc/ssl/certs/ca-certificates.crt; \
     fi; \
     apk --no-cache add ca-certificates wget tzdata \
-    && adduser -D -H -u 65532 witness
+    && adduser -D -H -u 65532 witness \
+    # Standard config-injection root; Secrets mounted at /etc/witness/{keys,tls}
+    # and /etc/witness/bootstrap.json are auto-detected by the daemon. Pre-created
+    # + owned so subPath/dir mounts have a parent on a read-only rootfs. No config
+    # is baked in — only the empty, correctly-owned dirs.
+    && mkdir -p /etc/witness/keys /etc/witness/tls \
+    && chown -R 65532:65532 /etc/witness
 
 WORKDIR /
 

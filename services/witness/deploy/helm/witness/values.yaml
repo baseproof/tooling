@@ -1,0 +1,115 @@
+# =============================================================================
+# values.yaml — Baseproof witness Helm chart defaults.
+#
+# The witness binary is fully env/flag-driven and auto-detects cert/key/bootstrap
+# files at the STANDARD mount paths under /etc/witness. This chart's job is just
+# to (a) render the non-secret WITNESS_* env into a ConfigMap and (b) mount the
+# operator's Secrets at those standard paths — NO cert path is ever put in env.
+# =============================================================================
+
+image:
+  repository: ghcr.io/baseproof/tooling/witness
+  # Empty tag falls back to .Chart.AppVersion.
+  tag: ""
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+
+nameOverride: ""
+fullnameOverride: ""
+
+# Witnesses are independent notaries; run as many replicas as you like (each is
+# the SAME identity only if they share the same signingKey Secret — typically you
+# deploy N releases with N distinct keys for a real K-of-N set).
+replicas: 1
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+podAnnotations:
+  prometheus.io/scrape: "true"
+  prometheus.io/port: "8081"
+  prometheus.io/path: "/metrics"
+podLabels: {}
+
+# Non-root by default (matches the image's uid 65532).
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# TLS posture. true ⇒ the witness serves HTTPS (mount a serverTLS Secret below)
+# AND the liveness/readiness probe scheme flips to HTTPS. false ⇒ plain HTTP
+# (terminate TLS at a proxy / mesh).
+tls:
+  enabled: false
+
+container:
+  port: 8081
+  resources:
+    requests: {cpu: 50m, memory: 64Mi}
+    limits: {cpu: "1", memory: 256Mi}
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop: [ALL]
+  livenessProbe:
+    httpGet: {path: /healthz, port: http}
+    initialDelaySeconds: 3
+    periodSeconds: 10
+    timeoutSeconds: 2
+  readinessProbe:
+    httpGet: {path: /healthz, port: http}
+    initialDelaySeconds: 3
+    periodSeconds: 5
+    timeoutSeconds: 2
+    failureThreshold: 3
+
+service:
+  type: ClusterIP
+  port: 8081
+  annotations: {}
+
+# Non-secret WITNESS_* env → ConfigMap (envFrom). 1:1 with the env the binary
+# reads (cmd/witness/main.go flag defaults).
+config:
+  addr: ":8081"
+  cosignScheme: "ecdsa"      # ecdsa (secp256k1 genesis did:key) | bls (BLS12-381)
+  cosignPurposes: "tree-head"
+  publicURL: ""              # required only for cosignScheme=bls (on-log endpoint decl)
+  otlpTracesEndpoint: ""
+
+# Free-form extra WITNESS_* env (verbatim key→value strings).
+extraEnv: {}
+# Flag-only tunables (not env-backed), e.g. ["-max-rps=50", "-burst=100"].
+extraArgs: []
+
+# --- Cert / key / bootstrap injection (the standard-mount convention) ---------
+# Set the existing Secret; the chart mounts it at the STANDARD path and the binary
+# auto-detects it (zero env). Generate the key + bootstrap off-cluster, e.g.:
+#   kubectl -n witness create secret generic witness-key --from-file=witness.pem=witness-1.pem
+#   kubectl -n witness create secret generic witness-bootstrap --from-file=bootstrap.json=network-bootstrap.json
+
+# REQUIRED: the cosign signing key (PEM). Mounted at /etc/witness/keys/witness.pem.
+signingKey:
+  existingSecret: ""
+  key: "witness.pem"        # the key inside the Secret (projected to witness.pem)
+
+# REQUIRED: the network BootstrapDocument. Mounted at /etc/witness/bootstrap.json.
+bootstrap:
+  existingSecret: ""
+  key: "bootstrap.json"
+
+# OPTIONAL: server TLS (a kubernetes.io/tls Secret: tls.crt + tls.key). Mounted at
+# /etc/witness/tls. Set tls.enabled=true alongside this.
+serverTLS:
+  existingSecret: ""

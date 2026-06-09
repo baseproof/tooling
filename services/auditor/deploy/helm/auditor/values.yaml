@@ -1,0 +1,129 @@
+# =============================================================================
+# values.yaml — Baseproof auditor Helm chart defaults.
+#
+# The auditor binary is fully env/flag-driven and auto-detects bootstrap, the
+# gossip signing key, and the amendment manifest at the STANDARD mount paths
+# under /etc/auditor. This chart's job is just to (a) render the non-secret
+# AUDITOR_* env into a ConfigMap, (b) inject the gossip DSN from a Secret, and
+# (c) mount the operator's Secrets at those standard paths — NO file path is
+# ever put in env (the binary auto-detects them).
+#
+# The auditor serves PLAIN HTTP ONLY (no server TLS); probes are always HTTP.
+# =============================================================================
+
+image:
+  repository: ghcr.io/baseproof/tooling/auditor
+  # Empty tag falls back to .Chart.AppVersion.
+  tag: ""
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+
+nameOverride: ""
+fullnameOverride: ""
+
+# The auditor is a singleton verifier; one replica is the norm.
+replicas: 1
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+podAnnotations:
+  prometheus.io/scrape: "true"
+  prometheus.io/port: "8088"
+  prometheus.io/path: "/metrics"
+podLabels: {}
+
+# Non-root by default (matches the image's uid 65532).
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+container:
+  port: 8088
+  resources:
+    requests: {cpu: 50m, memory: 128Mi}
+    limits: {cpu: "1", memory: 512Mi}
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop: [ALL]
+  livenessProbe:
+    httpGet: {path: /healthz, port: http}
+    initialDelaySeconds: 3
+    periodSeconds: 10
+    timeoutSeconds: 2
+  readinessProbe:
+    httpGet: {path: /healthz, port: http}
+    initialDelaySeconds: 3
+    periodSeconds: 5
+    timeoutSeconds: 2
+    failureThreshold: 3
+
+service:
+  type: ClusterIP
+  port: 8088
+  annotations: {}
+
+# Non-secret AUDITOR_* env → ConfigMap (envFrom). Each key here maps 1:1 to the
+# env var the binary reads (cmd/auditor/main.go flag defaults). Keys are emitted
+# only when non-empty, EXCEPT listenAddr which is always rendered.
+config:
+  listenAddr: ":8088"
+  witnessQuorumK: ""
+  peers: ""                          # e.g. "logDID=baseURL,..."
+  pollInterval: ""
+  equivocationScanInterval: ""
+  horizonInterval: ""
+  gossipRetentionDays: ""
+  pruneInterval: ""
+  otlpTracesEndpoint: ""
+
+# Free-form extra AUDITOR_* env (verbatim key→value strings).
+extraEnv: {}
+# Flag-only tunables (not env-backed).
+extraArgs: []
+
+# --- Database (REQUIRED for the full verify pipeline) -------------------------
+# The binary reads AUDITOR_GOSSIP_DSN (a secret). Pick exactly one path:
+#   - existingSecret: production. Pre-create a Secret with key AUDITOR_GOSSIP_DSN
+#     (rotation by external-secrets, Vault, etc.).
+#   - url: dev / CI. Chart writes a Secret "<fullname>-db" with this URL inline.
+# Injected into the container as env AUDITOR_GOSSIP_DSN via secretKeyRef.
+database:
+  existingSecret: ""
+  url: ""
+
+# --- Cert / key / bootstrap injection (the standard-mount convention) ---------
+# Set the existing Secret; the chart mounts it at the STANDARD path and the
+# binary auto-detects it (zero env). Generate the inputs off-cluster, e.g.:
+#   kubectl -n auditor create secret generic auditor-bootstrap --from-file=bootstrap.json=network-bootstrap.json
+#   kubectl -n auditor create secret generic auditor-gossip-key --from-file=gossip-signing.pem=gossip-signing.pem
+
+# REQUIRED: the network BootstrapDocument. Mounted at /etc/auditor/bootstrap.json.
+bootstrap:
+  existingSecret: ""
+  key: "bootstrap.json"
+
+# OPTIONAL: gossip signing key (PEM). Only needed when
+# config.equivocationScanInterval > 0 (the push-leg equivocation scanner).
+# When set, mounted at /etc/auditor/keys/gossip-signing.pem.
+gossipSigningKey:
+  existingSecret: ""
+  key: "gossip-signing.pem"        # the key inside the Secret (projected to gossip-signing.pem)
+
+# OPTIONAL: auditor scope-amendment manifest. When set, mounted at
+# /etc/auditor/amendment.json.
+amendment:
+  existingSecret: ""
+  key: "amendment.json"

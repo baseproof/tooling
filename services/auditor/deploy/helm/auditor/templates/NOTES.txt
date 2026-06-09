@@ -1,0 +1,29 @@
+Auditor {{ .Chart.AppVersion }} deployed as {{ include "auditor.fullname" . }}.
+
+Listen        : {{ .Values.config.listenAddr }}  (Service {{ include "auditor.fullname" . }}:{{ .Values.service.port }})
+TLS           : plain HTTP only (terminate TLS at a proxy/mesh)
+
+Gossip DSN (secret, AUDITOR_GOSSIP_DSN):
+{{- if .Values.database.existingSecret }}
+  from operator Secret {{ .Values.database.existingSecret }} (key AUDITOR_GOSSIP_DSN)
+{{- else }}
+  from chart-managed Secret {{ include "auditor.fullname" . }}-db (key AUDITOR_GOSSIP_DSN)
+{{- end }}
+
+Injected at the standard paths (auto-detected, no env):
+  /etc/auditor/bootstrap.json     ← Secret {{ .Values.bootstrap.existingSecret }}
+{{- if .Values.gossipSigningKey.existingSecret }}
+  /etc/auditor/keys/gossip-signing.pem ← Secret {{ .Values.gossipSigningKey.existingSecret }}
+{{- end }}
+{{- if .Values.amendment.existingSecret }}
+  /etc/auditor/amendment.json     ← Secret {{ .Values.amendment.existingSecret }}
+{{- end }}
+
+Liveness: GET /healthz on the http listener (port {{ .Values.container.port }}).
+{{- if .Values.config.equivocationScanInterval }}
+{{- if not .Values.gossipSigningKey.existingSecret }}
+
+WARNING: config.equivocationScanInterval is set but gossipSigningKey.existingSecret
+is empty — the equivocation scanner's push leg needs a gossip identity to emit.
+{{- end }}
+{{- end }}

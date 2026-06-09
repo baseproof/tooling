@@ -1,0 +1,25 @@
+{{/*
+Non-secret WITNESS_* environment. Sourced via envFrom (deployment.yaml). The
+cosign key, bootstrap doc, and TLS material are NOT here — they are mounted
+Secrets the binary auto-detects at the standard /etc/witness paths.
+*/}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "witness.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "witness.labels" . | nindent 4 }}
+data:
+  WITNESS_ADDR: {{ .Values.config.addr | quote }}
+  WITNESS_COSIGN_SCHEME: {{ .Values.config.cosignScheme | quote }}
+  WITNESS_COSIGN_PURPOSES: {{ .Values.config.cosignPurposes | quote }}
+  {{- if .Values.config.publicURL }}
+  WITNESS_PUBLIC_URL: {{ .Values.config.publicURL | quote }}
+  {{- end }}
+  {{- if .Values.config.otlpTracesEndpoint }}
+  WITNESS_OTLP_TRACES_ENDPOINT: {{ .Values.config.otlpTracesEndpoint | quote }}
+  {{- end }}
+  {{- range $k, $v := .Values.extraEnv }}
+  {{ $k }}: {{ $v | quote }}
+  {{- end }}
