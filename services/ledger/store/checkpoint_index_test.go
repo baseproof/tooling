@@ -79,10 +79,10 @@ func TestCheckpointIndex_AtOrAboveAndBelowAcrossBuckets(t *testing.T) {
 		ok        bool
 	}{
 		{0, 5, true}, {5, 5, true}, {6, 100, true},
-		{101, B + 3, true},     // crosses bucket 0→1
-		{B + 4, B + 9, true},   // within bucket 1
+		{101, B + 3, true},      // crosses bucket 0→1
+		{B + 4, B + 9, true},    // within bucket 1
 		{B + 10, 2*B + 1, true}, // crosses bucket 1→2
-		{2*B + 2, 0, false},    // past the last published → none
+		{2*B + 2, 0, false},     // past the last published → none
 	} {
 		got, ok, err := idx.AtOrAbove(ctx, c.min, maxSize)
 		if err != nil {

@@ -433,6 +433,33 @@ func (s *S3) HeadObject(ctx context.Context, key string) (bool, error) {
 	return true, nil
 }
 
+// ListObjects calls fn for each object key under prefix, paginating internally
+// (S3 ListObjectsV2). The prefix is namespaced like every other key; the keys
+// passed to fn are the on-wire keys (callers that need a logical id parse it from
+// the key — the SMT tile backfill reads the trailing content-hash segment, which
+// the namespace prefix does not affect). fn returning an error aborts the scan.
+func (s *S3) ListObjects(ctx context.Context, prefix string, fn func(key string) error) error {
+	p := s3.NewListObjectsV2Paginator(s.client, &s3.ListObjectsV2Input{
+		Bucket: aws.String(s.bucket),
+		Prefix: aws.String(s.nsKey(prefix)),
+	})
+	for p.HasMorePages() {
+		page, err := p.NextPage(ctx)
+		if err != nil {
+			return fmt.Errorf("bytestore/s3: ListObjects prefix=%q: %w", prefix, err)
+		}
+		for _, obj := range page.Contents {
+			if obj.Key == nil {
+				continue
+			}
+			if err := fn(*obj.Key); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 // isS3NotFound matches the various shapes the AWS SDK uses for
 // "this object doesn't exist." NoSuchKey is the canonical S3 error;
 // SDK v2 also returns generic smithy.OperationError wrapping

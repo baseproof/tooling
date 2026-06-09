@@ -26,6 +26,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
 	"sync"
 	"sync/atomic"
 
@@ -55,6 +56,16 @@ type TailedNodeStore struct {
 	// reached without its top (the compression top-skip). probe nil ⇒ trace off.
 	probe      SMTTileStore
 	missLogged atomic.Int64
+
+	// Debug eviction-shadow (LEDGER_TRACE_EVICTION=1). Instead of dropping pruned
+	// nodes, retain them here and resolve Get from them — making the prune
+	// NON-DESTRUCTIVE for one diagnostic run. If a run that faulted "missing node
+	// (referenced by ancestor)" then completes cleanly with no leaf loss, the PRUNE
+	// evicted nodes the integration walk still needed (and every such node is logged
+	// from Get); if it STILL faults, the missing node was evicted by the tile
+	// read-through cache, not the prune. Off by default (the shadow is unbounded).
+	traceEvict bool
+	evicted    map[[32]byte]smt.Node
 }
 
 // SetMissProbe wires the durable tile store used to classify a Get miss under the
@@ -66,7 +77,12 @@ var _ smt.NodeStore = (*TailedNodeStore)(nil)
 // NewTailedNodeStore wraps a durable tile-backed NodeStore with an in-memory
 // tail of not-yet-tiled nodes.
 func NewTailedNodeStore(tiles smt.NodeStore) *TailedNodeStore {
-	return &TailedNodeStore{tail: make(map[[32]byte]smt.Node), tiles: tiles}
+	s := &TailedNodeStore{tail: make(map[[32]byte]smt.Node), tiles: tiles}
+	if os.Getenv("LEDGER_TRACE_EVICTION") != "" {
+		s.traceEvict = true
+		s.evicted = make(map[[32]byte]smt.Node)
+	}
+	return s
 }
 
 // Get returns the node for hash: the un-tiled tail first, then durable tiles.
@@ -77,9 +93,24 @@ func (s *TailedNodeStore) Get(hash [32]byte) (smt.Node, error) {
 	}
 	s.mu.RLock()
 	n, ok := s.tail[hash]
+	var ev smt.Node
+	var evok bool
+	if !ok && s.traceEvict {
+		ev, evok = s.evicted[hash]
+	}
 	s.mu.RUnlock()
 	if ok {
 		return n, nil
+	}
+	if evok {
+		// The integration walk (SDK SetLeaves → jellyfish_node.go) dereferenced this
+		// interior node BY HASH; it was pruned from the tail and a TiledNodeStore
+		// cannot re-fetch an interior by hash. Without the shadow this is the
+		// "missing node (referenced by ancestor)" fault that demotes the entry to
+		// PathD and drops its leaf. Serving it proves the PRUNE is the evictor.
+		slog.Warn("tailed-store: served node from EVICTED-SHADOW — prune evicted a node the integration still needed (would have faulted 'missing node referenced by ancestor')",
+			"node", fmt.Sprintf("%x", hash[:8]))
+		return ev, nil
 	}
 	tn, err := s.tiles.Get(hash)
 	if tileVerifyFetch && s.probe != nil && err == nil && tn == nil {
@@ -98,15 +129,14 @@ func (s *TailedNodeStore) probeMiss(hash [32]byte) {
 	if s.missLogged.Add(1) > 64 {
 		return
 	}
-	ctx := context.Background()
-	isTop, _ := s.probe.Exists(ctx, hash) // HEAD
-	gb, gerr := s.probe.Fetch(ctx, hash)  // GET
+	v := ClassifyTileMiss(context.Background(), s.probe, hash)
 	slog.Default().Error("BUILDER NODE MISS: not in tail, not fetchable from tiles (leaf-loss point)",
 		"node", fmt.Sprintf("%x", hash[:]),
 		"tile_path", smt.TilePath(hash),
-		"is_tile_top_HEAD", isTop, // true=durable TOP but GET failed; false=INTERIOR (top-skip)
-		"get_bytes", len(gb),
-		"get_err", fmt.Sprintf("%v", gerr),
+		"verdict", v.Kind, // INTERIOR_TOP_SKIP | STRANDED_TOP_HEAD_GET | RESOLVES_NOW
+		"is_tile_top_HEAD", v.IsTileTopHEAD, // false ⇒ band INTERIOR (compression top-skip)
+		"get_bytes", v.GetBytes,
+		"get_err", v.GetErr,
 	)
 }
 
@@ -171,6 +201,9 @@ func (s *TailedNodeStore) PruneOrphans() (dropped int) {
 	reachable := s.reachableInTail(s.committedRoot)
 	for h := range s.tail {
 		if _, keep := reachable[h]; !keep {
+			if s.traceEvict {
+				s.evicted[h] = s.tail[h] // debug: retain for the eviction-shadow
+			}
 			delete(s.tail, h)
 			dropped++
 		}
@@ -196,6 +229,9 @@ func (s *TailedNodeStore) PruneTiled(ctx context.Context, exists func(ctx contex
 	defer s.mu.Unlock()
 	for h := range s.tail {
 		if ok, err := exists(ctx, h); err == nil && ok {
+			if s.traceEvict {
+				s.evicted[h] = s.tail[h] // debug: retain for the eviction-shadow
+			}
 			delete(s.tail, h)
 		}
 	}

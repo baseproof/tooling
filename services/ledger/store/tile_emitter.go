@@ -73,7 +73,14 @@ func (e *BuildTilesEmitter) verifyFetchOnExists(ctx context.Context, id [32]byte
 type BuildTilesEmitter struct {
 	nodes smt.NodeStore
 	tiles SMTTileStore
+	index NodeIndexStore // optional durable node→owning-top index (producer + read backstop)
 }
+
+// SetNodeIndex installs the durable node index the emitter (a) populates at emit
+// time for every interior it makes durable and (b) consults on its own per-emit
+// tile read-through. nil keeps the legacy top-only behavior. Wired in boot
+// (wire.go) when LEDGER_NODE_INDEX is enabled.
+func (e *BuildTilesEmitter) SetNodeIndex(idx NodeIndexStore) { e.index = idx }
 
 // tailSnapshotter is the optional capability a NodeStore exposes to drive incremental
 // tiling: its un-tiled tail is the dirty set BuildDirtyTiles recurses over. The
@@ -131,11 +138,28 @@ func (e *BuildTilesEmitter) EmitDurable(ctx context.Context, fromRoot [32]byte, 
 	// Every node in every tile of tileSet is now durable (just-PUT, or already
 	// present and skipped above). Hash them so the reconciler can evict exactly these
 	// from the tail — a strictly fail-closed prune signal (evict iff durable). Empty
-	// for a no-tile committedRoot.
+	// for a no-tile committedRoot. In the same pass, collect each INTERIOR node's
+	// owning tile top for the durable node index (tops resolve by direct fetch, so
+	// their self-mapping is never consulted).
 	durable := make(map[[32]byte]struct{})
-	for _, tile := range tileSet {
+	var idxEntries []NodeIndexEntry
+	for top, tile := range tileSet {
 		for i := range tile.Nodes {
-			durable[smt.HashNode(tile.Nodes[i])] = struct{}{}
+			h := smt.HashNode(tile.Nodes[i])
+			durable[h] = struct{}{}
+			if e.index != nil && h != top {
+				idxEntries = append(idxEntries, NodeIndexEntry{Node: h, Top: top})
+			}
+		}
+	}
+	// Persist the index BEFORE returning — the reconciler's subsequent PruneTiled
+	// keys on exactly this durable set, so writing the index here makes every node
+	// it is about to evict index-resolvable first (GC-consistency). Fail-closed: on
+	// error EmitDurable returns nil, so the caller prunes nothing and the tail
+	// retains the nodes for the next emit (no node is ever stranded).
+	if e.index != nil && len(idxEntries) > 0 {
+		if err := e.index.PutNodes(ctx, idxEntries); err != nil {
+			return nil, fmt.Errorf("store/tile-emitter: persist node index (%d nodes): %w", len(idxEntries), err)
 		}
 	}
 	return durable, nil
@@ -175,9 +199,18 @@ func (e *BuildTilesEmitter) buildTiles(ctx context.Context, fromRoot, committedR
 	// baseproof tile_pruned_cap_test.go: a smaller cap strands at a smaller tree).
 	// This store holds the whole pass working set and is discarded on return, so it
 	// holds NO O(history) memory — the cap stays on the long-lived proof path.
+	emitTiled := smt.NewTiledNodeStoreCapped(ctx, e.tiles, nil, 0)
+	if e.index != nil {
+		// Complete the per-emit read-through too: re-reading a re-emitted dirty
+		// band's CLEAN interiors (collectBandTile) faults once the prior tile is
+		// pruned and the same-position warm-walk misses it (a compression split).
+		// The index resolves the interior by its owning top — closing the EMITTER
+		// face of the fault, mirroring the builder read-through.
+		emitTiled.SetNodeIndex(e.index)
+	}
 	emitNodes := &tailReadThrough{
 		tail:  tailed.Tail(),
-		tiled: smt.NewTiledNodeStoreCapped(ctx, e.tiles, nil, 0),
+		tiled: emitTiled,
 	}
 	tiles, err := smt.BuildDirtyTiles(emitNodes, emitNodes.tail, committedRoot, fromRoot, smt.TileHeight, known)
 	if err != nil {
