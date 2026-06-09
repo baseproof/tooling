@@ -4,11 +4,14 @@ description: Baseproof ledger transparency log — singleton-writer Kubernetes d
 type: application
 
 # Chart version. Bump on every chart change.
-version: 0.2.0
+version: 0.2.1
 
-# Tracks the ledger image tag this chart's defaults target.
+# Tracks the ledger image tag this chart's defaults target — MUST be a tag that
+# exists on ghcr.io/baseproof/tooling/ledger (the deployment falls back to
+# `repository:{{ .Chart.AppVersion }}` when image.tag is unset; the old "1.0.0"
+# was never published, so the default could not pull).
 # Override per-deploy via .Values.image.tag.
-appVersion: "1.0.0"
+appVersion: "0.1.5"
 
 kubeVersion: ">= 1.23.0"
 

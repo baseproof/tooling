@@ -96,13 +96,35 @@ extraArgs: []
 
 # --- Database (REQUIRED for the full verify pipeline) -------------------------
 # The binary reads AUDITOR_GOSSIP_DSN (a secret). Pick exactly one path:
-#   - existingSecret: production. Pre-create a Secret with key AUDITOR_GOSSIP_DSN
-#     (rotation by external-secrets, Vault, etc.).
+#   - postgresql.enabled: in-cluster Postgres via the bitnami sub-chart (below);
+#     the pod composes AUDITOR_GOSSIP_DSN at boot from the sub-chart's Service +
+#     auth Secret — the chart never has to know the password value.
+#   - existingSecret: an EXISTING endpoint (Cloud SQL, RDS, operator-managed).
+#     Pre-create a Secret with key AUDITOR_GOSSIP_DSN (rotation by
+#     external-secrets, Vault, etc.).
 #   - url: dev / CI. Chart writes a Secret "<fullname>-db" with this URL inline.
-# Injected into the container as env AUDITOR_GOSSIP_DSN via secretKeyRef.
 database:
   existingSecret: ""
   url: ""
+
+# In-cluster Postgres via the bitnami sub-chart, mirroring the ledger chart.
+# All keys mirror the bitnami chart verbatim — see its README at
+# https://github.com/bitnami/charts/tree/main/bitnami/postgresql.
+# Used when enabled=true; database.existingSecret / database.url are then ignored.
+postgresql:
+  enabled: false
+  auth:
+    database: auditor_gossip
+    username: auditor_app
+    # Either set inline OR set existingSecret (bitnami auth Secret).
+    password: ""
+    existingSecret: ""
+    secretKeys:
+      userPasswordKey: password
+  primary:
+    persistence:
+      enabled: true
+      size: 20Gi
 
 # --- Cert / key / bootstrap injection (the standard-mount convention) ---------
 # Set the existing Secret; the chart mounts it at the STANDARD path and the

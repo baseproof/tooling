@@ -66,13 +66,34 @@ auditor.validateDatabase trips when neither is supplied.
 {{- end -}}
 
 {{/*
-Validate database mode at template time. Exactly one path must be configured.
-Catches "forgot to set anything" before the pod boots and crash-loops on a
-missing AUDITOR_GOSSIP_DSN.
+Bitnami-postgresql Secret resolution (postgresql.enabled — in-cluster Postgres
+via the sub-chart, mirroring the ledger chart). When
+postgresql.auth.existingSecret is set, the operator's Secret is the source of
+truth; otherwise bitnami creates "<release>-postgresql".
+*/}}
+{{- define "auditor.bitnamiSecretName" -}}
+{{- if .Values.postgresql.auth.existingSecret -}}
+{{- .Values.postgresql.auth.existingSecret -}}
+{{- else -}}
+{{- printf "%s-postgresql" .Release.Name -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "auditor.bitnamiPasswordKey" -}}
+{{- default "password" .Values.postgresql.auth.secretKeys.userPasswordKey -}}
+{{- end -}}
+
+{{/*
+Validate database mode at template time. Exactly one path must be configured:
+postgresql.enabled (in-cluster via Helm), database.existingSecret (existing
+endpoint), or database.url (inline dev DSN). Catches "forgot to set anything"
+before the pod boots and crash-loops on a missing AUDITOR_GOSSIP_DSN.
 */}}
 {{- define "auditor.validateDatabase" -}}
+{{- if not .Values.postgresql.enabled -}}
 {{- if and (not .Values.database.existingSecret) (not .Values.database.url) -}}
-{{- fail "auditor: configure exactly one of database.existingSecret or database.url (the gossip DSN, AUDITOR_GOSSIP_DSN)" -}}
+{{- fail "auditor: configure exactly one of postgresql.enabled=true, database.existingSecret, or database.url (the gossip DSN, AUDITOR_GOSSIP_DSN)" -}}
+{{- end -}}
 {{- end -}}
 {{- end -}}
 

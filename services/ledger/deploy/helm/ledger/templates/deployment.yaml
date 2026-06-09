@@ -188,20 +188,26 @@ spec:
           persistentVolumeClaim:
             claimName: {{ include "ledger.fullname" . }}-antispam
         {{- end }}
+        {{- /* Key material is 0440 (owner root, group-readable): the pod's
+               fsGroup (65532) makes it readable by the non-root process while
+               keeping it from being world-readable inside the container. */}}
         {{- if .Values.signerKeys.enabled }}
         - name: signer-keys
           secret:
             secretName: {{ .Values.signerKeys.existingSecret }}
+            defaultMode: 0440
         {{- end }}
         {{- if .Values.serverTLS.existingSecret }}
         - name: server-tls
           secret:
             secretName: {{ .Values.serverTLS.existingSecret }}
+            defaultMode: 0440
         {{- end }}
         {{- if .Values.bootstrap.existingSecret }}
         - name: bootstrap
           secret:
             secretName: {{ .Values.bootstrap.existingSecret }}
+            defaultMode: 0440
             items:
               - key: {{ .Values.bootstrap.key }}
                 path: bootstrap.json

@@ -45,7 +45,17 @@ podAnnotations:
   prometheus.io/port: "8080"
   prometheus.io/path: "/metrics"
 podLabels: {}
-podSecurityContext: {}
+# The ledger image (v0.1.2+) runs non-root as uid 65532. fsGroup is LOAD-BEARING
+# here: without it a fresh PVC is root-owned (the writer cannot mkdir its
+# WAL/tessera dirs and crashes at boot) and 0440 Secret files are unreadable.
+# With fsGroup, kubelet chowns volumes to gid 65532 so both just work.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
 nodeSelector: {}
 tolerations: []
 affinity: {}
@@ -64,7 +74,13 @@ container:
   resources:
     requests: {cpu: 500m, memory: 512Mi}
     limits:   {cpu: "2",  memory: 2Gi}
-  securityContext: {}
+  # No readOnlyRootFilesystem here: the stateful writer creates dirs under
+  # /var/lib/baseproof when a persistence PVC is disabled. The stateless fleet
+  # charts (witness/auditor) do run read-only.
+  securityContext:
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop: [ALL]
   livenessProbe:
     httpGet: {path: /healthz, port: http}
     initialDelaySeconds: 5
