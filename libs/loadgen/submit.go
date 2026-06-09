@@ -47,13 +47,14 @@ type engine struct {
 }
 
 // workItem is a built-but-not-yet-admitted entry plus the model bookkeeping the
-// discovery phase needs. Exactly one of root/amend is non-nil.
+// discovery phase needs. Exactly one of root/amend/delegFor is non-nil.
 type workItem struct {
-	entry *envelope.Entry
-	priv  *ecdsa.PrivateKey
-	did   string
-	root  *root // non-nil ⇒ a new root entity
-	amend *root // non-nil ⇒ an amendment of this windowed root
+	entry    *envelope.Entry
+	priv     *ecdsa.PrivateKey
+	did      string
+	root     *root // non-nil ⇒ a new root entity
+	amend    *root // non-nil ⇒ an amendment (same-signer or delegated) of this windowed root
+	delegFor *root // non-nil ⇒ a delegation (owner→delegate) that makes this entity delegation-capable
 }
 
 // submitConcurrent runs submit(items[i]) across up to `workers` goroutines and

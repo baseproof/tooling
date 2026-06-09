@@ -18,8 +18,9 @@ func RunLoad(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("load", flag.ContinueOnError)
 	var (
 		bundlePath = fs.String("bundle", "", "client bundle JSON (network identity + transport) — REQUIRED")
-		n          = fs.Int("n", 1000, "total entries to submit (roots + amendments)")
-		amendRatio = fs.Float64("amend-ratio", 0.5, "fraction of entries that amend a recent root (Path A)")
+		n          = fs.Int("n", 1000, "total entries to submit (roots + delegations + amendments)")
+		amendRatio = fs.Float64("amend-ratio", 0.5, "fraction of entries that amend a recent root")
+		delegRatio = fs.Float64("delegate-ratio", 0, "fraction of new entities given a delegation ⇒ their amendments use delegated authority; 0 = all same-signer, 1 = all delegated")
 		workers    = fs.Int("workers", 0, "concurrent PoW/submit workers (0 = NumCPU)")
 		batch      = fs.Int("batch-size", 1, "Mode A: entries per /v1/entries/batch (requires --token)")
 		window     = fs.Int("amend-window", 0, "recent-root amend window K (0 = default 64Ki); bounds memory")
@@ -65,14 +66,15 @@ func RunLoad(ctx context.Context, args []string) error {
 		sink = ow
 	}
 
-	fmt.Printf("load: endpoint=%s log-did=%s n=%d amend-ratio=%.2f workers=%d batch=%d window=%d seed=%d\n",
-		b.Endpoint, logDID, *n, *amendRatio, *workers, *batch, *window, *seed)
+	fmt.Printf("load: endpoint=%s log-did=%s n=%d amend-ratio=%.2f delegate-ratio=%.2f workers=%d batch=%d window=%d seed=%d\n",
+		b.Endpoint, logDID, *n, *amendRatio, *delegRatio, *workers, *batch, *window, *seed)
 
 	st, runErr := loadgen.Run(ctx, loadgen.Config{
 		LedgerURL:      b.Endpoint,
 		LogDID:         logDID,
 		N:              *n,
 		AmendRatio:     *amendRatio,
+		DelegateRatio:  *delegRatio,
 		Seed:           *seed,
 		Token:          *token,
 		Difficulty:     uint32(*difficulty),
@@ -82,8 +84,8 @@ func RunLoad(ctx context.Context, args []string) error {
 		AmendWindow:    *window,
 		HTTPClient:     hc,
 		Progress: func(p loadgen.Progress) {
-			fmt.Printf("load: %d/%d (%.1f%%) roots=%d amend=%d %.1f/s eta=%s\n",
-				p.Submitted, p.N, p.Pct, p.Roots, p.Amendments, p.Rate, p.ETA)
+			fmt.Printf("load: %d/%d (%.1f%%) entities=%d delegations=%d amendments=%d(%d delegated) %.1f/s eta=%s\n",
+				p.Submitted, p.N, p.Pct, p.Roots, p.Delegations, p.Amendments, p.DelegatedAmendments, p.Rate, p.ETA)
 		},
 	}, sink)
 
@@ -95,8 +97,8 @@ func RunLoad(ctx context.Context, args []string) error {
 	if runErr != nil {
 		return runErr
 	}
-	fmt.Printf("load: complete — %d entries (%d roots, %d amendments) in %s\n",
-		st.Submitted, st.Roots, st.Amendments, st.Elapsed.Round(time.Second))
+	fmt.Printf("load: complete — %d entries (%d entities, %d delegations, %d amendments [%d delegated]) in %s\n",
+		st.Submitted, st.Roots, st.Delegations, st.Amendments, st.DelegatedAmendments, st.Elapsed.Round(time.Second))
 	if ow != nil {
 		fmt.Printf("load: oracle = %s (%d leaves)\n", *manifest, ow.Count())
 	}

@@ -49,8 +49,8 @@ and transport pinning. Ship one bundle per network.
 
 usage:
   baseproof submit --bundle b.json --payload <text> [--amend <seq>] [--key-file f] [--out-key f] [--token t]
-        Submit ONE entry to the network: a new root entity, or a Path-A amendment
-        of an existing root (--amend <seq>, signed by the root's key via --key-file).
+        Submit ONE entry to the network: a new entity, or an amendment of an
+        existing entity (--amend <seq>, signed by its key via --key-file).
 
   baseproof proof  --bundle b.json --seq <n> [--smt-key <64hex>]
         Fetch the entry's bundle, verify it (witness quorum + inclusion + SMT) and

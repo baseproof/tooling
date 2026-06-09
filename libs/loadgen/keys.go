@@ -4,8 +4,8 @@ package loadgen
 //
 // The legacy backfill CLI minted every root's keypair with a fresh CSPRNG
 // (did.GenerateDIDKeySecp256k1 → crypto/rand) and RETAINED it for the whole run
-// so a later amendment could re-sign under the same key (Path A's same-signer
-// rule). That retention is O(roots) live heap — the larger half of the backfill
+// so a later amendment could re-sign under the same key (the same-signer rule).
+// That retention is O(roots) live heap — the larger half of the backfill
 // OOM at scale.
 //
 // Instead we DERIVE each root's identity as a pure function of (runSeed,
@@ -36,9 +36,14 @@ import (
 	sdkdid "github.com/baseproof/baseproof/did"
 )
 
-// keyDomain is the HKDF info-string domain separator. Versioned so a future
-// change to the derivation can never collide with a v1 run's keyspace.
-const keyDomain = "baseproof/loadgen/secp256k1-root/v1"
+// keyDomain* are HKDF info-string domain separators — versioned, and distinct
+// per ROLE so a root owner and its delegate derive independent keys at the same
+// index (a delegated amendment must be signed by a genuinely different key than
+// the entity it acts on).
+const (
+	keyDomainRoot     = "baseproof/loadgen/secp256k1-root/v1"
+	keyDomainDelegate = "baseproof/loadgen/secp256k1-delegate/v1"
+)
 
 // Identity is one deterministically-derived signer: a root entity's keypair and
 // its self-certifying did:key. Derived on demand from (seed, Index); never
@@ -60,9 +65,9 @@ func seedBytes(seed int64) []byte {
 // deriveScalar expands the seed into a 32-byte candidate scalar for (idx,
 // counter). counter is bumped only on the astronomically rare invalid-scalar
 // retry, so counter==0 is the deterministic norm.
-func deriveScalar(seed []byte, idx, counter uint64) [32]byte {
-	info := make([]byte, 0, len(keyDomain)+16)
-	info = append(info, keyDomain...)
+func deriveScalar(seed []byte, domain string, idx, counter uint64) [32]byte {
+	info := make([]byte, 0, len(domain)+16)
+	info = append(info, domain...)
 	var idxc [16]byte
 	binary.BigEndian.PutUint64(idxc[0:8], idx)
 	binary.BigEndian.PutUint64(idxc[8:16], counter)
@@ -87,19 +92,31 @@ func identityFromScalar(scalar [32]byte) (priv *ecdsa.PrivateKey, did string, ok
 	return k.ToECDSA(), sdkdid.EncodeDIDKey(sdkdid.MulticodecSecp256k1, compressed), true
 }
 
-// deriveIdentity returns the secp256k1 identity for root index idx under seed. It
-// is a pure function of (seed, idx): the same inputs always yield the same DID +
-// private key, on this machine or any other. seed is the HKDF secret (see
-// seedBytes for the int64 rendering).
-func deriveIdentity(seed []byte, idx uint64) (Identity, error) {
+// deriveIdentityDomain returns the secp256k1 identity for (domain, idx) under
+// seed. It is a pure function of its inputs: the same inputs always yield the same
+// DID + private key, on this machine or any other.
+func deriveIdentityDomain(seed []byte, domain string, idx uint64) (Identity, error) {
 	// A zero scalar (≈2⁻¹²⁸) is the only invalid outcome. Bump the counter and
 	// re-expand if so, so a derivation never fails yet stays deterministic.
 	for counter := uint64(0); counter < 64; counter++ {
-		if priv, did, ok := identityFromScalar(deriveScalar(seed, idx, counter)); ok {
+		if priv, did, ok := identityFromScalar(deriveScalar(seed, domain, idx, counter)); ok {
 			return Identity{Index: idx, DID: did, Priv: priv}, nil
 		}
 	}
-	return Identity{}, fmt.Errorf("loadgen: could not derive a valid secp256k1 scalar for root %d after 64 counters (impossible absent a broken HKDF)", idx)
+	return Identity{}, fmt.Errorf("loadgen: could not derive a valid secp256k1 scalar for %s/%d after 64 counters (impossible absent a broken HKDF)", domain, idx)
+}
+
+// deriveIdentity returns the ROOT-OWNER identity for root index idx (seed is the
+// HKDF secret; see seedBytes for the int64 rendering).
+func deriveIdentity(seed []byte, idx uint64) (Identity, error) {
+	return deriveIdentityDomain(seed, keyDomainRoot, idx)
+}
+
+// deriveDelegateIdentity returns the DELEGATE identity for root index idx — a
+// distinct keyspace from the owner, so a delegated amendment is signed by a
+// different key than the entity it acts on.
+func deriveDelegateIdentity(seed []byte, idx uint64) (Identity, error) {
+	return deriveIdentityDomain(seed, keyDomainDelegate, idx)
 }
 
 // IdentityFromScalar builds a signing Identity from a raw 32-byte secp256k1

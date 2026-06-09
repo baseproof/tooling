@@ -35,6 +35,30 @@ func TestDeriveIdentity_Deterministic(t *testing.T) {
 	}
 }
 
+// TestDeriveDelegate_DistinctFromOwner proves the delegate keyspace is disjoint
+// from the owner keyspace: at the same index the delegate is a DIFFERENT key
+// (a delegated amendment must be signed by a genuinely different signer than the
+// entity it acts on), yet still deterministic.
+func TestDeriveDelegate_DistinctFromOwner(t *testing.T) {
+	seed := seedBytes(1)
+	for _, idx := range []uint64{0, 1, 99, 4096} {
+		owner, err := deriveIdentity(seed, idx)
+		if err != nil {
+			t.Fatalf("owner idx=%d: %v", idx, err)
+		}
+		del, err := deriveDelegateIdentity(seed, idx)
+		if err != nil {
+			t.Fatalf("delegate idx=%d: %v", idx, err)
+		}
+		if owner.DID == del.DID {
+			t.Errorf("idx=%d: delegate DID equals owner DID — must be a different key", idx)
+		}
+		if del2, _ := deriveDelegateIdentity(seed, idx); del.DID != del2.DID {
+			t.Errorf("idx=%d: delegate identity not deterministic", idx)
+		}
+	}
+}
+
 // TestDeriveIdentity_DistinctPerIndex proves distinct roots get distinct
 // identities (no key reuse across leaves) and that the keyspace is seed-scoped
 // (a different seed reproduces a different run, not the same one).

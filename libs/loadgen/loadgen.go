@@ -6,6 +6,22 @@ e2e harness both drive; nothing here knows about a process boundary, so the e2e
 runs it IN-PROCESS (no separate, memory-unbounded `/backfill` sidecar competing
 with the federation for host RAM).
 
+# AUTHORITY COVERAGE
+
+Amendments are authorized two ways, so the load covers both ways the ledger
+resolves an update's authority:
+
+  - same-signer: the entity's OWNER key amends its own leaf
+    (builder.BuildAmendment).
+  - delegated authority: a DELEGATE key — distinct from the owner — amends the
+    entity, citing a live delegation the owner minted for it
+    (builder.BuildDelegation, then builder.BuildPathBEntry). DelegateRatio opts a
+    fraction of entities into this.
+
+Both produce the same expected leaf state (an advanced OriginTip); only the
+authorization differs. This is a load-coverage detail — the client surface
+reports it only as a "delegated" count, never as a protocol-path label.
+
 # WHY THIS IS A LIBRARY (and the OOM it cures)
 
 The legacy cmd/backfill held two O(roots) structures that peaked at the end of a
@@ -20,8 +36,8 @@ loadgen removes both, structurally:
 
   - keys are DERIVED on demand from (seed, rootIndex) — see deriveIdentity — so
     none are retained, and the run is byte-for-byte reproducible from the seed;
-  - the oracle is STREAMED as JSON Lines, one record per root, emitted the moment
-    a root can no longer change (see amendWindow) — no terminal marshal; and
+  - the oracle is STREAMED as JSON Lines, one record per leaf, emitted the moment
+    it can no longer change (see amendWindow) — no terminal marshal; and
   - amendments target a BOUNDED window of recent roots, so live model state is
     O(window), not O(roots).
 
@@ -47,12 +63,19 @@ import (
 // owns HTTPClient (its mTLS + retry posture). The rest take the defaults applied
 // by normalize().
 type Config struct {
-	LedgerURL  string // ledger base URL (e.g. https://ledger:8443)
-	LogDID     string // destination log DID (Header.Destination) — REQUIRED
-	N          int    // total entries to submit (roots + amendments)
-	AmendRatio float64
-	EpochSize  int   // entries built+submitted+discovered per epoch
-	Seed       int64 // run seed; same seed reproduces the run (incl. identities)
+	LedgerURL string // ledger base URL (e.g. https://ledger:8443)
+	LogDID    string // destination log DID (Header.Destination) — REQUIRED
+	N         int    // total entries to submit (roots + delegations + amendments)
+
+	AmendRatio float64 // fraction of entries that amend an existing entity
+	// DelegateRatio is the fraction of NEW ENTITIES also given a delegation, so
+	// their amendments are authorized by a delegate (delegated authority) instead
+	// of the entity's own key. 0 ⇒ all amendments same-signer; a value in (0,1)
+	// exercises both authorization styles in one run.
+	DelegateRatio float64
+
+	EpochSize int   // entries built+submitted+discovered per epoch
+	Seed      int64 // run seed; same seed reproduces the run (incl. identities)
 
 	// Admission: Token set ⇒ Mode A (credit, no PoW, may batch). Token empty ⇒
 	// Mode B PoW at Difficulty (0 ⇒ queried from the ledger), EpochWindowSec.
@@ -71,15 +94,18 @@ type Config struct {
 
 // Progress is one per-epoch sample for the optional callback.
 type Progress struct {
-	Submitted, N, Roots, Amendments int
-	Pct, Rate                       float64
-	ETA                             time.Duration
+	Submitted, N, Roots, Delegations, Amendments, DelegatedAmendments int
+	Pct, Rate                                                         float64
+	ETA                                                               time.Duration
 }
 
-// Stats is the run summary.
+// Stats is the run summary. Submitted == Roots + Delegations + Amendments; the
+// SMT-leaf count is Roots + Delegations (amendments mutate existing leaves, they
+// do not create new ones). DelegatedAmendments is the subset of Amendments
+// authorized by a delegate rather than the entity's own key.
 type Stats struct {
-	Submitted, Roots, Amendments int
-	Elapsed                      time.Duration
+	Submitted, Roots, Delegations, Amendments, DelegatedAmendments int
+	Elapsed                                                        time.Duration
 }
 
 func (c *Config) normalize() {
@@ -122,7 +148,7 @@ func (c Config) validate() error {
 	return nil
 }
 
-// Run generates cfg.N entries against the ledger, streaming each root's final
+// Run generates cfg.N entries against the ledger, streaming each leaf's final
 // expected state to sink (nil ⇒ DiscardSink). It blocks until done, ctx is
 // cancelled, or an error occurs. Memory stays O(workers·batch + AmendWindow)
 // regardless of N.
@@ -152,66 +178,122 @@ func Run(ctx context.Context, cfg Config, sink Sink) (Stats, error) {
 	rng := rand.New(rand.NewSource(cfg.Seed))
 	win := newAmendWindow(cfg.AmendWindow)
 	var nextRoot uint64
-	submitted, amendments, roots := 0, 0, 0
+	var st Stats
 	t0 := time.Now()
 
 	emit := func(r *root) error {
-		key := smt.DeriveKey(r.pos)
 		return sink.Leaf(LeafRecord{
-			RootIndex: r.index, Key: key, SignerDID: r.did,
+			RootIndex: r.index, Key: smt.DeriveKey(r.pos), SignerDID: r.did,
 			OriginTipSeq: r.originTipSeq, AuthorityTipSeq: r.authTipSeq,
 		})
 	}
 
-	for submitted < cfg.N {
+	for st.Submitted < cfg.N {
 		if err := ctx.Err(); err != nil {
-			return Stats{}, err
-		}
-		batch := cfg.EpochSize
-		if rem := cfg.N - submitted; rem < batch {
-			batch = rem
+			return st, err
 		}
 
-		// BUILD sequentially so the seeded rng drives a reproducible stream
-		// (amend-vs-root choice + which windowed root to amend). No PoW here.
-		items := make([]workItem, 0, batch)
-		for j := 0; j < batch; j++ {
+		// BUILD sequentially (the seeded rng drives a reproducible stream). Append
+		// entries until the epoch is full or N is reached. A DELEGATED root appends
+		// TWO entries — the root and its delegation — so we build by appending,
+		// bounded by the remaining N.
+		items := make([]workItem, 0, cfg.EpochSize+1)
+		for len(items) < cfg.EpochSize {
+			remaining := cfg.N - st.Submitted - len(items)
+			if remaining <= 0 {
+				break
+			}
+
 			if win.len() > 0 && rng.Float64() < cfg.AmendRatio {
 				target := win.pick(rng)
-				id, err := deriveIdentity(seed, target.index)
-				if err != nil {
-					return Stats{}, err
+				st.Amendments++
+				if target.delegated {
+					// Delegated authority — a DELEGATE signs, citing the live delegation.
+					del, err := deriveDelegateIdentity(seed, target.delegateIndex)
+					if err != nil {
+						return st, err
+					}
+					entry, err := builder.BuildPathBEntry(builder.PathBParams{
+						Destination:        cfg.LogDID,
+						SignerDID:          del.DID,
+						TargetRoot:         target.pos,
+						DelegationPointers: []types.LogPosition{target.delegationPos},
+						Payload:            []byte(fmt.Sprintf("deleg-amend-%d-of-%d", st.Submitted+len(items), target.pos.Sequence)),
+						EventTime:          time.Now().UTC().UnixMicro(),
+					})
+					if err != nil {
+						return st, fmt.Errorf("loadgen: build delegated amendment: %w", err)
+					}
+					items = append(items, workItem{entry: entry, priv: del.Priv, did: del.DID, amend: target})
+					st.DelegatedAmendments++
+				} else {
+					// Same-signer — the entity's OWNER key signs.
+					owner, err := deriveIdentity(seed, target.index)
+					if err != nil {
+						return st, err
+					}
+					entry, err := builder.BuildAmendment(builder.AmendmentParams{
+						Destination: cfg.LogDID,
+						SignerDID:   owner.DID,
+						TargetRoot:  target.pos,
+						Payload:     []byte(fmt.Sprintf("amend-%d-of-%d", st.Submitted+len(items), target.pos.Sequence)),
+						EventTime:   time.Now().UTC().UnixMicro(),
+					})
+					if err != nil {
+						return st, fmt.Errorf("loadgen: build amendment: %w", err)
+					}
+					items = append(items, workItem{entry: entry, priv: owner.Priv, did: owner.DID, amend: target})
 				}
-				entry, err := builder.BuildAmendment(builder.AmendmentParams{
-					Destination: cfg.LogDID,
-					SignerDID:   id.DID,
-					TargetRoot:  target.pos,
-					Payload:     []byte(fmt.Sprintf("amend-%d-of-%d", submitted+j, target.pos.Sequence)),
-					EventTime:   time.Now().UTC().UnixMicro(),
-				})
-				if err != nil {
-					return Stats{}, fmt.Errorf("loadgen: BuildAmendment: %w", err)
-				}
-				items = append(items, workItem{entry: entry, priv: id.Priv, did: id.DID, amend: target})
-				amendments++
-			} else {
-				idx := nextRoot
-				nextRoot++
-				id, err := deriveIdentity(seed, idx)
-				if err != nil {
-					return Stats{}, err
-				}
-				entry, err := builder.BuildRootEntity(builder.RootEntityParams{
-					Destination: cfg.LogDID,
-					SignerDID:   id.DID,
-					Payload:     []byte(fmt.Sprintf("root-%d", idx)),
-					EventTime:   time.Now().UTC().UnixMicro(),
-				})
-				if err != nil {
-					return Stats{}, fmt.Errorf("loadgen: BuildRootEntity: %w", err)
-				}
-				items = append(items, workItem{entry: entry, priv: id.Priv, did: id.DID, root: &root{index: idx, did: id.DID}})
+				continue
 			}
+
+			// New root entity → a fresh SMT leaf.
+			idx := nextRoot
+			nextRoot++
+			owner, err := deriveIdentity(seed, idx)
+			if err != nil {
+				return st, err
+			}
+			entry, err := builder.BuildRootEntity(builder.RootEntityParams{
+				Destination: cfg.LogDID,
+				SignerDID:   owner.DID,
+				Payload:     []byte(fmt.Sprintf("root-%d", idx)),
+				EventTime:   time.Now().UTC().UnixMicro(),
+			})
+			if err != nil {
+				return st, fmt.Errorf("loadgen: BuildRootEntity: %w", err)
+			}
+			r := &root{index: idx, did: owner.DID}
+			items = append(items, workItem{entry: entry, priv: owner.Priv, did: owner.DID, root: r})
+			st.Roots++
+
+			// Optionally mint a delegation in the SAME epoch (needs room for two), so
+			// this entity becomes delegation-capable once both are discovered. The
+			// delegation is owner-signed and standalone (no TargetRoot), so it has no
+			// build-time dependency on the root's position.
+			if remaining >= 2 && rng.Float64() < cfg.DelegateRatio {
+				del, err := deriveDelegateIdentity(seed, idx)
+				if err != nil {
+					return st, err
+				}
+				dentry, err := builder.BuildDelegation(builder.DelegationParams{
+					Destination: cfg.LogDID,
+					SignerDID:   owner.DID,
+					DelegateDID: del.DID,
+					Payload:     []byte(fmt.Sprintf("deleg-%d", idx)),
+					EventTime:   time.Now().UTC().UnixMicro(),
+				})
+				if err != nil {
+					return st, fmt.Errorf("loadgen: BuildDelegation: %w", err)
+				}
+				r.delegated = true
+				r.delegateIndex = idx
+				items = append(items, workItem{entry: dentry, priv: owner.Priv, did: owner.DID, delegFor: r})
+				st.Delegations++
+			}
+		}
+		if len(items) == 0 {
+			break
 		}
 
 		// STAMP + sign + POST across the worker pool.
@@ -225,16 +307,16 @@ func Run(ctx context.Context, cfg Config, sink Sink) (Stats, error) {
 			hashes, err = e.submitBatched(ctx, items)
 		}
 		if err != nil {
-			return Stats{}, fmt.Errorf("loadgen: submit: %w", err)
+			return st, fmt.Errorf("loadgen: submit: %w", err)
 		}
 
-		// DISCOVER sequences (single-goroutine): advance amend tips on the
-		// still-windowed target; collect this epoch's new roots.
+		// DISCOVER sequences (single-goroutine): advance amend tips on the still-
+		// windowed target, link discovered delegations, collect new roots.
 		var newRoots []*root
 		for i := range items {
 			seq, err := e.waitForSequence(ctx, hashes[i])
 			if err != nil {
-				return Stats{}, fmt.Errorf("loadgen: sequence discovery: %w", err)
+				return st, fmt.Errorf("loadgen: sequence discovery: %w", err)
 			}
 			pos := types.LogPosition{LogDID: cfg.LogDID, Sequence: seq}
 			switch {
@@ -243,41 +325,51 @@ func Run(ctx context.Context, cfg Config, sink Sink) (Stats, error) {
 				items[i].root.originTipSeq = seq
 				items[i].root.authTipSeq = seq
 				newRoots = append(newRoots, items[i].root)
+			case items[i].delegFor != nil:
+				// The delegation is its OWN leaf with final state (we never revoke it,
+				// so its OriginTip stays == creation). Record it, and link it to the
+				// root it enables so delegated amendments can cite delegationPos.
+				items[i].delegFor.delegationPos = pos
+				if err := sink.Leaf(LeafRecord{
+					RootIndex: items[i].delegFor.index, Key: smt.DeriveKey(pos),
+					SignerDID: items[i].did, OriginTipSeq: seq, AuthorityTipSeq: seq,
+				}); err != nil {
+					return st, fmt.Errorf("loadgen: oracle emit (delegation): %w", err)
+				}
 			case items[i].amend != nil:
-				// Concurrent submission ⇒ arrival order need not match build order,
-				// and a root may be amended twice in an epoch — take the MAX, the
-				// state the ledger's in-order apply converges to.
+				// Same-signer and delegated amendments both advance the target's
+				// OriginTip; concurrent arrival ⇒ take the MAX (the state the in-order
+				// apply converges to).
 				if seq > items[i].amend.originTipSeq {
 					items[i].amend.originTipSeq = seq
 				}
 			}
 		}
 
-		// PUSH new roots oldest-target-stays-resident: only here can the window
-		// evict, and an evicted root's state is final ⇒ stream it.
+		// PUSH new roots; an evicted root's state is final ⇒ stream it.
 		for _, r := range newRoots {
-			roots++
 			if ev := win.push(r); ev != nil {
 				if err := emit(ev); err != nil {
-					return Stats{}, fmt.Errorf("loadgen: oracle emit: %w", err)
+					return st, fmt.Errorf("loadgen: oracle emit: %w", err)
 				}
 			}
 		}
-		submitted += batch
+		st.Submitted += len(items)
 
 		if cfg.Progress != nil {
 			el := time.Since(t0).Seconds()
 			rate := 0.0
 			if el > 0 {
-				rate = float64(submitted) / el
+				rate = float64(st.Submitted) / el
 			}
 			eta := time.Duration(0)
 			if rate > 0 {
-				eta = time.Duration(float64(cfg.N-submitted)/rate) * time.Second
+				eta = time.Duration(float64(cfg.N-st.Submitted)/rate) * time.Second
 			}
 			cfg.Progress(Progress{
-				Submitted: submitted, N: cfg.N, Roots: roots, Amendments: amendments,
-				Pct: 100 * float64(submitted) / float64(cfg.N), Rate: rate, ETA: eta.Round(time.Second),
+				Submitted: st.Submitted, N: cfg.N, Roots: st.Roots, Delegations: st.Delegations,
+				Amendments: st.Amendments, DelegatedAmendments: st.DelegatedAmendments,
+				Pct: 100 * float64(st.Submitted) / float64(cfg.N), Rate: rate, ETA: eta.Round(time.Second),
 			})
 		}
 	}
@@ -285,8 +377,9 @@ func Run(ctx context.Context, cfg Config, sink Sink) (Stats, error) {
 	// FLUSH the records that never evicted (the final ≤K window).
 	for _, r := range win.drain() {
 		if err := emit(r); err != nil {
-			return Stats{}, fmt.Errorf("loadgen: oracle flush: %w", err)
+			return st, fmt.Errorf("loadgen: oracle flush: %w", err)
 		}
 	}
-	return Stats{Submitted: submitted, Roots: roots, Amendments: amendments, Elapsed: time.Since(t0)}, nil
+	st.Elapsed = time.Since(t0)
+	return st, nil
 }

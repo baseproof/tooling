@@ -166,15 +166,16 @@ func (s *captureSink) Leaf(r LeafRecord) error { s.recs = append(s.recs, r); ret
 //     root), proving identities are derived (not random) and nothing is retained.
 func TestRun_StreamsReproducibleOracle(t *testing.T) {
 	cfg := Config{
-		LogDID:      "did:web:baseproof:test",
-		N:           300,
-		AmendRatio:  0.5,
-		EpochSize:   32,
-		Seed:        1,
-		Token:       "test-credit", // Mode A: no PoW in the test
-		BatchSize:   1,
-		Workers:     1, // serial ⇒ sequence assignment is deterministic ⇒ keys reproducible
-		AmendWindow: 16,
+		LogDID:        "did:web:baseproof:test",
+		N:             300,
+		AmendRatio:    0.5,
+		DelegateRatio: 0.5, // ~half the entities are delegation-capable ⇒ both authorization styles
+		EpochSize:     32,
+		Seed:          1,
+		Token:         "test-credit", // Mode A: no PoW in the test
+		BatchSize:     1,
+		Workers:       1, // serial ⇒ sequence assignment is deterministic ⇒ keys reproducible
+		AmendWindow:   16,
 	}
 
 	// A FRESH ledger per run: each starts its sequence counter at 0, so a
@@ -198,14 +199,23 @@ func TestRun_StreamsReproducibleOracle(t *testing.T) {
 	if st1.Submitted != cfg.N {
 		t.Fatalf("submitted=%d, want %d", st1.Submitted, cfg.N)
 	}
-	if st1.Roots+st1.Amendments != cfg.N {
-		t.Fatalf("roots(%d)+amendments(%d) != N(%d) — entries unaccounted", st1.Roots, st1.Amendments, cfg.N)
+	if st1.Roots+st1.Delegations+st1.Amendments != cfg.N {
+		t.Fatalf("roots(%d)+delegations(%d)+amendments(%d) != N(%d) — entries unaccounted",
+			st1.Roots, st1.Delegations, st1.Amendments, cfg.N)
 	}
-	if len(recs1) != st1.Roots {
-		t.Fatalf("oracle emitted %d records, want one per root (%d)", len(recs1), st1.Roots)
+	// One oracle leaf per root AND per delegation (amendments mutate, don't create).
+	if len(recs1) != st1.Roots+st1.Delegations {
+		t.Fatalf("oracle emitted %d records, want one per leaf (roots %d + delegations %d)", len(recs1), st1.Roots, st1.Delegations)
 	}
 	if st1.Roots <= cfg.AmendWindow {
 		t.Fatalf("test too weak: roots(%d) must exceed window(%d) so eviction/streaming is exercised", st1.Roots, cfg.AmendWindow)
+	}
+	// BOTH authorization styles must actually be exercised by this run.
+	if st1.DelegatedAmendments == 0 {
+		t.Errorf("delegated authority not exercised: delegated amendments=0 (delegations=%d)", st1.Delegations)
+	}
+	if st1.Amendments-st1.DelegatedAmendments == 0 {
+		t.Errorf("same-signer authority not exercised: all %d amendments were delegated", st1.Amendments)
 	}
 
 	_, recs2 := run()

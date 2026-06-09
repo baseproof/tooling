@@ -12,9 +12,18 @@ import (
 type root struct {
 	index        uint64            // derivation index (stable identity handle)
 	pos          types.LogPosition // CREATION position; the SMT key derives from it
-	originTipSeq uint64            // advances on each Path-A amendment
-	authTipSeq   uint64            // stays at creation (Path A is the origin lane)
+	originTipSeq uint64            // advances on each amendment (same-signer or delegated)
+	authTipSeq   uint64            // stays at creation (amendments advance the origin lane)
 	did          string            // self-certifying did:key, kept for the oracle record
+
+	// Delegated authority: set once a LIVE delegation owner→delegate has been
+	// minted + discovered for this entity. A delegated entity's amendments are
+	// delegate-signed (citing delegationPos); a non-delegated entity's amendments
+	// are same-signer (owner-signed). delegateIndex == index (same idx, distinct
+	// keyspace — see deriveDelegateIdentity).
+	delegated     bool
+	delegateIndex uint64
+	delegationPos types.LogPosition
 }
 
 // amendWindow is a bounded FIFO ring of the most-recently-created roots that are

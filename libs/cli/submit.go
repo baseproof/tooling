@@ -20,15 +20,15 @@ import (
 )
 
 // RunSubmit submits ONE entry to the bundle's network — the canonical end-user
-// action. A new root mints (or loads) a signer identity; an amendment (--amend
-// <seq>) is a Path-A change signed by the original root's key (--key-file). It
-// prints the assigned sequence + the entry's SMT key.
+// action. A new entity mints (or loads) a signer identity; an amendment (--amend
+// <seq>) updates an existing entity, signed by its key (--key-file). It prints
+// the assigned sequence + the entry's SMT key.
 func RunSubmit(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("submit", flag.ContinueOnError)
 	var (
 		bundlePath = fs.String("bundle", "", "client bundle JSON — REQUIRED")
 		payload    = fs.String("payload", "", "entry payload (UTF-8) — REQUIRED")
-		amend      = fs.Int64("amend", -1, "amend the root at this sequence (Path A); omit to create a new root")
+		amend      = fs.Int64("amend", -1, "amend the entity at this sequence (signed by its key); omit to create a new entity")
 		keyFile    = fs.String("key-file", "", "32-byte hex secp256k1 signer key; REQUIRED for --amend, optional for a new root")
 		outKey     = fs.String("out-key", "", "write the generated signer key (hex) here (new root only)")
 		token      = fs.String("token", "", "Mode A credit token; empty ⇒ Mode B PoW")
