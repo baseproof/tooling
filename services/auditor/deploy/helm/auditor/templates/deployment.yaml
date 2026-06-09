@@ -43,6 +43,8 @@ spec:
         {{- end }}
     spec:
       serviceAccountName: {{ include "auditor.serviceAccountName" . }}
+      # The auditor never calls the Kubernetes API — don't mount its token.
+      automountServiceAccountToken: false
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
@@ -106,6 +108,9 @@ spec:
           resources:
             {{- toYaml .Values.container.resources | nindent 12 }}
           volumeMounts:
+            # readOnlyRootFilesystem is on, so give the process a writable /tmp.
+            - name: tmp
+              mountPath: /tmp
             # Standard bootstrap/key/amendment mount paths — the binary auto-
             # detects these, so NO *_FILE env is set.
             - name: bootstrap
@@ -124,6 +129,8 @@ spec:
               readOnly: true
             {{- end }}
       volumes:
+        - name: tmp
+          emptyDir: {}
         - name: bootstrap
           secret:
             secretName: {{ .Values.bootstrap.existingSecret }}
