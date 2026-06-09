@@ -79,8 +79,10 @@ package recovery
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -164,6 +166,11 @@ type Stats struct {
 	Duration         time.Duration
 }
 
+// traceOn gates BASEPROOF_TRACE-mode reconciler instrumentation — the SAME
+// switch as the SDK's Trace Mode, so one env var lights up the whole
+// reconstruct lifecycle. Read once at package init; off by default.
+var traceOn = os.Getenv("BASEPROOF_TRACE") != ""
+
 // Rebuild reconstructs Postgres projections from the tile store.
 // See file-level comment for the architectural contract.
 func Rebuild(ctx context.Context, deps RebuildDeps) (Stats, error) {
@@ -198,6 +205,11 @@ func Rebuild(ctx context.Context, deps RebuildDeps) (Stats, error) {
 	deps.Logger.Info("rebuild: checkpoint",
 		"tree_size", treeSize,
 		"root_hash", fmt.Sprintf("%x", head.RootHash[:8]))
+	if traceOn {
+		deps.Logger.Info("bptrace:rebuild.begin",
+			"tree_size", treeSize, "batch_size", deps.BatchSize,
+			"log_did", deps.LogDID, "root", fmt.Sprintf("%x", head.RootHash))
+	}
 
 	// ── Step 2: Wire SDK fetcher + projection stores
 	//
@@ -264,6 +276,31 @@ func Rebuild(ctx context.Context, deps RebuildDeps) (Stats, error) {
 			entries, positions, fetcher, nil, deps.LogDID, deltaBuffer)
 		if err != nil {
 			return Stats{}, fmt.Errorf("rebuild: ProcessBatch [%d, %d): %w", batchStart, batchEnd, err)
+		}
+
+		// Surface entries ProcessBatch demoted to PathD during the rebuild — a
+		// silent reconstruction gap would re-derive a root missing those leaves,
+		// exactly the live-path failure mode. On the SDK's typed missing-node
+		// fault, name the absent node X and its ancestor Z.
+		var rebuildFails int
+		for i, rerr := range result.PathFailureReasons {
+			if rerr == nil {
+				continue
+			}
+			rebuildFails++
+			var mne *smt.MissingNodeError
+			if errors.As(rerr, &mne) && i < len(positions) {
+				deps.Logger.Error("rebuild: missing-node fault demoted entry to PathD",
+					"seq", positions[i].Sequence,
+					"missing_node_X", fmt.Sprintf("%x", mne.Hash),
+					"ancestor_Z", fmt.Sprintf("%x", mne.Ancestor))
+			}
+		}
+		if rebuildFails > 0 || len(result.RejectedPositions) > 0 {
+			deps.Logger.Warn("rebuild: processEntry failures demoted to PathD — reconstructed root omits these leaves",
+				"range", fmt.Sprintf("[%d, %d)", batchStart, batchEnd),
+				"failed_entries", rebuildFails,
+				"rejected", len(result.RejectedPositions))
 		}
 
 		// ReachableMutations (not Mutations) drops the intermediate node versions
@@ -340,6 +377,12 @@ func Rebuild(ctx context.Context, deps RebuildDeps) (Stats, error) {
 		return Stats{}, fmt.Errorf("rebuild: persist smt_root_state: %w", commitErr)
 	}
 	_ = mainTree // kept for future expansion (e.g. rebuild-time read endpoints)
+
+	if traceOn {
+		deps.Logger.Info("bptrace:rebuild.end",
+			"tree_size", treeSize, "entries", entriesProcessed,
+			"leaves", leavesWritten, "root", fmt.Sprintf("%x", finalRoot))
+	}
 
 	return Stats{
 		TreeSize:         treeSize,

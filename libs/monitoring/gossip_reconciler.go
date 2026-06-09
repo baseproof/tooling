@@ -45,6 +45,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"sync/atomic"
 	"time"
 
@@ -110,6 +111,10 @@ type RotationJournal interface {
 //     reader-side contention.
 //   - Channel broadcast — way more complex; needed only when readers
 //     also want change-notification (the reconciler doesn't).
+// traceOn gates BASEPROOF_TRACE-mode reconciler instrumentation (the SAME
+// switch as the SDK Trace Mode). Read once at package init; off by default.
+var traceOn = os.Getenv("BASEPROOF_TRACE") != ""
+
 type Reconciler struct {
 	verifier          FindingVerifier
 	heads             *TrustedHeadStore
@@ -285,7 +290,15 @@ func (r *Reconciler) RefreshAmendments(records network.AuditorScopeAmendmentByPo
 func (r *Reconciler) HandleSignedEvent(ctx context.Context, ev gossip.SignedEvent) error {
 	event, err := r.verifier.Verify(ctx, ev)
 	if err != nil {
+		if traceOn && r.logger != nil {
+			r.logger.Info("bptrace:gossip.HandleSignedEvent",
+				"originator", ev.Originator, "result", "verify-FAILED", "err", err.Error())
+		}
 		return fmt.Errorf("monitoring/gossip_reconciler: verify: %w", err)
+	}
+	if traceOn && r.logger != nil {
+		r.logger.Info("bptrace:gossip.HandleSignedEvent",
+			"originator", ev.Originator, "kind", string(event.Kind()), "result", "verified")
 	}
 
 	// v1.32.0 AUDITOR-SCOPE GATE — runs BEFORE the kind switch.
@@ -296,6 +309,10 @@ func (r *Reconciler) HandleSignedEvent(ctx context.Context, ev gossip.SignedEven
 	// witness rotations) — those have their own SDK-level admission
 	// chains and are not gated by the auditor registry.
 	if !r.authorizedForKind(ctx, ev.Originator, event.Kind()) {
+		if traceOn && r.logger != nil {
+			r.logger.Info("bptrace:gossip.HandleSignedEvent",
+				"originator", ev.Originator, "kind", string(event.Kind()), "result", "rejected-unauthorized")
+		}
 		// Already logged inside authorizedForKind. Return nil so the
 		// puller advances past this event; we do NOT return an error
 		// because a stuck-bad event would otherwise hammer the verifier

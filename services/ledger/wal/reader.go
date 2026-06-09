@@ -19,10 +19,15 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"os"
 	"time"
 
 	"github.com/dgraph-io/badger/v4"
 )
+
+// walTraceOn gates BASEPROOF_TRACE-mode reconciler instrumentation (the SAME
+// switch as the SDK Trace Mode). Read once at package init; off by default.
+var walTraceOn = os.Getenv("BASEPROOF_TRACE") != ""
 
 // Read returns the wire bytes for an entry by hash. Returns
 // ErrNotFound when no entry exists for hash. Caller receives a copy
@@ -340,6 +345,9 @@ func (c *Committer) ReconcileHWM(ctx context.Context) (uint64, error) {
 	if err != nil {
 		return 0, err
 	}
+	if walTraceOn && c.logger != nil {
+		c.logger.Info("bptrace:wal.ReconcileHWM.begin", "hwm", hwm)
+	}
 	newHWM := hwm
 	err = c.db.View(func(txn *badger.Txn) error {
 		opts := badger.DefaultIteratorOptions
@@ -380,6 +388,10 @@ func (c *Committer) ReconcileHWM(ctx context.Context) (uint64, error) {
 	if newHWM > hwm {
 		if aErr := c.AdvanceHWM(ctx, newHWM); aErr != nil {
 			return hwm, aErr
+		}
+		if walTraceOn && c.logger != nil {
+			c.logger.Info("bptrace:wal.ReconcileHWM.advanced",
+				"from_hwm", hwm, "to_hwm", newHWM, "advanced", newHWM-hwm)
 		}
 	}
 	return newHWM, nil
