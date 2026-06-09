@@ -79,6 +79,28 @@ type wireHorizon struct {
 	TreeSize uint64 `json:"tree_size"`
 	SMTRoot  string `json:"smt_root"`
 }
+type wireAnchorHop struct {
+	ParentLogDID         string `json:"parent_log_did"`
+	WitnessSetHash       string `json:"witness_set_hash"`
+	LatestAnchorTreeSize uint64 `json:"latest_anchor_tree_size,omitempty"`
+}
+type wireAnchors struct {
+	Hops []wireAnchorHop `json:"hops"`
+}
+type wireLabelEntry struct {
+	PubKeyID string `json:"pub_key_id"`
+	Label    string `json:"label"`
+}
+type wireLabels struct {
+	Labels []wireLabelEntry `json:"labels"`
+}
+type wireWitnessEndpointEntry struct {
+	PubKeyID  string            `json:"pub_key_id"`
+	Endpoints map[string]string `json:"endpoints"`
+}
+type wireWitnessEndpoints struct {
+	Witnesses []wireWitnessEndpointEntry `json:"witnesses"`
+}
 
 // auditorHealth is one auditor's probe result.
 type auditorHealth struct {
@@ -103,6 +125,9 @@ type netInfo struct {
 	Mirrors    wireMirrors
 	Federation wireFederation
 	Horizon    wireHorizon
+	Anchors    wireAnchors
+	Labels     wireLabels
+	WitnessEPs wireWitnessEndpoints
 	Difficulty uint64
 	Accepts    []string
 	QuorumK    int
@@ -185,6 +210,9 @@ func gatherNetwork(ctx context.Context, b *ClientBundle, httpClient *http.Client
 	_ = getJSONOptional(ctx, httpClient, b.Endpoint+"/v1/network/auditors", &n.Auditors)
 	_ = getJSONOptional(ctx, httpClient, b.Endpoint+"/v1/network/mirrors", &n.Mirrors)
 	_ = getJSONOptional(ctx, httpClient, b.Endpoint+"/v1/network/peers", &n.Federation)
+	_ = getJSONOptional(ctx, httpClient, b.Endpoint+"/v1/network/anchors", &n.Anchors)
+	_ = getJSONOptional(ctx, httpClient, b.Endpoint+"/v1/network/labels", &n.Labels)
+	_ = getJSONOptional(ctx, httpClient, b.Endpoint+"/v1/network/witness-endpoints", &n.WitnessEPs)
 	_ = getJSONOptional(ctx, httpClient, b.Endpoint+"/v1/tree/horizon", &n.Horizon)
 	var diff struct {
 		Difficulty uint64 `json:"difficulty"`
@@ -319,6 +347,17 @@ func renderNetwork(w io.Writer, n *netInfo) {
 	}
 	fmt.Fprintf(tw, "witnesses\t%s\t\n", wl)
 
+	if len(n.Labels.Labels) > 0 {
+		names := make([]string, len(n.Labels.Labels))
+		for i, l := range n.Labels.Labels {
+			names[i] = fmt.Sprintf("%s=%q", short(l.PubKeyID), l.Label)
+		}
+		fmt.Fprintf(tw, "witness-labels\t%s\t\n", strings.Join(names, "  "))
+	}
+	if len(n.WitnessEPs.Witnesses) > 0 {
+		fmt.Fprintf(tw, "witness-endpoints\t%d declared\t\n", len(n.WitnessEPs.Witnesses))
+	}
+
 	if len(n.Auditors.Auditors) > 0 {
 		line := fmt.Sprintf("%d registered", len(n.Auditors.Auditors))
 		if n.verify {
@@ -338,6 +377,13 @@ func renderNetwork(w io.Writer, n *netInfo) {
 
 	if n.Horizon.TreeSize > 0 {
 		fmt.Fprintf(tw, "horizon\ttree_size %d  smt_root %s\t\n", n.Horizon.TreeSize, short(n.Horizon.SMTRoot))
+	}
+	if len(n.Anchors.Hops) > 0 {
+		parts := make([]string, len(n.Anchors.Hops))
+		for i, h := range n.Anchors.Hops {
+			parts[i] = fmt.Sprintf("%s@%d", short(h.ParentLogDID), h.LatestAnchorTreeSize)
+		}
+		fmt.Fprintf(tw, "anchors\tonto %s\t\n", strings.Join(parts, "  "))
 	}
 	fmt.Fprintf(tw, "admission\tPoW difficulty %d\t\n", n.Difficulty)
 

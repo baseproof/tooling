@@ -70,6 +70,15 @@ func newFakeNet(t *testing.T, siblings []wireLogNode, tamperID bool) *fakeNet {
 	mux.HandleFunc("/v1/network/peers", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, wireFederation{Siblings: siblings})
 	})
+	mux.HandleFunc("/v1/network/anchors", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, wireAnchors{Hops: []wireAnchorHop{{ParentLogDID: "did:baseproof:network:parent01", WitnessSetHash: strings.Repeat("7f", 32), LatestAnchorTreeSize: 90}}})
+	})
+	mux.HandleFunc("/v1/network/labels", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, wireLabels{Labels: []wireLabelEntry{{PubKeyID: strings.Repeat("11", 32), Label: "witness-one"}}})
+	})
+	mux.HandleFunc("/v1/network/witness-endpoints", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, wireWitnessEndpoints{Witnesses: []wireWitnessEndpointEntry{{PubKeyID: strings.Repeat("11", 32), Endpoints: map[string]string{"cosign": "https://w1.example/cosign"}}}})
+	})
 	mux.HandleFunc("/v1/tree/horizon", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, wireHorizon{TreeSize: 100, SMTRoot: strings.Repeat("ab", 32)})
 	})
@@ -149,5 +158,90 @@ func TestInfo_FederationRealistic(t *testing.T) {
 	}
 	if len(n2.Peers) != 1 || n2.Peers[0].Reached != true || n2.Peers[0].IDMatches {
 		t.Errorf("a peer lying about its id was not caught: %+v (want Reached=true, IDMatches=false)", n2.Peers)
+	}
+}
+
+// TestInfo_IntrospectionSurface asserts info fetches AND surfaces the full
+// /v1/network/* surface added in the polish pass: anchors (cross-log heads),
+// witness labels (human names), and witness endpoints.
+func TestInfo_IntrospectionSurface(t *testing.T) {
+	ctx := context.Background()
+	httpClient := &http.Client{Timeout: 5 * time.Second}
+
+	net := newFakeNet(t, nil, false)
+	bundlePath := writeBundle(t, ClientBundle{
+		NetworkID: net.nid, Endpoint: net.url, LogDID: "did:web:x", QuorumK: 1, BootstrapHash: net.nid,
+	})
+	bb, err := LoadClientBundle(bundlePath)
+	if err != nil {
+		t.Fatalf("load bundle: %v", err)
+	}
+
+	n, err := gatherNetwork(ctx, bb, httpClient, false, false, 1)
+	if err != nil {
+		t.Fatalf("gather: %v", err)
+	}
+	if len(n.Anchors.Hops) != 1 || n.Anchors.Hops[0].LatestAnchorTreeSize != 90 {
+		t.Errorf("anchors not aggregated: %+v", n.Anchors)
+	}
+	if len(n.Labels.Labels) != 1 || n.Labels.Labels[0].Label != "witness-one" {
+		t.Errorf("labels not aggregated: %+v", n.Labels)
+	}
+	if len(n.WitnessEPs.Witnesses) != 1 {
+		t.Errorf("witness endpoints not aggregated: %+v", n.WitnessEPs)
+	}
+
+	// The render surfaces each new section.
+	var sb strings.Builder
+	renderNetwork(&sb, n)
+	out := sb.String()
+	for _, want := range []string{"anchors", "witness-labels", "witness-one", "witness-endpoints"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("render missing %q\n%s", want, out)
+		}
+	}
+}
+
+// TestInfo_FederationDepth2 proves the bounded walk reaches a SECOND hop: root →
+// mid → grandchild. depth=1 reaches only mid; depth=2 reaches mid + grandchild.
+func TestInfo_FederationDepth2(t *testing.T) {
+	ctx := context.Background()
+	httpClient := &http.Client{Timeout: 5 * time.Second}
+
+	grandchild := newFakeNet(t, nil, false)
+	mid := newFakeNet(t, []wireLogNode{{NetworkID: grandchild.nid, AdmissionURL: grandchild.url}}, false)
+	root := newFakeNet(t, []wireLogNode{{NetworkID: mid.nid, AdmissionURL: mid.url}}, false)
+
+	bundlePath := writeBundle(t, ClientBundle{
+		NetworkID: root.nid, Endpoint: root.url, LogDID: "did:web:root", QuorumK: 1, BootstrapHash: root.nid,
+	})
+	bb, err := LoadClientBundle(bundlePath)
+	if err != nil {
+		t.Fatalf("load bundle: %v", err)
+	}
+
+	// depth=1: only the direct peer (mid).
+	n1, err := gatherNetwork(ctx, bb, httpClient, false, true, 1)
+	if err != nil {
+		t.Fatalf("gather depth 1: %v", err)
+	}
+	if len(n1.Peers) != 1 || !strings.EqualFold(n1.Peers[0].NetworkID, mid.nid) {
+		t.Fatalf("depth 1 walked %d peers, want just mid", len(n1.Peers))
+	}
+
+	// depth=2: mid AND its grandchild, each reached + id-verified.
+	n2, err := gatherNetwork(ctx, bb, httpClient, false, true, 2)
+	if err != nil {
+		t.Fatalf("gather depth 2: %v", err)
+	}
+	reached := map[string]bool{}
+	for _, p := range n2.Peers {
+		if !p.Reached || !p.IDMatches {
+			t.Errorf("peer %s reached=%v idMatches=%v", short(p.NetworkID), p.Reached, p.IDMatches)
+		}
+		reached[strings.ToLower(p.NetworkID)] = true
+	}
+	if !reached[strings.ToLower(mid.nid)] || !reached[strings.ToLower(grandchild.nid)] {
+		t.Fatalf("depth 2 did not reach both mid + grandchild: %+v", n2.Peers)
 	}
 }
