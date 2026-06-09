@@ -54,5 +54,6 @@ func (q *PostgresQueryAPI) QueryByDelegateDID(did string) ([]types.EntryWithMeta
 	if err != nil {
 		return nil, fmt.Errorf("store/indexes/delegate_did: %w", err)
 	}
+	defer rows.Close()
 	return q.scanAndHydrate(ctx, rows)
 }

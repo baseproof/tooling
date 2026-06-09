@@ -36,5 +36,6 @@ func (q *PostgresQueryAPI) ScanFromPosition(startPos uint64, count int) ([]types
 	if err != nil {
 		return nil, fmt.Errorf("store/indexes/scan: %w", err)
 	}
+	defer rows.Close()
 	return q.scanAndHydrate(ctx, rows)
 }

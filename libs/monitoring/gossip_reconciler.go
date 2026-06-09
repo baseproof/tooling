@@ -55,6 +55,10 @@ import (
 	"github.com/baseproof/baseproof/types"
 )
 
+// traceOn gates BASEPROOF_TRACE-mode reconciler instrumentation (the SAME
+// switch as the SDK Trace Mode). Read once at package init; off by default.
+var traceOn = os.Getenv("BASEPROOF_TRACE") != ""
+
 // FindingVerifier runs the two-tier (envelope + finding proof) check on a
 // pulled event and returns the verified, typed finding.
 // *verification.GossipVerifier satisfies it.
@@ -111,10 +115,6 @@ type RotationJournal interface {
 //     reader-side contention.
 //   - Channel broadcast — way more complex; needed only when readers
 //     also want change-notification (the reconciler doesn't).
-// traceOn gates BASEPROOF_TRACE-mode reconciler instrumentation (the SAME
-// switch as the SDK Trace Mode). Read once at package init; off by default.
-var traceOn = os.Getenv("BASEPROOF_TRACE") != ""
-
 type Reconciler struct {
 	verifier          FindingVerifier
 	heads             *TrustedHeadStore

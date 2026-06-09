@@ -728,7 +728,7 @@ func (l *CheckpointLoop) CheckpointOnce(ctx context.Context) error {
 	span.SetAttributes(attribute.Int("ledger.signatures", len(cosigned.Signatures)))
 	l.lastPublishedSize = treeSize
 	l.metricPublished.Store(treeSize) // horizon-lag gauge denominator (on publish)
-	if l.onTailGCAudit != nil { // retain the published SMT root for the tail-GC audit
+	if l.onTailGCAudit != nil {       // retain the published SMT root for the tail-GC audit
 		l.recentPublishedRoots = append(l.recentPublishedRoots, cRoot)
 		if n := len(l.recentPublishedRoots); n > maxRecentPublishedRoots {
 			l.recentPublishedRoots = l.recentPublishedRoots[n-maxRecentPublishedRoots:]

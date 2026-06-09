@@ -100,9 +100,9 @@ func sdkHeadToAPI(h *sdktypes.CosignedTreeHead) *CosignedTreeHead {
 		sigs = append(sigs, TreeHeadSignature{Signature: raw})
 	}
 	return &CosignedTreeHead{
-		TreeSize:    h.TreeHead.TreeSize,
-		RootHash:    h.TreeHead.RootHash,
-		SMTRoot:     h.TreeHead.SMTRoot,
+		TreeSize:    h.TreeSize,
+		RootHash:    h.RootHash,
+		SMTRoot:     h.SMTRoot,
 		ReceiptRoot: h.TreeHead.ReceiptRoot,
 		Signatures:  sigs,
 	}
