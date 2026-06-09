@@ -27,9 +27,47 @@ package store
 import (
 	"context"
 	"fmt"
+	"log/slog"
+	"os"
 
 	"github.com/baseproof/baseproof/core/smt"
 )
+
+// tileVerifyFetch enables HEAD/GET-disagreement tracing for the SMT-tile leaf-loss
+// investigation. Set LEDGER_TILE_VERIFY_FETCH=1 on the ledger.
+//
+// HYPOTHESIS: the emitter treats a tile as already-durable on the strength of
+// Exists() (an object-store HEAD) and SKIPS re-emitting it — both at the Put-skip
+// and, load-bearingly, as the `known` oracle BuildDirtyTiles uses to prune the
+// dirty walk. If HEAD says present but a later GET (Fetch) cannot read that tile
+// (a HEAD/GET disagreement, a read-after-write consistency lag, or a key-encoding
+// mismatch in the S3 path), the tile is STRANDED: never (re)emitted, yet
+// unfetchable — so a subsequent nodes.Get faults "missing node X (referenced by
+// ancestor)", the entry is demoted to PathD, and its leaf is lost. An in-memory
+// map store cannot exhibit this (HEAD and GET are the same map), which is why the
+// fault reproduces only against the live seaweedfs-backed store.
+var tileVerifyFetch = os.Getenv("LEDGER_TILE_VERIFY_FETCH") == "1"
+
+// verifyFetchOnExists is a no-op unless LEDGER_TILE_VERIFY_FETCH=1. When on, it
+// confirms a tile the emitter just treated as durable (Exists/HEAD true, or a
+// just-completed Put) is ACTUALLY readable via Fetch (GET). A failure here is the
+// smoking gun: it logs the tile id + content-address path so the disagreement can
+// be reproduced against the object store directly.
+func (e *BuildTilesEmitter) verifyFetchOnExists(ctx context.Context, id [32]byte, site string) {
+	if !tileVerifyFetch {
+		return
+	}
+	b, ferr := e.tiles.Fetch(ctx, id)
+	if ferr != nil || len(b) == 0 {
+		slog.Default().Error("TILE HEAD/GET DISAGREEMENT: Exists/Put reports durable but Fetch failed — known-oracle would STRAND this tile (leaf-loss source)",
+			"site", site,
+			"tile", fmt.Sprintf("%x", id[:]),
+			"tile_path", smt.TilePath(id),
+			"fetch_bytes", len(b),
+			"fetch_err", fmt.Sprintf("%v", ferr),
+		)
+	}
+}
 
 // BuildTilesEmitter emits tiles from a NodeStore into an SMTTileStore.
 type BuildTilesEmitter struct {
@@ -78,6 +116,7 @@ func (e *BuildTilesEmitter) EmitDurable(ctx context.Context, fromRoot [32]byte, 
 		// it (bounds PUTs to the missing set). The incremental path already excluded
 		// known tiles; this also guards the full-build path + a concurrent re-emit.
 		if ok, eerr := e.tiles.Exists(ctx, id); eerr == nil && ok {
+			e.verifyFetchOnExists(ctx, id, "emit_put_skip") // HEAD says present → confirm GET
 			continue
 		}
 		enc, encErr := smt.EncodeTile(tile)
@@ -87,6 +126,7 @@ func (e *BuildTilesEmitter) EmitDurable(ctx context.Context, fromRoot [32]byte, 
 		if perr := e.tiles.Put(ctx, id, enc); perr != nil {
 			return nil, fmt.Errorf("store/tile-emitter: put tile %x: %w", id[:6], perr)
 		}
+		e.verifyFetchOnExists(ctx, id, "post_put") // read-after-write: PUT-ack → confirm GET
 	}
 	// Every node in every tile of tileSet is now durable (just-PUT, or already
 	// present and skipped above). Hash them so the reconciler can evict exactly these
@@ -119,6 +159,11 @@ func (e *BuildTilesEmitter) buildTiles(ctx context.Context, fromRoot, committedR
 	// Exists error maps to NOT-known (re-emit), never to known.
 	known := func(top [32]byte) bool {
 		present, eerr := e.tiles.Exists(ctx, top)
+		if eerr == nil && present {
+			// Load-bearing: BuildDirtyTiles SKIPS this tile on the strength of HEAD.
+			// If GET can't read it, the tile is stranded → later "missing node".
+			e.verifyFetchOnExists(ctx, top, "known_oracle")
+		}
 		return eerr == nil && present
 	}
 	// Read the dirty walk through a FRESH, UNBOUNDED per-emit read-through — NOT the
