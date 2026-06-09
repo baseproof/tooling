@@ -75,27 +75,46 @@ func deriveScalar(seed []byte, idx, counter uint64) [32]byte {
 	return scalar
 }
 
+// identityFromScalar builds the *ecdsa.PrivateKey + self-certifying did:key for a
+// 32-byte secp256k1 scalar, reusing the SDK's compression + did:key encoding (no
+// crypto reimplemented). ok=false only for the zero scalar (an invalid key).
+func identityFromScalar(scalar [32]byte) (priv *ecdsa.PrivateKey, did string, ok bool) {
+	k := secp256k1.PrivKeyFromBytes(scalar[:]) // interprets bytes mod n
+	if k == nil || k.Key.IsZero() {
+		return nil, "", false
+	}
+	compressed := k.PubKey().SerializeCompressed() // standard 33-byte sec1
+	return k.ToECDSA(), sdkdid.EncodeDIDKey(sdkdid.MulticodecSecp256k1, compressed), true
+}
+
 // deriveIdentity returns the secp256k1 identity for root index idx under seed. It
 // is a pure function of (seed, idx): the same inputs always yield the same DID +
 // private key, on this machine or any other. seed is the HKDF secret (see
 // seedBytes for the int64 rendering).
 func deriveIdentity(seed []byte, idx uint64) (Identity, error) {
-	// secp256k1.PrivKeyFromBytes interprets the 32 bytes mod n; a zero result is
-	// the only invalid outcome (≈2⁻¹²⁸). Bump the counter and re-expand if so, so a
-	// derivation never fails yet stays deterministic.
+	// A zero scalar (≈2⁻¹²⁸) is the only invalid outcome. Bump the counter and
+	// re-expand if so, so a derivation never fails yet stays deterministic.
 	for counter := uint64(0); counter < 64; counter++ {
-		scalar := deriveScalar(seed, idx, counter)
-		priv := secp256k1.PrivKeyFromBytes(scalar[:])
-		if priv == nil || priv.Key.IsZero() {
-			continue
+		if priv, did, ok := identityFromScalar(deriveScalar(seed, idx, counter)); ok {
+			return Identity{Index: idx, DID: did, Priv: priv}, nil
 		}
-		ecPriv := priv.ToECDSA()
-		compressed := priv.PubKey().SerializeCompressed() // standard 33-byte sec1
-		return Identity{
-			Index: idx,
-			DID:   sdkdid.EncodeDIDKey(sdkdid.MulticodecSecp256k1, compressed),
-			Priv:  ecPriv,
-		}, nil
 	}
 	return Identity{}, fmt.Errorf("loadgen: could not derive a valid secp256k1 scalar for root %d after 64 counters (impossible absent a broken HKDF)", idx)
+}
+
+// IdentityFromScalar builds a signing Identity from a raw 32-byte secp256k1
+// scalar — a client's saved key — using the same did:key encoding as the derived
+// identities, so a key generated here and reloaded later resolves to the same
+// DID. Index is left 0 (a raw key carries no derivation index).
+func IdentityFromScalar(scalar []byte) (Identity, error) {
+	if len(scalar) != 32 {
+		return Identity{}, fmt.Errorf("loadgen: secp256k1 scalar must be 32 bytes, got %d", len(scalar))
+	}
+	var s [32]byte
+	copy(s[:], scalar)
+	priv, did, ok := identityFromScalar(s)
+	if !ok {
+		return Identity{}, fmt.Errorf("loadgen: invalid secp256k1 scalar (zero)")
+	}
+	return Identity{DID: did, Priv: priv}, nil
 }

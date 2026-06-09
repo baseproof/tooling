@@ -65,8 +65,8 @@ type Config struct {
 	AmendWindow int           // K: recent-root ring capacity (bounds memory + finalises the oracle)
 	SeqTimeout  time.Duration // per-entry sequence-discovery ceiling
 
-	HTTPClient *http.Client    // REQUIRED; caller's outbound client (mTLS + retry)
-	Progress   func(Progress)  // optional per-epoch progress callback (CLI prints; nil = quiet)
+	HTTPClient *http.Client   // REQUIRED; caller's outbound client (mTLS + retry)
+	Progress   func(Progress) // optional per-epoch progress callback (CLI prints; nil = quiet)
 }
 
 // Progress is one per-epoch sample for the optional callback.
