@@ -68,6 +68,8 @@ github.com/baseproof/baseproof v0.0.3-rc9 h1:WoY5sqZlmyG/5CRHejGXBxQghrzSLJpFrX5
 github.com/baseproof/baseproof v0.0.3-rc9/go.mod h1:dofQ7zm9qOLDQEiwuFPORHOjkITeL/83YAnR4+TXFSc=
 github.com/baseproof/baseproof v0.0.4-rc1.0.20260609172415-fb16fe54b17e h1:Y3wfqr2wlDDglNinRPie6oLeoh36Xxf/OHXXsi+F4MA=
 github.com/baseproof/baseproof v0.0.4-rc1.0.20260609172415-fb16fe54b17e/go.mod h1:dofQ7zm9qOLDQEiwuFPORHOjkITeL/83YAnR4+TXFSc=
+github.com/baseproof/baseproof v0.0.4-rc2 h1:JBYCV8kjZb8lWt0EA61SlM/Rplx+IwRtNYogcc68tw4=
+github.com/baseproof/baseproof v0.0.4-rc2/go.mod h1:dofQ7zm9qOLDQEiwuFPORHOjkITeL/83YAnR4+TXFSc=
 github.com/beorn7/perks v1.0.1 h1:VlbKKnNfV8bJzeqoa4cOKqO6bYr3WgKZxO8Z16+hsOM=
 github.com/beorn7/perks v1.0.1/go.mod h1:G2ZrVWU2WbWT9wwq4/hrbKbnv/1ERSJQ0ibhJ6rlkpw=
 github.com/bits-and-blooms/bitset v1.24.4 h1:95H15Og1clikBrKr/DuzMXkQzECs1M6hhoGXLwLQOZE=
