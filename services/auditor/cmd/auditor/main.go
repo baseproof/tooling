@@ -198,7 +198,7 @@ type config struct {
 
 func loadConfig() config {
 	return config{
-		listenAddr:   envOr("AUDITOR_LISTEN_ADDR", ":8088"),
+		listenAddr:   envOr("AUDITOR_LISTEN_ADDR", portAddrOr(":8088")),
 		readTimeout:  envDuration("AUDITOR_READ_TIMEOUT", 5*time.Second),
 		writeTimeout: envDuration("AUDITOR_WRITE_TIMEOUT", 10*time.Second),
 		idleTimeout:  envDuration("AUDITOR_IDLE_TIMEOUT", 60*time.Second),
@@ -209,7 +209,7 @@ func loadConfig() config {
 		gossipDSN: os.Getenv("AUDITOR_GOSSIP_DSN"),
 		// The bootstrap is the one shared, byte-identical trust input every
 		// component loads; honor the fleet's LEDGER_* var so one eval feeds all.
-		bootstrapFile:      resolveFile(envOr("AUDITOR_NETWORK_BOOTSTRAP_FILE", os.Getenv("LEDGER_NETWORK_BOOTSTRAP_FILE")), "/etc/auditor/bootstrap.json"),
+		bootstrapFile:      resolveFile(envOr("AUDITOR_NETWORK_BOOTSTRAP_FILE", os.Getenv("LEDGER_NETWORK_BOOTSTRAP_FILE")), "/etc/auditor/bootstrap.json", "/etc/secrets/bootstrap.json"),
 		quorumK:            envInt("AUDITOR_WITNESS_QUORUM_K", 0),
 		peers:              os.Getenv("AUDITOR_PEERS"),
 		pollInterval:       envDuration("AUDITOR_POLL_INTERVAL", 30*time.Second),
@@ -222,7 +222,7 @@ func loadConfig() config {
 		horizonSamples:     envInt("AUDITOR_HORIZON_SAMPLES", 8),
 		didwebTTL:          envDuration("AUDITOR_DIDWEB_TTL", 5*time.Minute),
 		// Optional auditor scope-amendment manifest (slated to move on-log).
-		auditorAmendmentFile: resolveFile(os.Getenv("AUDITOR_AMENDMENT_FILE"), "/etc/auditor/amendment.json"),
+		auditorAmendmentFile: resolveFile(os.Getenv("AUDITOR_AMENDMENT_FILE"), "/etc/auditor/amendment.json", "/etc/secrets/amendment.json"),
 		// Ladder 2 D6 (#21): url_drift audit cadence.
 		urlDriftInterval:   envDuration("AUDITOR_URL_DRIFT_INTERVAL", 0),
 		governanceInterval: envDuration("AUDITOR_GOVERNANCE_INTERVAL", 0),
@@ -231,7 +231,7 @@ func loadConfig() config {
 		// Independent equivocation scanner (push leg). Disabled unless both
 		// the interval AND a gossip signing key are set.
 		equivScanInterval:    envDuration("AUDITOR_EQUIVOCATION_SCAN_INTERVAL", 0),
-		gossipSigningKeyFile: resolveFile(os.Getenv("AUDITOR_GOSSIP_SIGNING_KEY_FILE"), "/etc/auditor/keys/gossip-signing.pem"),
+		gossipSigningKeyFile: resolveFile(os.Getenv("AUDITOR_GOSSIP_SIGNING_KEY_FILE"), "/etc/auditor/keys/gossip-signing.pem", "/etc/secrets/gossip-signing.pem"),
 		// Ladder 5 P6 (#21): materialized-view cache.
 		materializedCacheDir: os.Getenv("AUDITOR_MATERIALIZED_CACHE_DIR"),
 		materializedKeepLast: envInt("AUDITOR_MATERIALIZED_KEEP_LAST", 5),
@@ -1165,19 +1165,35 @@ func envOr(key, def string) string {
 
 // resolveFile implements the orchestrator-agnostic cert/key/bootstrap injection
 // convention: an explicitly-configured path (AUDITOR_* env, already resolved by
-// the caller) wins; otherwise, if a file exists at the conventional mount path,
-// use it (a Secret/volume dropped at /etc/auditor/… is picked up with zero env);
-// otherwise "" — byte-identical to the pre-convention behavior. Boot-only stat.
-func resolveFile(explicit, stdPath string) string {
+// the caller) wins; otherwise the first existing file among the conventional
+// candidates is used, in order: the standard mount path (/etc/auditor/… — k8s
+// Secret volume / compose bind mount), then the PaaS secret-file path
+// (/etc/secrets/<name>, where Render-class platforms place uploaded secret
+// files). No candidate ⇒ "" — byte-identical to the pre-convention behavior.
+// Boot-only stats.
+func resolveFile(explicit string, candidates ...string) string {
 	if explicit != "" {
 		return explicit
 	}
-	if stdPath != "" {
-		if info, err := os.Stat(stdPath); err == nil && !info.IsDir() {
-			return stdPath
+	for _, p := range candidates {
+		if p == "" {
+			continue
+		}
+		if info, err := os.Stat(p); err == nil && !info.IsDir() {
+			return p
 		}
 	}
 	return ""
+}
+
+// portAddrOr returns ":$PORT" when the platform injects PORT (the Render /
+// Cloud Run / Heroku contract), else the baked fallback. Consulted only after
+// AUDITOR_LISTEN_ADDR, so it never overrides an operator-set address.
+func portAddrOr(fallback string) string {
+	if p := strings.TrimSpace(os.Getenv("PORT")); p != "" {
+		return ":" + p
+	}
+	return fallback
 }
 
 func envDuration(key string, def time.Duration) time.Duration {

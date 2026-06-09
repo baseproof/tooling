@@ -587,7 +587,7 @@ func decodeGenesisAdmissionAddr(s string) ([20]byte, error) {
 
 func loadConfig() (*Config, error) {
 	cfg := &Config{
-		ServerAddr:            envOr("LEDGER_ADDR", ":8080"),
+		ServerAddr:            listenAddr("LEDGER_ADDR", ":8080"),
 		DatabaseURL:           os.Getenv("LEDGER_DATABASE_URL"),
 		LogDID:                os.Getenv("LEDGER_LOG_DID"),
 		LedgerDID:             os.Getenv("LEDGER_DID"),
@@ -598,8 +598,8 @@ func loadConfig() (*Config, error) {
 		EpochAcceptanceWindow: 1,
 		AnchorInterval:        1 * time.Hour,
 		TesseraStorageDir:     envOr("LEDGER_TESSERA_STORAGE_DIR", "/var/lib/baseproof/tessera"),
-		TesseraSignerKeyFile:  resolveFile("LEDGER_TESSERA_SIGNER_KEY_FILE", "/etc/ledger/keys/tessera-signer.pem"),
-		LedgerSignerKeyFile:   resolveFile("LEDGER_SIGNER_KEY_FILE", "/etc/ledger/keys/signer.pem"),
+		TesseraSignerKeyFile:  resolveFile("LEDGER_TESSERA_SIGNER_KEY_FILE", "/etc/ledger/keys/tessera-signer.pem", "/etc/secrets/tessera-signer.pem"),
+		LedgerSignerKeyFile:   resolveFile("LEDGER_SIGNER_KEY_FILE", "/etc/ledger/keys/signer.pem", "/etc/secrets/signer.pem"),
 		TesseraOrigin:         os.Getenv("LEDGER_TESSERA_ORIGIN"), // defaults to LogDID below
 		ByteStoreBackend:      os.Getenv("LEDGER_BYTE_STORE_BACKEND"),
 		ByteStorePrefix:       envOr("LEDGER_BYTE_STORE_PREFIX", "entries"),
@@ -627,7 +627,7 @@ func loadConfig() (*Config, error) {
 		ArchiveShardIndexSource:  os.Getenv("LEDGER_ARCHIVE_SHARD_INDEX_SOURCE"),
 		WitnessEndpoints:         parseCSV(os.Getenv("LEDGER_WITNESS_ENDPOINTS")),
 		WitnessQuorumK:           envIntOr("LEDGER_WITNESS_QUORUM_K", 1),
-		NetworkBootstrapFile:     resolveFile("LEDGER_NETWORK_BOOTSTRAP_FILE", "/etc/ledger/bootstrap.json"),
+		NetworkBootstrapFile:     resolveFile("LEDGER_NETWORK_BOOTSTRAP_FILE", "/etc/ledger/bootstrap.json", "/etc/secrets/bootstrap.json"),
 		GossipPeerEndpoints:      parseCSV(os.Getenv("LEDGER_GOSSIP_PEER_ENDPOINTS")),
 		GossipPeerDIDs:           parseCSV(os.Getenv("LEDGER_GOSSIP_PEER_DIDS")),
 		GossipDisable:            os.Getenv("LEDGER_GOSSIP_DISABLE") == "true",
@@ -650,17 +650,19 @@ func loadConfig() (*Config, error) {
 		TesseraCheckpointInterval: envDurationOr("LEDGER_TESSERA_CHECKPOINT_INTERVAL", 1*time.Second),
 
 		// HTTP-server hardening knobs. Server TLS + outbound peer mTLS auto-mount
-		// from the standard paths; inbound mTLS enforcement does NOT auto-mount
-		// from the cert-manager-conventional ca.crt (which ships next to a server
-		// tls.crt/tls.key) — it reads a DEDICATED client-ca.crt so a stray ca.crt
-		// can never silently start requiring client certs.
-		TLSCertFile:         resolveFile("LEDGER_TLS_CERT_FILE", "/etc/ledger/tls/tls.crt"),
-		TLSKeyFile:          resolveFile("LEDGER_TLS_KEY_FILE", "/etc/ledger/tls/tls.key"),
-		InboundClientCAFile: resolveFile("LEDGER_INBOUND_CLIENT_CA_FILE", "/etc/ledger/tls/client-ca.crt"),
+		// from the standard paths (and their flat /etc/secrets PaaS twins — the
+		// peer-* prefix disambiguates server vs peer material in that flat dir);
+		// inbound mTLS enforcement does NOT auto-mount from the cert-manager-
+		// conventional ca.crt (which ships next to a server tls.crt/tls.key) — it
+		// reads a DEDICATED client-ca.crt so a stray ca.crt can never silently
+		// start requiring client certs.
+		TLSCertFile:         resolveFile("LEDGER_TLS_CERT_FILE", "/etc/ledger/tls/tls.crt", "/etc/secrets/tls.crt"),
+		TLSKeyFile:          resolveFile("LEDGER_TLS_KEY_FILE", "/etc/ledger/tls/tls.key", "/etc/secrets/tls.key"),
+		InboundClientCAFile: resolveFile("LEDGER_INBOUND_CLIENT_CA_FILE", "/etc/ledger/tls/client-ca.crt", "/etc/secrets/client-ca.crt"),
 		AllowPlaintext:      os.Getenv("LEDGER_ALLOW_PLAINTEXT") == "true",
-		PeerClientCertFile:  resolveFile("LEDGER_PEER_CLIENT_CERT_FILE", "/etc/ledger/peer/tls.crt"),
-		PeerClientKeyFile:   resolveFile("LEDGER_PEER_CLIENT_KEY_FILE", "/etc/ledger/peer/tls.key"),
-		PeerCAFile:          resolveFile("LEDGER_PEER_CA_FILE", "/etc/ledger/peer/ca.crt"),
+		PeerClientCertFile:  resolveFile("LEDGER_PEER_CLIENT_CERT_FILE", "/etc/ledger/peer/tls.crt", "/etc/secrets/peer-tls.crt"),
+		PeerClientKeyFile:   resolveFile("LEDGER_PEER_CLIENT_KEY_FILE", "/etc/ledger/peer/tls.key", "/etc/secrets/peer-tls.key"),
+		PeerCAFile:          resolveFile("LEDGER_PEER_CA_FILE", "/etc/ledger/peer/ca.crt", "/etc/secrets/peer-ca.crt"),
 		MaxConcurrentConns:  envIntOr("LEDGER_MAX_CONCURRENT_CONNS", 0),
 		PprofAddr:           os.Getenv("LEDGER_PPROF_ADDR"),
 		TileServeDisable:    os.Getenv("LEDGER_TILE_SERVE_DISABLE") == "true",
