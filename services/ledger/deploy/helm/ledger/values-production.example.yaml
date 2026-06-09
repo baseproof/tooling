@@ -17,7 +17,7 @@
 
 image:
   repository: ghcr.io/baseproof/tooling/ledger
-  tag: "1.0.0"  # pin to a digest in production overlays
+  tag: "0.1.5"  # a published ghcr tag; pin to a digest in production overlays
 
 serviceAccount:
   annotations:
@@ -37,7 +37,7 @@ config:
   metrics:
     environment: "production"
   otlpTracesEndpoint: "otel-collector.observability.svc.cluster.local:4318"
-  serviceVersion: "1.0.0"
+  serviceVersion: "0.1.5"  # reported in metrics/traces; keep in step with image.tag
 
 extraEnv:
   LEDGER_WITNESS_QUORUM_K: "3"

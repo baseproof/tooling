@@ -84,25 +84,40 @@ func envOr(key, fallback string) string {
 }
 
 // resolveFile implements the standard cert/key/bootstrap injection convention:
-// an explicit value (flag or WITNESS_* env) wins; otherwise, if a file exists at
-// the conventional mount path, use it (a Secret/volume dropped at /etc/witness/…
-// is picked up with zero flags/env); otherwise "" (byte-identical to the prior
-// behavior). The stat is boot-only.
-func resolveFile(explicit, stdPath string) string {
+// an explicit value (flag or WITNESS_* env) wins; otherwise the first existing
+// file among the conventional candidates is used, in order: the standard mount
+// path (/etc/witness/… — k8s Secret volume / compose bind mount), then the PaaS
+// secret-file path (/etc/secrets/<name>, where Render-class platforms place
+// uploaded secret files). No candidate ⇒ "" (byte-identical to the prior
+// behavior). The stats are boot-only.
+func resolveFile(explicit string, candidates ...string) string {
 	if explicit != "" {
 		return explicit
 	}
-	if stdPath != "" {
-		if info, err := os.Stat(stdPath); err == nil && !info.IsDir() {
-			return stdPath
+	for _, p := range candidates {
+		if p == "" {
+			continue
+		}
+		if info, err := os.Stat(p); err == nil && !info.IsDir() {
+			return p
 		}
 	}
 	return ""
 }
 
+// portAddrOr returns ":$PORT" when the platform injects PORT (the Render /
+// Cloud Run / Heroku contract), else the baked fallback. Consulted only after
+// -addr and WITNESS_ADDR, so it never overrides an operator-set address.
+func portAddrOr(fallback string) string {
+	if p := strings.TrimSpace(os.Getenv("PORT")); p != "" {
+		return ":" + p
+	}
+	return fallback
+}
+
 func main() {
-	addr := flag.String("addr", envOr("WITNESS_ADDR", ":8081"),
-		"HTTP listen address (env: WITNESS_ADDR)")
+	addr := flag.String("addr", envOr("WITNESS_ADDR", portAddrOr(":8081")),
+		"HTTP listen address (env: WITNESS_ADDR; a platform-injected PORT is honored when both are unset)")
 	keyFile := flag.String("key-file", os.Getenv("WITNESS_KEY_FILE"),
 		"path to the witness private key in PEM form (env: WITNESS_KEY_FILE; "+
 			"default /etc/witness/keys/witness.pem if mounted). secp256k1 "+
@@ -150,12 +165,13 @@ func main() {
 	}
 
 	// Standard-path fallback (after parse, so an explicit flag/env still wins):
-	// a Secret/volume mounted at the conventional /etc/witness/… path is picked
-	// up with zero flags/env — the "drop the certs and it just works" convention.
-	*keyFile = resolveFile(*keyFile, "/etc/witness/keys/witness.pem")
-	*bootstrapFile = resolveFile(*bootstrapFile, "/etc/witness/bootstrap.json")
-	*tlsCert = resolveFile(*tlsCert, "/etc/witness/tls/tls.crt")
-	*tlsKey = resolveFile(*tlsKey, "/etc/witness/tls/tls.key")
+	// a Secret/volume mounted at the conventional /etc/witness/… path — or a
+	// Render-class secret file at /etc/secrets/<name> — is picked up with zero
+	// flags/env: the "drop the certs and it just works" convention.
+	*keyFile = resolveFile(*keyFile, "/etc/witness/keys/witness.pem", "/etc/secrets/witness.pem")
+	*bootstrapFile = resolveFile(*bootstrapFile, "/etc/witness/bootstrap.json", "/etc/secrets/bootstrap.json")
+	*tlsCert = resolveFile(*tlsCert, "/etc/witness/tls/tls.crt", "/etc/secrets/tls.crt")
+	*tlsKey = resolveFile(*tlsKey, "/etc/witness/tls/tls.key", "/etc/secrets/tls.key")
 
 	if *keyFile == "" || *bootstrapFile == "" {
 		fmt.Fprintln(os.Stderr, "standalone-witness: -key-file and -bootstrap are required")

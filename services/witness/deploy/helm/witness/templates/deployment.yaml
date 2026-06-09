@@ -26,6 +26,8 @@ spec:
         {{- end }}
     spec:
       serviceAccountName: {{ include "witness.serviceAccountName" . }}
+      # The witness never calls the Kubernetes API — don't mount its token.
+      automountServiceAccountToken: false
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
@@ -76,6 +78,9 @@ spec:
           resources:
             {{- toYaml .Values.container.resources | nindent 12 }}
           volumeMounts:
+            # readOnlyRootFilesystem is on, so give the process a writable /tmp.
+            - name: tmp
+              mountPath: /tmp
             # Standard cert/key/bootstrap mount paths — the binary auto-detects
             # these, so NO *_FILE env is set (the orchestrator-agnostic convention).
             - name: signing-key
@@ -91,15 +96,22 @@ spec:
               readOnly: true
             {{- end }}
       volumes:
+        - name: tmp
+          emptyDir: {}
+        {{- /* Key material is 0440 (owner root, group-readable): the pod's
+               fsGroup (65532) makes it readable by the non-root process while
+               keeping it from being world-readable inside the container. */}}
         - name: signing-key
           secret:
             secretName: {{ .Values.signingKey.existingSecret }}
+            defaultMode: 0440
             items:
               - key: {{ .Values.signingKey.key }}
                 path: witness.pem
         - name: bootstrap
           secret:
             secretName: {{ .Values.bootstrap.existingSecret }}
+            defaultMode: 0440
             items:
               - key: {{ .Values.bootstrap.key }}
                 path: bootstrap.json
@@ -107,4 +119,5 @@ spec:
         - name: server-tls
           secret:
             secretName: {{ .Values.serverTLS.existingSecret }}
+            defaultMode: 0440
         {{- end }}

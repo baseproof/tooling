@@ -533,18 +533,20 @@ func loadConfig() readerConfig {
 		MaxConns:             20,
 		MinConns:             5,
 		StatementTimeout:     parsePgStatementTimeout(),
-		ServerAddr:           envOr("LEDGER_ADDR", envOr("BASEPROOF_SERVER_ADDR", ":8081")),
-		TesseraStorageDir:    envOr("LEDGER_TESSERA_STORAGE_DIR", envOr("BASEPROOF_TESSERA_STORAGE_DIR", "/var/lib/baseproof/tessera")),
-		TileCacheSize:        10000,
-		WarmTopLevels:        32,
-		SMTCacheSize:         100000,
-		InitialDifficulty:    16,
-		MinDifficulty:        8,
-		MaxDifficulty:        24,
-		HashFunction:         "sha256",
-		WitnessQuorumK:       envIntOr("LEDGER_WITNESS_QUORUM_K", 1),
-		TLSCertFile:          os.Getenv("LEDGER_TLS_CERT_FILE"),
-		TLSKeyFile:           os.Getenv("LEDGER_TLS_KEY_FILE"),
+		// PORT is the PaaS contract (Render / Cloud Run / Heroku): honored only
+		// when neither explicit addr var is set, so existing deploys are untouched.
+		ServerAddr:        envOr("LEDGER_ADDR", envOr("BASEPROOF_SERVER_ADDR", portAddrOr(":8081"))),
+		TesseraStorageDir: envOr("LEDGER_TESSERA_STORAGE_DIR", envOr("BASEPROOF_TESSERA_STORAGE_DIR", "/var/lib/baseproof/tessera")),
+		TileCacheSize:     10000,
+		WarmTopLevels:     32,
+		SMTCacheSize:      100000,
+		InitialDifficulty: 16,
+		MinDifficulty:     8,
+		MaxDifficulty:     24,
+		HashFunction:      "sha256",
+		WitnessQuorumK:    envIntOr("LEDGER_WITNESS_QUORUM_K", 1),
+		TLSCertFile:       os.Getenv("LEDGER_TLS_CERT_FILE"),
+		TLSKeyFile:        os.Getenv("LEDGER_TLS_KEY_FILE"),
 
 		ByteStoreBackend:       os.Getenv("LEDGER_BYTE_STORE_BACKEND"),
 		ByteStorePrefix:        envOr("LEDGER_BYTE_STORE_PREFIX", "entries"),
@@ -610,6 +612,16 @@ func (c readerConfig) byteStoreNamespace() string {
 func envOr(key, fallback string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
+	}
+	return fallback
+}
+
+// portAddrOr returns ":$PORT" when the platform injects PORT (the Render /
+// Cloud Run / Heroku contract), else the baked fallback. Consulted only after
+// the explicit addr vars, so it never overrides an operator-set address.
+func portAddrOr(fallback string) string {
+	if p := strings.TrimSpace(os.Getenv("PORT")); p != "" {
+		return ":" + p
 	}
 	return fallback
 }
