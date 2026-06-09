@@ -23,6 +23,8 @@ func Main(argv []string) int {
 		err = RunSubmit(ctx, args)
 	case "proof":
 		err = RunProof(ctx, args)
+	case "verify":
+		err = RunVerify(ctx, args)
 	case "load":
 		err = RunLoad(ctx, args)
 	case "-h", "--help", "help":
@@ -52,9 +54,14 @@ usage:
         Submit ONE entry to the network: a new entity, or an amendment of an
         existing entity (--amend <seq>, signed by its key via --key-file).
 
-  baseproof proof  --bundle b.json --seq <n> [--smt-key <64hex>]
-        Fetch the entry's bundle, verify it (witness quorum + inclusion + SMT) and
-        render it. --smt-key defaults to the key derived from (log, seq).
+  baseproof proof  --bundle b.json --seq <n> [--smt-key <64hex>] [--out file.proof]
+        Generate a portable v2 self-anchored proof of the entry and (with --out)
+        write it to a file for sharing/submission; otherwise verify + render it.
+
+  baseproof verify <proof-file> [--pin <64hex-network-id>]
+        Verify a v2 proof FILE fully offline (zero network calls): recompute the
+        witness K-of-N cosignatures, inclusion and SMT membership — fail-closed.
+        Network-agnostic (self-anchored); --pin binds it to a network you trust.
 
   baseproof load   --bundle b.json -n <count> [--amend-ratio r] [--workers w]
                    [--batch-size b] [--token t] [--seed s] [--manifest oracle.jsonl]
