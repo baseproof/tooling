@@ -105,8 +105,20 @@ COPY --from=builder /rebuild-projection /rebuild-projection
 
 EXPOSE 8080
 
-# Liveness: the ledger serves /healthz ("ok" + 200) once it is listening.
+# Liveness: the ledger serves /healthz ("ok" + 200) once it is listening. The
+# listener is HTTPS iff a TLS cert+key are configured (wire.go: HTTPTLSEnabled =
+# TLSCertFile != "" && TLSKeyFile != ""), plain HTTP otherwise — so probe BOTH
+# schemes and pass if either returns "ok": HTTP first (the compose / e2e default),
+# then HTTPS with --no-check-certificate (kubelet-style: accept the self-signed
+# in-binary cert). -T 2 bounds each attempt under the 3s timeout.
+#
+# NOTE: Kubernetes IGNORES this directive — kubelet runs the chart's
+# liveness/readiness probes, whose scheme is driven by .Values.tls.enabled in the
+# Helm deployment (deployment.yaml). This HEALTHCHECK governs docker /
+# docker-compose / Swarm only.
 HEALTHCHECK --interval=5s --timeout=3s --retries=10 --start-period=5s \
-    CMD wget -q -O- http://localhost:8080/healthz | grep -q '^ok$' || exit 1
+    CMD wget -q -T 2 -O- http://localhost:8080/healthz 2>/dev/null | grep -q '^ok$' \
+        || wget -q -T 2 --no-check-certificate -O- https://localhost:8080/healthz 2>/dev/null | grep -q '^ok$' \
+        || exit 1
 
 ENTRYPOINT ["/ledger"]

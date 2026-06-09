@@ -142,10 +142,21 @@ spec:
               mountPath: {{ .Values.signerKeys.mountPath }}
               readOnly: true
             {{- end }}
+          {{- /* The probe scheme MUST match the listener. The ledger serves HTTPS
+                 whenever TLS certs are set (wire.go ServeTLSWithListener), so an HTTP
+                 probe against it fails the TLS handshake → liveness fails →
+                 CrashLoopBackoff. tls.enabled drives the scheme; kubelet does NOT
+                 verify the cert on an HTTPS httpGet, so the in-binary/self-signed
+                 cert is accepted. */}}
+          {{- $scheme := ternary "HTTPS" "HTTP" .Values.tls.enabled }}
           livenessProbe:
-            {{- toYaml .Values.container.livenessProbe | nindent 12 }}
+            {{- $live := deepCopy .Values.container.livenessProbe }}
+            {{- $_ := set $live.httpGet "scheme" $scheme }}
+            {{- toYaml $live | nindent 12 }}
           readinessProbe:
-            {{- toYaml .Values.container.readinessProbe | nindent 12 }}
+            {{- $ready := deepCopy .Values.container.readinessProbe }}
+            {{- $_ := set $ready.httpGet "scheme" $scheme }}
+            {{- toYaml $ready | nindent 12 }}
           resources:
             {{- toYaml .Values.container.resources | nindent 12 }}
       volumes:
