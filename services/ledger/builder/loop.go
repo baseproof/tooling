@@ -627,6 +627,65 @@ func (bl *BuilderLoop) processBatch(ctx context.Context) (int, error) {
 		)
 	}
 
+	// ── INSTRUMENTATION: live tile-store probe for missing-node faults ──
+	// When a PathD demotion is caused by the SDK's typed *smt.MissingNodeError
+	// (the trie walk dereferenced a child the node store could not resolve),
+	// interrogate the live tile store for that exact node X and its ancestor Z.
+	// Exists(HEAD) vs Fetch(GET) pins the root cause:
+	//   Exists=true,  Fetch=miss → tile-top present to HEAD but absent to GET
+	//                              (object-store Exists/HEAD-vs-GET trust gap).
+	//   Exists=false, Fetch=miss → X is not a tile top (interior-by-hash) OR the
+	//                              tile was never emitted / was pruned (stranded).
+	//   Exists=true,  Fetch=ok   → tile resolves now; absent only mid-walk
+	//                              (timing / eventual consistency).
+	if ts := bl.nodeStore.TileProbe(); ts != nil {
+		errString := func(err error) string {
+			if err == nil {
+				return ""
+			}
+			return err.Error()
+		}
+		for i, rerr := range result.PathFailureReasons {
+			var mne *smt.MissingNodeError
+			if rerr == nil || !errors.As(rerr, &mne) {
+				continue
+			}
+			x, z := mne.Hash, mne.Ancestor
+			existsX, exErrX := ts.Exists(ctx, x)
+			fetchN := -1
+			var ftErrX error
+			if b, e := ts.Fetch(ctx, x); e != nil {
+				ftErrX = e
+			} else {
+				fetchN = len(b)
+			}
+			existsZ, _ := ts.Exists(ctx, z)
+			diagnosis := "ABSENT: X is not a tile-top (interior-by-hash) OR its tile was never emitted / was pruned (stranded)"
+			switch {
+			case existsX && ftErrX != nil:
+				diagnosis = "STRANDED TILE-TOP: Exists(HEAD)=true but Fetch(GET) failed — object-store HEAD-vs-GET / Exists trust gap"
+			case existsX && ftErrX == nil:
+				diagnosis = "PRESENT NOW: tile resolves on probe — absent only during the commit walk (timing/eventual-consistency)"
+			}
+			seq := uint64(0)
+			if i < len(seqs) {
+				seq = seqs[i]
+			}
+			bl.logger.Error("leaf-loss probe: missing node interrogated against live tile store",
+				"missing_node_X", fmt.Sprintf("%x", x),
+				"ancestor_Z", fmt.Sprintf("%x", z),
+				"inserting_key", fmt.Sprintf("%x", mne.InsertingKey),
+				"seq", seq,
+				"tiles_Exists_X", existsX,
+				"tiles_Exists_X_err", errString(exErrX),
+				"tiles_Fetch_X_bytes", fetchN,
+				"tiles_Fetch_X_err", errString(ftErrX),
+				"tiles_Exists_Z", existsZ,
+				"diagnosis", diagnosis,
+			)
+		}
+	}
+
 	// ── Step 5: Append entry identities to the Merkle tree ────────────
 	//
 	// SDK alignment: send envelope.EntryIdentity(entry) — the 32-byte SHA-256 of

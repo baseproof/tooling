@@ -38,6 +38,13 @@ type TailedNodeStore struct {
 	tail  map[[32]byte]smt.Node
 	tiles smt.NodeStore // durable read-through (a *smt.TiledNodeStore)
 
+	// tileProbe is the SAME live SMTTileStore wrapped by tiles, retained only
+	// so the builder can interrogate Exists(HEAD)/Fetch(GET) for a specific
+	// node hash when the SDK reports a missing-node fault — distinguishing a
+	// stranded tile-top (Exists true / Fetch miss → HEAD-vs-GET trust gap)
+	// from an interior-by-hash or never-emitted miss. Optional; nil disables.
+	tileProbe SMTTileStore
+
 	// committedRoot is the SMT root of the LATEST batch handed to the tail, set
 	// ATOMICALLY with that batch's nodes (PutBatchCommitted) so PruneOrphans can
 	// walk from a root that is always consistent with the tail's contents — the
@@ -69,6 +76,15 @@ func NewTailedNodeStore(tiles smt.NodeStore) *TailedNodeStore {
 	}
 	return s
 }
+
+// SetTileProbe records the live tile store so the builder can interrogate it
+// for a specific node hash on a missing-node fault. Optional; set once at
+// wiring time. See the tileProbe field.
+func (s *TailedNodeStore) SetTileProbe(t SMTTileStore) { s.tileProbe = t }
+
+// TileProbe returns the live tile store wired for diagnostic Exists/Fetch
+// probing, or nil if none was set.
+func (s *TailedNodeStore) TileProbe() SMTTileStore { return s.tileProbe }
 
 // Get returns the node for hash: the un-tiled tail first, then durable tiles.
 // (nil, nil) for EmptyHash or an absent node, per the smt.NodeStore contract.

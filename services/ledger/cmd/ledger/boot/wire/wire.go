@@ -560,9 +560,13 @@ func composeStores(ctx context.Context, cfg Config, d *deps.AppDeps) *tessera.Te
 	if tileDir == "" {
 		tileDir = "/var/lib/ledger/tiles"
 	}
+	tileStore := smtTileStore(d.ByteStore, tileDir)
 	d.NodeStore = store.NewTailedNodeStore(
-		smt.NewTiledNodeStore(ctx, smtTileStore(d.ByteStore, tileDir), smt.NewTileCache(cacheSize)),
+		smt.NewTiledNodeStore(ctx, tileStore, smt.NewTileCache(cacheSize)),
 	)
+	// Hand the builder the SAME live tile store so a missing-node fault can be
+	// interrogated (Exists/Fetch) against the durable substrate for attribution.
+	d.NodeStore.SetTileProbe(tileStore)
 	d.TreeHeadStore = store.NewTreeHeadStore(pool)
 	d.SMTRootState = store.NewSMTRootStateStore(pool)
 	return tessera.NewTesseraAdapter(ctx, d.TesseraEmbedded, d.TileReader, d.Logger)
