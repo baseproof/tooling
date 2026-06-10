@@ -242,18 +242,59 @@ Both collide with the **single-writer invariant** (the builder loop holds a Post
 advisory lock). That is exactly why they cannot be live admin endpoints and stay
 Plane-4 Jobs.
 
-### Two tiers of maintenance
+### Three tiers of maintenance
 
-- **Soft maintenance (online, degraded) — the common case.** The ledger flips a flag
-  (`baseproof ledger maintenance enable`): `POST /v1/entries` returns `503
-  maintenance`, **GET reads + proofs keep serving**. A heavy *online-safe* operation
-  (`reindex` / `prune` / `compact-tiles`) runs in the background, tracked via the
-  operations API, and admissions resume on `disable`. No reads ever go dark.
-- **Hard maintenance (offline) — rare, DR-only.** The ledger process is **stopped**.
-  Cold-DR Jobs (`rebuild-projection`, `rebuild-tiles`) reconstruct storage from the
-  durable sources (tiles → projection, Postgres → tiles, gossip → heads). No API is
-  up; this is the only true "everything down" mode, reserved for disaster recovery
-  and wire/leaf-format migrations.
+The dividing line is the **single-writer invariant**: the builder loop holds a
+Postgres advisory lock and is the sole writer of tree/tiles/projection. The test
+for "must this quiesce?" is mechanical — *needs to BE the writer, or rewrites the
+tables the writer/readers depend on* → hard; *read-only or append-idempotent* →
+soft/online; *just submits one on-log entry* → fully online.
+
+- **Tier 1 — Hard maintenance (writer stopped); rare, DR-only.** Exactly four
+  operations: `rebuild-tiles` (replays every admitted entry into a fresh Tessera;
+  not idempotent against a live builder), `rebuild-projection` (rewrites the very
+  tables reads are served from), leaf-scheme/tile-format migrations (force a
+  `rebuild-tiles`), and schema-rebase DB migrations (force a `rebuild-projection`).
+  Run as one-shot Jobs anchored on the **witness-cosigned horizon**, never "now".
+- **Tier 2 — Soft maintenance (admissions paused, reads continue).** The ledger
+  flips a flag (`baseproof ledger maintenance enable`): `POST /v1/entries` returns
+  `503 maintenance`, **GET reads + proofs keep serving**. Heavy *online-safe* work
+  runs here, tracked via the operations API: `reindex` (idempotent, `ON CONFLICT DO
+  NOTHING`), retention `prune`, tile `compact`/cold-storage migration, checkpoint
+  archival, and full re-verification sweeps (e.g. the auditor's authoritative
+  rotation log scan). Admissions resume on `disable`; no reads ever go dark.
+- **Tier 3 — Online governance (admin key, NO maintenance).** Light, single-entry,
+  key-holding: `admission-authority` rotate/enroll/revoke, `signature-policy`
+  update, witness-set/auditor rotation, session minting. The **crypto-agility
+  cutover** (ECDSA → PQ ML-DSA/SLH-DSA via `--require-hybrid-after`) lives here —
+  *staged over wall-clock time* (announce → dual-sign window → flip the floor →
+  deprecate), the one governance op that is coordinated rather than instantaneous,
+  and it never stops the ledger.
+
+### Why 15-year maintenance is recoverable: bedrock vs cache
+
+- **Bedrock (immutable, durable, async-safe):** the witness-cosigned
+  horizon/checkpoints, the tile store (S3/GCS/CDN), the gossip evidence. These
+  survive any single component dying.
+- **Cache (rebuildable):** the Postgres projection — a CQRS read-model derived
+  from bedrock. `rebuild-projection` exists *because* losing it costs a rebuild,
+  never evidence. (The auditor's rotation journal carries the same "rebuildable
+  cache, not bedrock" contract.)
+
+Three consequences to design around:
+
+1. **Reads stay up during writer maintenance** — `ledger-reader` shares the
+   backing store and serves GETs while the writer is stopped. Caveat: during a
+   `rebuild-projection`, Postgres-backed reads (queries, `entry_index`) are
+   degraded, but tile/proof reads (inclusion, SMT, checkpoints) continue from the
+   immutable store.
+2. **Maintenance is per-component, never network-wide** — you quiesce *one*
+   ledger; peers and auditors keep running and re-verify against the cosigned
+   horizon. There is no "stop the network" mode, and the async federation design
+   means there can't be one.
+3. **Every heavy/DR op anchors on the cosigned horizon, not the live tip** —
+   which is exactly why it is safe to run while the rest of the federation moves
+   forward asynchronously.
 
 The design rule for the next 15 years: **a heavy or blocking operation is never a
 bare verb that blocks a terminal.** It is either a Plane-3 *operation* (online-safe,
