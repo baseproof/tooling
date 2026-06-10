@@ -27,6 +27,8 @@ func Main(argv []string) int {
 		err = RunVerify(ctx, args)
 	case "info":
 		err = RunInfo(ctx, args)
+	case "witnesses":
+		err = RunWitnesses(ctx, args)
 	case "network":
 		err = RunNetwork(ctx, args)
 	case "config":
@@ -81,6 +83,10 @@ usage:
         witnesses + K-of-N, auditors (live + in-sync), horizon, admission,
         accepted messages, mirrors, and the federation. --verify recomputes the
         crypto; --federation walks + verifies the cited peers (bounded, cycle-guarded).
+
+  baseproof witnesses [--bundle b.json] [--at <tree_size>]
+        The network's witness set — current, or the set active as-of a historical
+        tree size (--at N, time-travel). Human-name labels overlaid when published.
 
   baseproof load   --bundle b.json -n <count> [--amend-ratio r] [--workers w]
                    [--batch-size b] [--token t] [--seed s] [--manifest oracle.jsonl]

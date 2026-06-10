@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"text/tabwriter"
 	"time"
 
 	"github.com/baseproof/baseproof/core/smt"
@@ -102,20 +103,37 @@ func RunProof(ctx context.Context, args []string) error {
 		return fmt.Errorf("generated proof did not self-verify (fail-closed): %w", err)
 	}
 
-	nid := proof.NetworkID
-	fmt.Printf("proof: v2  network=%s  seq=%d  tree_size=%d  quorum=%d-of-%d  (verified offline)\n",
-		hex.EncodeToString(nid[:]), *seq, res.TreeSize, res.WitnessQuorum.Have, res.WitnessQuorum.Need)
-	fmt.Printf("proof: verified: %v\n", res.Coverage.Verified)
-	if len(res.Coverage.NotAsserted) > 0 {
-		fmt.Printf("proof: not asserted (absent sections): %v\n", res.Coverage.NotAsserted)
-	}
+	renderProof(os.Stdout, proof, res, *seq)
 	if *out != "" {
 		if err := writeProofFile(proof, *out); err != nil {
 			return err
 		}
-		fmt.Printf("proof: wrote %s (portable — verify it anywhere with `baseproof verify %s`)\n", *out, *out)
+		fmt.Printf("\nproof: wrote %s (portable — verify it anywhere with `baseproof verify %s`)\n", *out, *out)
 	}
 	return nil
+}
+
+// renderProof writes a full, structured view of a generated v2 proof + its
+// offline self-verification result: the trust facts (network/seq/tree size/quorum)
+// and EVERY proof section with its verdict — ✔ verified, or ∅ not-asserted (a
+// section this network legitimately does not carry). The fuller counterpart to the
+// one-line summary, so an operator sees exactly what the portable artifact proves.
+func renderProof(w io.Writer, proof *sdkbundle.StandaloneProof, res *sdkbundle.StandaloneResult, seq uint64) {
+	tw := tabwriter.NewWriter(w, 0, 2, 2, ' ', 0)
+	nid := proof.NetworkID
+	fmt.Fprintf(tw, "proof\t%s standalone — verifiable offline (no ledger needed)\n", proof.Format)
+	fmt.Fprintf(tw, "network\t%s\n", hex.EncodeToString(nid[:]))
+	fmt.Fprintf(tw, "sequence\t%d\n", seq)
+	fmt.Fprintf(tw, "tree_size\t%d\n", res.TreeSize)
+	fmt.Fprintf(tw, "quorum\t%d-of-%d witnesses\n", res.WitnessQuorum.Have, res.WitnessQuorum.Need)
+	_ = tw.Flush()
+	fmt.Fprintln(w, "sections:")
+	for _, s := range res.Coverage.Verified {
+		fmt.Fprintf(w, "  ✔ %s\n", s)
+	}
+	for _, s := range res.Coverage.NotAsserted {
+		fmt.Fprintf(w, "  ∅ %s (not asserted by this network)\n", s)
+	}
 }
 
 // generateProof builds a v2 standalone proof from a gather. Pure orchestration —

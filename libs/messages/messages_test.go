@@ -136,3 +136,87 @@ func TestCatalogMatchesSDK(t *testing.T) {
 }
 
 func ap(p envelope.AuthorityPath) *envelope.AuthorityPath { return &p }
+
+// TestCatalogLeafEffectMatchesSDK grounds the catalog's Leaf column against what
+// the REAL SDK builders put on the header — closing the "schema's leaf-effect is
+// inferred, not SDK-verified" gap. The leaf effect is determined by the header,
+// not guessed: an authority-bearing entry with NO TargetRoot establishes a new
+// origin (LeafCreate); one WITH a TargetRoot advances an existing leaf
+// (LeafMutate); an entry with no AuthorityPath is commentary (LeafNone). The test
+// builds one entry per leaf class — schema INCLUDED, asserting its create-parity
+// with RootEntity is real — and checks the invariant holds.
+func TestCatalogLeafEffectMatchesSDK(t *testing.T) {
+	kp, err := sdkdid.GenerateDIDKeySecp256k1()
+	if err != nil {
+		t.Fatalf("gen key: %v", err)
+	}
+	signer := kp.DID
+	const dest = "did:web:exchange.example"
+	pos := types.LogPosition{LogDID: "did:web:log.example", Sequence: 1}
+	authSet := map[string]struct{}{signer: {}}
+
+	build := func(name string) (*envelope.Entry, error) {
+		switch name {
+		case "entity":
+			return builder.BuildRootEntity(builder.RootEntityParams{Destination: dest, SignerDID: signer, Payload: []byte("x")})
+		case "schema":
+			return builder.BuildSchemaEntry(builder.SchemaEntryParams{Destination: dest, SignerDID: signer})
+		case "delegation":
+			return builder.BuildDelegation(builder.DelegationParams{Destination: dest, SignerDID: signer, DelegateDID: "did:key:zDelegate", Payload: []byte("x")})
+		case "scope":
+			return builder.BuildScopeCreation(builder.ScopeCreationParams{Destination: dest, SignerDID: signer, AuthoritySet: authSet, Payload: []byte("x")})
+		case "amendment":
+			return builder.BuildAmendment(builder.AmendmentParams{Destination: dest, SignerDID: signer, TargetRoot: pos, Payload: []byte("x")})
+		case "delegated-amendment":
+			return builder.BuildPathBEntry(builder.PathBParams{Destination: dest, SignerDID: signer, TargetRoot: pos, DelegationPointers: []types.LogPosition{pos}, Payload: []byte("x")})
+		case "scope-amendment":
+			return builder.BuildScopeAmendment(builder.ScopeAmendmentParams{Destination: dest, SignerDID: signer, TargetRoot: pos, ScopePointer: pos, NewAuthoritySet: authSet, Payload: []byte("x")})
+		case "commentary":
+			return builder.BuildCommentary(builder.CommentaryParams{Destination: dest, SignerDID: signer, Payload: []byte("x")})
+		case "cosignature":
+			return builder.BuildCosignature(builder.CosignatureParams{Destination: dest, SignerDID: signer, CosignatureOf: pos, Payload: []byte("x")})
+		case "mirror":
+			return builder.BuildMirrorEntry(builder.MirrorParams{Destination: dest, SignerDID: signer, SourceLogDID: "did:web:other.log", SourcePosition: pos})
+		}
+		t.Fatalf("no builder wired for %q", name)
+		return nil, nil
+	}
+
+	for _, name := range []string{
+		"entity", "schema", "delegation", "scope", // LeafCreate
+		"amendment", "delegated-amendment", "scope-amendment", // LeafMutate
+		"commentary", "cosignature", "mirror", // LeafNone
+	} {
+		s, ok := Lookup(name)
+		if !ok {
+			t.Fatalf("catalog missing %q", name)
+		}
+		e, err := build(name)
+		if err != nil {
+			t.Fatalf("%s: SDK build failed: %v", name, err)
+		}
+		h := e.Header
+		var got LeafEffect
+		switch {
+		case h.AuthorityPath == nil:
+			got = LeafNone
+		case h.TargetRoot == nil:
+			got = LeafCreate
+		default:
+			got = LeafMutate
+		}
+		if got != s.Leaf {
+			t.Errorf("%s: catalog leaf=%s but SDK header implies %s (AuthorityPath=%v TargetRoot=%v)",
+				name, s.Leaf, got, h.AuthorityPath != nil, h.TargetRoot != nil)
+		}
+	}
+
+	// Explicit: schema's create-effect is parity with RootEntity (both
+	// authority-bearing, neither carries a TargetRoot) — now SDK-verified.
+	root, _ := build("entity")
+	sch, _ := build("schema")
+	if root.Header.TargetRoot != nil || sch.Header.TargetRoot != nil ||
+		root.Header.AuthorityPath == nil || sch.Header.AuthorityPath == nil {
+		t.Error("schema↔entity create-parity broken: both must be authority-bearing with no TargetRoot")
+	}
+}
