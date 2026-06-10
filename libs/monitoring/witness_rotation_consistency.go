@@ -21,8 +21,9 @@
 //	  - FROZEN LOG: the newest verified head was observed more than
 //	    MaxHeadAge ago — the log stopped publishing (or gossip stopped
 //	    delivering), rotation or not. Freshness semantics come from the
-//	    SDK's witness/staleness.go (witness.CheckFreshness), so "stale"
-//	    has exactly one definition across the ecosystem.
+//	    SDK's witness/staleness.go head-age axis (witness.CheckHeadFreshness
+//	    + the StalenessFrozenLog preset), so "stale" has exactly one
+//	    definition across the ecosystem.
 //
 // The grace window is the async-correctness load-bearing piece: the cosign
 // switch after a rotation is operationally fuzzy (the SDK documents that
@@ -87,6 +88,9 @@ type WitnessRotationConsistencyConfig struct {
 	// MaxHeadAge bounds how old the newest verified head may be before the
 	// log is flagged FROZEN (Warning). 0 disables the frozen check — the same
 	// "no staleness check" semantics as witness.StalenessConfig.MaxAge == 0.
+	// The default home is the SDK preset witness.StalenessFrozenLog (1h);
+	// callers (the auditor's main) seed from it rather than re-stating the
+	// number here.
 	MaxHeadAge time.Duration
 }
 
@@ -200,7 +204,11 @@ func checkOneLog(lg RotationLogState, grace, maxHeadAge time.Duration, now time.
 	// remediations, both honest.
 	var alerts []monitoring.Alert
 	if maxHeadAge > 0 && !lg.LatestHeadAt.IsZero() {
-		if fr, ferr := witness.CheckFreshness(lg.LatestHeadAt, now, witness.StalenessConfig{MaxAge: maxHeadAge}); ferr != nil && fr != nil && !fr.IsFresh {
+		// CheckHeadFreshness is the SDK's named head-age (log-liveness) axis —
+		// the call site reads as the frozen-log check it is, distinct from
+		// view-freshness (fetch-age). Same StalenessConfig/FreshnessResult
+		// vocabulary; one home for "stale".
+		if fr, ferr := witness.CheckHeadFreshness(lg.LatestHeadAt, now, witness.StalenessConfig{MaxAge: maxHeadAge}); ferr != nil && fr != nil && !fr.IsFresh {
 			alerts = append(alerts, monitoring.Alert{
 				Monitor:     MonitorWitnessRotationConsistency,
 				Severity:    monitoring.Warning,

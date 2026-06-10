@@ -178,11 +178,12 @@ type config struct {
 	// independent, so divergence INSIDE the window is expected and silent.
 	rotationAdoptionGrace time.Duration
 
-	// frozenLogMaxHeadAge (AUDITOR_FROZEN_LOG_MAX_HEAD_AGE, default 1h; "0"
-	// disables) bounds how old a log's newest VERIFIED head may be before
-	// the consistency audit flags the log FROZEN (Warning). Freshness
-	// semantics are the SDK's witness/staleness.go — one definition of
-	// "stale" across the ecosystem.
+	// frozenLogMaxHeadAge (AUDITOR_MAX_HEAD_AGE; default = the SDK preset
+	// witness.StalenessFrozenLog, 1h; "0" disables) bounds how old a log's
+	// newest VERIFIED head may be before the consistency audit flags the log
+	// FROZEN (Warning). head-age = LOG LIVENESS (the SDK's
+	// witness.CheckHeadFreshness axis), distinct from fetch-age view
+	// freshness; the default number lives in ONE home — the SDK preset.
 	frozenLogMaxHeadAge time.Duration
 
 	// equivScanInterval (AUDITOR_EQUIVOCATION_SCAN_INTERVAL, default 0 =
@@ -267,7 +268,7 @@ func loadConfig() config {
 		rotationScanInterval:        envDuration("AUDITOR_ROTATION_SCAN_INTERVAL", 10*time.Minute),
 		rotationConsistencyInterval: envDuration("AUDITOR_ROTATION_CONSISTENCY_INTERVAL", 10*time.Minute),
 		rotationAdoptionGrace:       envDuration("AUDITOR_ROTATION_ADOPTION_GRACE", time.Hour),
-		frozenLogMaxHeadAge:         envDuration("AUDITOR_FROZEN_LOG_MAX_HEAD_AGE", time.Hour),
+		frozenLogMaxHeadAge:         envDuration("AUDITOR_MAX_HEAD_AGE", witness.StalenessFrozenLog.MaxAge),
 		// Independent equivocation scanner (push leg). Disabled unless both
 		// the interval AND a gossip signing key are set.
 		equivScanInterval:    envDuration("AUDITOR_EQUIVOCATION_SCAN_INTERVAL", 0),

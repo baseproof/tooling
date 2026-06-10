@@ -20,6 +20,7 @@ import (
 	"github.com/baseproof/baseproof/crypto/signatures"
 	sdkmonitoring "github.com/baseproof/baseproof/monitoring"
 	"github.com/baseproof/baseproof/types"
+	"github.com/baseproof/baseproof/witness"
 
 	"github.com/baseproof/tooling/libs/witnessrotation"
 	"github.com/baseproof/tooling/services/auditor/internal/store"
@@ -131,5 +132,28 @@ func TestBuildRotationScanJob_AlertMapping(t *testing.T) {
 	}
 	if bySev[sdkmonitoring.Critical] != 1 || bySev[sdkmonitoring.Warning] != 2 {
 		t.Fatalf("severity mix = %v, want 1 Critical + 2 Warning", bySev)
+	}
+}
+
+// TestLoadConfig_FrozenLogDefault_IsTheSDKPreset pins the one-home rule: the
+// frozen-log default comes from witness.StalenessFrozenLog, not a re-stated
+// literal — and an explicit "0" disables the check.
+func TestLoadConfig_FrozenLogDefault_IsTheSDKPreset(t *testing.T) {
+	t.Setenv("AUDITOR_MAX_HEAD_AGE", "")
+	if got := loadConfig().frozenLogMaxHeadAge; got != witness.StalenessFrozenLog.MaxAge {
+		t.Fatalf("default frozen-log max age = %v, want SDK preset %v", got, witness.StalenessFrozenLog.MaxAge)
+	}
+	t.Setenv("AUDITOR_MAX_HEAD_AGE", "0")
+	if got := loadConfig().frozenLogMaxHeadAge; got != 0 {
+		t.Fatalf("explicit 0 must disable, got %v", got)
+	}
+	// The on-by-default safety jobs follow the same explicit-zero contract.
+	t.Setenv("AUDITOR_ROTATION_SCAN_INTERVAL", "")
+	if got := loadConfig().rotationScanInterval; got <= 0 {
+		t.Fatalf("rotation scan must be ON by default, got %v", got)
+	}
+	t.Setenv("AUDITOR_ROTATION_SCAN_INTERVAL", "0")
+	if got := loadConfig().rotationScanInterval; got != 0 {
+		t.Fatalf("explicit 0 must disable the scan, got %v", got)
 	}
 }
