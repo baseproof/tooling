@@ -1,18 +1,25 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
+	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/baseproof/baseproof/builder"
 	"github.com/baseproof/baseproof/core/envelope"
 	"github.com/baseproof/baseproof/core/smt"
+	"github.com/baseproof/baseproof/crypto/signatures"
 	sdkdid "github.com/baseproof/baseproof/did"
 	"github.com/baseproof/baseproof/types"
 
@@ -26,17 +33,19 @@ import (
 func RunSubmit(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("submit", flag.ContinueOnError)
 	var (
-		bundlePath = fs.String("bundle", "", "client bundle JSON (else --network or the active network)")
-		network    = fs.String("network", "", "stored network name (else the active network)")
-		payload    = fs.String("payload", "", "entry payload (UTF-8) — REQUIRED")
-		amend      = fs.Int64("amend", -1, "amend the entity at this sequence (signed by its key); omit to create a new entity")
-		delegateTo = fs.String("delegate-to", "", "mint a delegation: the entity (--key-file) grants authority to this delegate DID")
-		delegation = fs.Int64("delegation", -1, "with --amend: a DELEGATED amendment citing the delegation at this sequence (--key-file is the delegate)")
-		keyFile    = fs.String("key-file", "", "32-byte hex secp256k1 signer key; REQUIRED for --amend/--delegate-to/delegated, optional for a new entity")
-		outKey     = fs.String("out-key", "", "write the generated signer key (hex) here (new root only)")
-		token      = fs.String("token", "", "Mode A credit token; empty ⇒ Mode B PoW")
-		difficulty = fs.Int("difficulty", 0, "Mode B PoW difficulty (0 ⇒ query the ledger)")
-		timeout    = fs.Duration("timeout", 30*time.Second, "per-request HTTP timeout")
+		bundlePath   = fs.String("bundle", "", "client bundle JSON (else --network or the active network)")
+		network      = fs.String("network", "", "stored network name (else the active network)")
+		payload      = fs.String("payload", "", "entry payload (UTF-8) — REQUIRED")
+		amend        = fs.Int64("amend", -1, "amend the entity at this sequence (signed by its key); omit to create a new entity")
+		delegateTo   = fs.String("delegate-to", "", "mint a delegation: the entity (--key-file) grants authority to this delegate DID")
+		delegation   = fs.Int64("delegation", -1, "with --amend: a DELEGATED amendment citing the delegation at this sequence (--key-file is the delegate)")
+		keyFile      = fs.String("key-file", "", "32-byte hex secp256k1 signer key; REQUIRED for --amend/--delegate-to/delegated, optional for a new entity")
+		outKey       = fs.String("out-key", "", "write the generated signer key (hex) here (new root only)")
+		token        = fs.String("token", "", "Mode A credit token; empty ⇒ Mode B PoW")
+		difficulty   = fs.Int("difficulty", 0, "Mode B PoW difficulty (0 ⇒ query the ledger)")
+		cosignerKeys = fs.String("cosigner-keys", "", "comma-separated key files (hex) added as INLINE cosignatures on ONE entry (in-band multi-sig, model #1; requires a gated network's write_endpoint — the JN's cosignature policy is the gate)")
+		cosign       = fs.String("cosign", "", "TWO-PART attestation (model #2): submit a separate entry that cosigns the prior primary at <log-did>@<seq> (sets Header.CosignatureOf; @<seq> alone ⇒ this network's log)")
+		timeout      = fs.Duration("timeout", 30*time.Second, "per-request HTTP timeout")
 	)
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -84,10 +93,37 @@ func RunSubmit(ctx context.Context, args []string) error {
 		}
 	}
 
+	// Resolve any INLINE cosigners (model #1, in-band multi-sig): each signs the
+	// SAME signing payload and rides on ONE entry. The JN's cosignature policy is
+	// the gate, so they require a gated write_endpoint (enforced at submit below).
+	cosigners, ccErr := resolveCosigners(*cosignerKeys)
+	if ccErr != nil {
+		return ccErr
+	}
+	if *cosign != "" && (*amend >= 0 || *delegation >= 0 || *delegateTo != "") {
+		return fmt.Errorf("--cosign is standalone (an attestation entry): combine it with --payload only, not --amend/--delegate-to/--delegation")
+	}
+
 	// Build the entry.
 	var entry *envelope.Entry
 	kind := "entity"
 	switch {
+	case *cosign != "":
+		// Model #2 (two-part attestation): a commentary entry that cosigns the prior
+		// primary via Header.CosignatureOf. The ledger's gate-2 requires that target
+		// to ALREADY be sequenced (part 1); this submit is part 2.
+		pos, perr := parseLogPos(*cosign, logDID)
+		if perr != nil {
+			return perr
+		}
+		kind = "attestation→" + pos.String()
+		entry, err = builder.BuildCommentary(builder.CommentaryParams{
+			Destination: logDID, SignerDID: id.DID,
+			Payload: []byte(*payload), EventTime: time.Now().UTC().UnixMicro(),
+		})
+		if err == nil {
+			entry.Header.CosignatureOf = &pos
+		}
 	case *delegateTo != "":
 		kind = "delegation→" + short(*delegateTo)
 		entry, err = builder.BuildDelegation(builder.DelegationParams{
@@ -119,14 +155,26 @@ func RunSubmit(ctx context.Context, args []string) error {
 		return fmt.Errorf("build entry: %w", err)
 	}
 
-	seq, err := loadgen.SubmitOne(ctx, loadgen.SubmitParams{
-		LedgerURL:      b.Endpoint,
-		LogDID:         logDID,
-		Token:          *token,
-		Difficulty:     uint32(*difficulty),
-		EpochWindowSec: b.Admission.EpochWindowSec,
-		HTTPClient:     hc,
-	}, entry, id.Priv, id.DID)
+	var seq uint64
+	if b.WriteEndpoint != "" {
+		// GATED network: write THROUGH the JN enforcer — it runs its admission gate
+		// (cosignature + prerequisite policy) and mints the gate-5 WriteAuthorization
+		// the ledger requires. Multi-sign (primary + inline cosigners); the JN's
+		// forward satisfies the payment axis, so no PoW/token is attached here.
+		seq, err = submitViaJN(ctx, hc, b, entry, id, cosigners, *timeout)
+	} else {
+		if len(cosigners) > 0 {
+			return fmt.Errorf("--cosigner-keys (in-band multi-sig) needs a gated network (a write_endpoint / JN enforcer): inline cosignatures are validated by the JN's cosignature policy, not on a direct-to-ledger write")
+		}
+		seq, err = loadgen.SubmitOne(ctx, loadgen.SubmitParams{
+			LedgerURL:      b.Endpoint,
+			LogDID:         logDID,
+			Token:          *token,
+			Difficulty:     uint32(*difficulty),
+			EpochWindowSec: b.Admission.EpochWindowSec,
+			HTTPClient:     hc,
+		}, entry, id.Priv, id.DID)
+	}
 	if err != nil {
 		return err
 	}
@@ -165,4 +213,149 @@ func writeHexKey(path string, raw []byte) error {
 		return fmt.Errorf("write key %q: %w", path, err)
 	}
 	return nil
+}
+
+// resolveCosigners loads each comma-separated hex key file into a loadgen.Identity
+// — the INLINE cosigners for model #1 (in-band multi-sig). Empty ⇒ none.
+func resolveCosigners(csv string) ([]loadgen.Identity, error) {
+	csv = strings.TrimSpace(csv)
+	if csv == "" {
+		return nil, nil
+	}
+	var out []loadgen.Identity
+	for _, p := range strings.Split(csv, ",") {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		raw, rErr := readHexKey(p)
+		if rErr != nil {
+			return nil, fmt.Errorf("cosigner key: %w", rErr)
+		}
+		id, iErr := loadgen.IdentityFromScalar(raw)
+		if iErr != nil {
+			return nil, fmt.Errorf("cosigner key %q: %w", p, iErr)
+		}
+		out = append(out, id)
+	}
+	return out, nil
+}
+
+// parseLogPos parses a <log-did>@<seq> position (model #2's --cosign target). A
+// bare @<seq> defaults the log to this network's own log.
+func parseLogPos(arg, defaultLogDID string) (types.LogPosition, error) {
+	at := strings.LastIndex(arg, "@")
+	if at < 0 {
+		return types.LogPosition{}, fmt.Errorf("--cosign %q must be <log-did>@<seq> (or @<seq> for this network's log)", arg)
+	}
+	ld, seqStr := arg[:at], arg[at+1:]
+	if ld == "" {
+		ld = defaultLogDID
+	}
+	seq, err := strconv.ParseUint(strings.TrimSpace(seqStr), 10, 64)
+	if err != nil {
+		return types.LogPosition{}, fmt.Errorf("--cosign sequence %q: not a uint64", seqStr)
+	}
+	return types.LogPosition{LogDID: ld, Sequence: seq}, nil
+}
+
+// submitViaJN signs entry with the primary + inline cosigners (over the SAME
+// signing payload), POSTs it THROUGH the JN enforcer (which runs its admission gate
+// + mints the gate-5 WriteAuthorization), then waits for the LEDGER to sequence it.
+// Reads stay on the ledger; the bundle's mTLS transport serves both hops (one
+// network CA verifies both server certs).
+func submitViaJN(ctx context.Context, hc *http.Client, b *ClientBundle, entry *envelope.Entry, primary loadgen.Identity, cosigners []loadgen.Identity, timeout time.Duration) (uint64, error) {
+	u, err := envelope.NewUnsignedEntry(entry.Header, entry.DomainPayload)
+	if err != nil {
+		return 0, fmt.Errorf("new unsigned entry: %w", err)
+	}
+	digest := sha256.Sum256(envelope.SigningPayload(u))
+	sigs := make([]envelope.Signature, 0, 1+len(cosigners))
+	psig, err := signatures.SignEntry(digest, primary.Priv)
+	if err != nil {
+		return 0, fmt.Errorf("primary sign: %w", err)
+	}
+	sigs = append(sigs, envelope.Signature{SignerDID: primary.DID, AlgoID: envelope.SigAlgoECDSA, Bytes: psig})
+	for _, c := range cosigners {
+		csig, serr := signatures.SignEntry(digest, c.Priv)
+		if serr != nil {
+			return 0, fmt.Errorf("cosigner %s sign: %w", c.DID, serr)
+		}
+		sigs = append(sigs, envelope.Signature{SignerDID: c.DID, AlgoID: envelope.SigAlgoECDSA, Bytes: csig})
+	}
+	u.Signatures = sigs
+	if vErr := u.Validate(); vErr != nil {
+		return 0, fmt.Errorf("validate signed entry: %w", vErr)
+	}
+	wire, err := envelope.Serialize(u)
+	if err != nil {
+		return 0, fmt.Errorf("serialize: %w", err)
+	}
+	hash, err := postThroughJN(ctx, hc, strings.TrimRight(b.WriteEndpoint, "/")+"/v1/entries/submit", wire)
+	if err != nil {
+		return 0, err
+	}
+	if timeout <= 0 {
+		timeout = 120 * time.Second
+	}
+	return pollSequence(ctx, hc, strings.TrimRight(b.Endpoint, "/")+"/v1/entries-hash/"+hash, timeout)
+}
+
+// postThroughJN POSTs wire bytes to the JN's /v1/entries/submit (mTLS) and returns
+// the canonical_hash from the forwarded ledger SCT. A non-202 surfaces the JN's own
+// rejection — its SubmitGate verdict (cosignature/prerequisite) or the ledger's
+// gate-5 refusal — verbatim, so the operator sees exactly which gate said no.
+func postThroughJN(ctx context.Context, hc *http.Client, url string, wire []byte) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(wire))
+	if err != nil {
+		return "", fmt.Errorf("new request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/octet-stream")
+	resp, err := hc.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("POST %s: %w", url, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
+	if resp.StatusCode != http.StatusAccepted {
+		return "", fmt.Errorf("JN submit HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	var sct struct {
+		CanonicalHash string `json:"canonical_hash"`
+	}
+	if jErr := json.Unmarshal(body, &sct); jErr != nil || sct.CanonicalHash == "" {
+		return "", fmt.Errorf("parse forwarded SCT canonical_hash: %v (body=%s)", jErr, body)
+	}
+	return sct.CanonicalHash, nil
+}
+
+// pollSequence polls the ledger's GET /v1/entries-hash/{hash} until the entry is
+// sequenced, returning its assigned sequence. sequence_number is decoded as a
+// POINTER so a still-pending {"state":...} keeps polling (never collapses to 0).
+func pollSequence(ctx context.Context, hc *http.Client, url string, timeout time.Duration) (uint64, error) {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if ctx.Err() != nil {
+			return 0, ctx.Err()
+		}
+		req, rErr := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+		if rErr != nil {
+			return 0, rErr
+		}
+		resp, dErr := hc.Do(req)
+		if dErr == nil {
+			body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
+			_ = resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				var er struct {
+					SequenceNumber *uint64 `json:"sequence_number"`
+				}
+				if json.Unmarshal(body, &er) == nil && er.SequenceNumber != nil {
+					return *er.SequenceNumber, nil
+				}
+			}
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	return 0, fmt.Errorf("the JN accepted the write, but the ledger did not sequence it within %s", timeout)
 }

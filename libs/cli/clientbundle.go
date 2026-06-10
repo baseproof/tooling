@@ -45,12 +45,23 @@ type Admission struct {
 type ClientBundle struct {
 	Format        string    `json:"format"`
 	NetworkID     string    `json:"network_id"`                        // 64-hex
-	Endpoint      string    `json:"endpoint"`                          // ledger base URL
+	Endpoint      string    `json:"endpoint"`                          // ledger base URL (reads + ungated writes)
 	LogDID        string    `json:"log_did"`                           // destination log (submit/load)
 	QuorumK       int       `json:"quorum_k"`                          // witness quorum (proof)
 	BootstrapHash string    `json:"bootstrap_document_hash,omitempty"` // 64-hex genesis pin
 	Transport     Transport `json:"transport"`
 	Admission     Admission `json:"admission,omitempty"`
+
+	// WriteEndpoint is the JN enforcer's base URL for a GATED network. When set,
+	// `submit` writes THROUGH the JN — POST <WriteEndpoint>/v1/entries/submit over
+	// the Transport mTLS — instead of direct to the ledger's /v1/entries. The JN
+	// runs its admission gate (cosignature + prerequisite policy) and mints the
+	// gate-5 WriteAuthorization the ledger requires; a direct write to a gated
+	// ledger is refused. READS (proof/info) always use Endpoint (the ledger). Empty
+	// ⇒ the ungated posture: writes go direct to the ledger. The CLI stays
+	// domain-agnostic — it signs (optionally with cosigners) and posts; the JN owns
+	// the domain policy.
+	WriteEndpoint string `json:"write_endpoint,omitempty"`
 
 	// Messages is the set of foundational message structures this network admits
 	// (canonical names from libs/messages). Empty ⇒ unconstrained. A client checks
