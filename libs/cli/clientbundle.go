@@ -1,6 +1,6 @@
 // Package cli is the unified baseproof client: it submits entries to a network,
 // generates + verifies proofs, and drives the loadgen engine — all bound to ONE
-// network by a client bundle. The cmd/baseproof binary is a thin dispatcher over
+// network by a client bundle. The baseproof-cli binary is a thin dispatcher over
 // this package; the e2e harness imports the same package (and libs/loadgen) so
 // what CI exercises is exactly what an operator runs.
 package cli
