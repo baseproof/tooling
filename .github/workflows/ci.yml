@@ -26,7 +26,16 @@ jobs:
       fail-fast: false
       matrix:
         # One entry per module. Add new services/libs here as they land.
-        module: [libs, services/auditor, services/witness]
+        #
+        # e2e is the in-repo platform harness (a ROOT-LEVEL module, replace
+        # ../libs). It is build/vet/test-checked here in ISOLATION — its own
+        # working-directory + GOWORK=off + go.sum cache key — so it can never
+        # affect the libs/auditor/witness entries (each is an independent job;
+        # fail-fast:false isolates a failure). It is deliberately kept OUT of the
+        # dependency-law + sdk-version-pin jobs below, which govern only the
+        # published libs/services half (those scan `find libs services`). Its
+        # tests are docker-free (httptest fixture), so this job needs no daemon.
+        module: [libs, services/auditor, services/witness, e2e]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5

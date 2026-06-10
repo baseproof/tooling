@@ -53,3 +53,12 @@ genesis bootstrap + witness key are minted by the ledger's own
 - `E2E_LOG_DID`, `E2E_QUORUM_K` — network parameters for `up`.
 - `E2E_BUILD=1` (or `up --build`) — build the fleet images from the local
   Dockerfiles instead of pulling the published `ghcr.io/baseproof/tooling/*`.
+- `E2E_TESSERA=fork|upstream` — the ledger's Merkle-log engine (default `fork`,
+  the baseproof/tessera fork; owns `:latest`). With `--build` it sets the ledger
+  Dockerfile's `TESSERA_VARIANT` (the fork build initializes the
+  `third_party/tessera` submodule; upstream needs none). To **pull** the upstream
+  image, set `E2E_LEDGER_IMAGE` to a published `-upstream` tag (e.g.
+  `…/ledger:0.1.7-upstream`) — there is no `:latest-upstream`. The fork/upstream
+  split is the ledger's `services/ledger/go.work` (`use ./third_party/tessera`)
+  vs `GOWORK=off`; the e2e never touches that workspace (it runs `init-network`
+  with `GOWORK=off` and selects the engine at image build/pull time).

@@ -54,6 +54,13 @@ type Config struct {
 	AuditorImage  string
 	PostgresImage string
 	SeaweedImage  string
+
+	// TesseraVariant selects the ledger's Merkle-log engine: "fork" (default — the
+	// baseproof/tessera fork with deterministic shutdown; owns :latest) or
+	// "upstream" (Google transparency-dev/tessera; the -upstream image tags). From
+	// E2E_TESSERA. Affects only the ledger BUILD arg; to PULL upstream, point
+	// LedgerImage at a published -upstream tag (there is no :latest-upstream).
+	TesseraVariant string
 }
 
 func (c *Config) defaults() {
@@ -89,6 +96,9 @@ func (c *Config) defaults() {
 	}
 	if c.SeaweedImage == "" {
 		c.SeaweedImage = "chrislusf/seaweedfs:latest"
+	}
+	if c.TesseraVariant == "" {
+		c.TesseraVariant = "fork"
 	}
 }
 
@@ -197,6 +207,12 @@ func initNetwork(root, fixtures string, cfg Config) error {
 		"-witnesses", "1",
 	)
 	cmd.Dir = filepath.Join(root, "services", "ledger")
+	// GOWORK=off: init-network does NOT use tessera, but the ledger's go.work
+	// links ./third_party/tessera (the fork submodule). Running with that
+	// workspace fails on a checkout where the submodule is not initialized (the
+	// common case). Upstream resolution needs no submodule and yields the same
+	// init-network binary.
+	cmd.Env = append(os.Environ(), "GOWORK=off")
 	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
 	return cmd.Run()
 }
@@ -334,14 +350,28 @@ func upAuditor(cfg Config, fixtures, certs string) error {
 }
 
 func buildImages(root string, cfg Config) error {
-	type img struct{ tag, dockerfile, ctx string }
+	// The ledger image carries a tessera variant (fork|upstream), passed as the
+	// Dockerfile's TESSERA_VARIANT build arg. The fork build links the in-repo
+	// third_party/tessera submodule via the ledger's go.work, so it must be present
+	// in the build context — initialize it first. Upstream needs no submodule.
+	if cfg.TesseraVariant == "fork" {
+		sm := exec.Command("git", "submodule", "update", "--init", "services/ledger/third_party/tessera")
+		sm.Dir, sm.Stdout, sm.Stderr = root, os.Stdout, os.Stderr
+		if err := sm.Run(); err != nil {
+			return fmt.Errorf("init tessera submodule (fork build): %w", err)
+		}
+	}
+	type img struct {
+		tag, dockerfile, ctx string
+		args                 map[string]string
+	}
 	for _, b := range []img{
-		{cfg.LedgerImage, filepath.Join(root, "services/ledger/scripts/local/Dockerfile"), root},
-		{cfg.WitnessImage, filepath.Join(root, "services/witness/Dockerfile"), filepath.Join(root, "services/witness")},
-		{cfg.AuditorImage, filepath.Join(root, "services/auditor/Dockerfile"), filepath.Join(root, "services/auditor")},
+		{cfg.LedgerImage, filepath.Join(root, "services/ledger/scripts/local/Dockerfile"), root, map[string]string{"TESSERA_VARIANT": cfg.TesseraVariant}},
+		{cfg.WitnessImage, filepath.Join(root, "services/witness/Dockerfile"), filepath.Join(root, "services/witness"), nil},
+		{cfg.AuditorImage, filepath.Join(root, "services/auditor/Dockerfile"), filepath.Join(root, "services/auditor"), nil},
 	} {
-		fmt.Printf("== build %s ==\n", b.tag)
-		if err := dockerx.Build(dockerx.BuildSpec{Tag: b.tag, Dockerfile: b.dockerfile, Context: b.ctx}); err != nil {
+		fmt.Printf("== build %s (tessera=%s) ==\n", b.tag, cfg.TesseraVariant)
+		if err := dockerx.Build(dockerx.BuildSpec{Tag: b.tag, Dockerfile: b.dockerfile, Context: b.ctx, BuildArgs: b.args}); err != nil {
 			return fmt.Errorf("build %s: %w", b.tag, err)
 		}
 	}
