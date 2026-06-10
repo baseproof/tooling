@@ -8,7 +8,7 @@ import (
 )
 
 // Main is the unified client entrypoint; argv is os.Args. It returns a process
-// exit code (cmd/baseproof is a one-line os.Exit(cli.Main(os.Args)) wrapper).
+// exit code (the baseproof-cli binary is a one-line os.Exit(cli.Main(os.Args)) wrapper).
 func Main(argv []string) int {
 	if len(argv) < 2 {
 		usage(os.Stderr)

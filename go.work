@@ -8,6 +8,7 @@
 //   ./services/auditor    the auditor microservice (evidence custodian)
 //   ./services/witness    the witness daemon (stateless notary)
 //   ./e2e                 the platform e2e (drives libs against a docker fleet)
+//   ./baseproof-cli       the unified client binary (staged for its own repo)
 go 1.25.7
 
 use (
@@ -15,4 +16,5 @@ use (
 	./services/auditor
 	./services/witness
 	./e2e
+	./baseproof-cli
 )
