@@ -11,9 +11,9 @@ import (
 func TestRunArgv(t *testing.T) {
 	got := RunArgv(RunSpec{
 		Name: "baseproof-e2e-ledger", Network: "baseproof-e2e", Image: "img:tag", Detached: true,
-		Env:    map[string]string{"B": "2", "A": "1"},
-		Ports:  []Port{{Host: 8443, Container: 8080}},
-		Mounts: []Mount{{Host: "/keys", Container: "/keys:ro"}},
+		Env:       map[string]string{"B": "2", "A": "1"},
+		Ports:     []Port{{Host: 8443, Container: 8080}},
+		Mounts:    []Mount{{Host: "/keys", Container: "/keys:ro"}},
 		ImageArgs: []string{"-addr=:8080"},
 	})
 	s := strings.Join(got, " ")

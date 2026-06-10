@@ -23,10 +23,10 @@ import (
 )
 
 const (
-	pgUser = "baseproof"
-	pgPass = "baseproof"
-	pgRoot = "postgres"
-	dbName = "baseproof_e2e"
+	pgUser  = "baseproof"
+	pgPass  = "baseproof"
+	pgRoot  = "postgres"
+	dbName  = "baseproof_e2e"
 	auditDB = "baseproof_e2e_gossip"
 	bucket  = "e2e-entries"
 
@@ -92,7 +92,7 @@ func (c *Config) defaults() {
 	}
 }
 
-func (c Config) net() string         { return "baseproof-" + c.RunID }
+func (c Config) net() string          { return "baseproof-" + c.RunID }
 func (c Config) name(s string) string { return "baseproof-" + c.RunID + "-" + s }
 
 // Manifest is the live fleet the runner drives.
