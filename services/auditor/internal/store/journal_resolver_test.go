@@ -10,18 +10,23 @@
 // TestJournalResolver_TransitionalHead_BoundaryRegression pins both halves.
 //
 // Reuses genWitnessSet/cosignHead/fullTreeHead/rotTestNetID
-// (witness_rotation_journal_test.go) + newKitHWS/dualSignedRotation
-// (historical_witness_set_test.go).
+// (witness_rotation_journal_test.go); newKitHWS/dualSignedRotation live at the
+// bottom of this file (relocated from the deleted scan-per-resolution
+// resolver's tests).
 package store
 
 import (
 	"context"
+	"crypto/ecdsa"
 	"testing"
+	"time"
 
 	"github.com/baseproof/baseproof/crypto/cosign"
+	"github.com/baseproof/baseproof/crypto/signatures"
 	"github.com/baseproof/baseproof/gossip"
 	"github.com/baseproof/baseproof/gossip/findings"
 	"github.com/baseproof/baseproof/types"
+	"github.com/baseproof/baseproof/witness"
 	"github.com/baseproof/tooling/libs/auditing/gossipverify"
 	"github.com/baseproof/tooling/libs/witnessrotation"
 	"github.com/baseproof/tooling/services/auditor/internal/equivocation"
@@ -172,14 +177,15 @@ func TestJournalResolver_UnknownLog_FailsClosed(t *testing.T) {
 	}
 }
 
-// memSTHSource fakes the evidence store's LatestSTH.
+// memSTHSource fakes the evidence store's LatestSTHWithTime.
 type memSTHSource struct {
 	byOriginator map[string]gossip.SignedEvent
+	observedAt   time.Time
 }
 
-func (m *memSTHSource) LatestSTH(_ context.Context, originator string) (gossip.SignedEvent, bool, error) {
+func (m *memSTHSource) LatestSTHWithTime(_ context.Context, originator string) (gossip.SignedEvent, time.Time, bool, error) {
 	ev, ok := m.byOriginator[originator]
-	return ev, ok, nil
+	return ev, m.observedAt, ok, nil
 }
 
 // TestSTHHeadSource_DecodesAndTranslates: the adapter decodes the persisted
@@ -197,9 +203,13 @@ func TestSTHHeadSource_DecodesAndTranslates(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EncodeWireBody: %v", err)
 	}
-	src := &memSTHSource{byOriginator: map[string]gossip.SignedEvent{
-		jrOriginator: {Kind: finding.Kind(), Originator: jrOriginator, Body: body},
-	}}
+	observed := time.Date(2026, 6, 10, 12, 0, 0, 0, time.UTC)
+	src := &memSTHSource{
+		byOriginator: map[string]gossip.SignedEvent{
+			jrOriginator: {Kind: finding.Kind(), Originator: jrOriginator, Body: body},
+		},
+		observedAt: observed,
+	}
 
 	hs, err := NewSTHHeadSource(src, map[string]string{jrLogDID: jrOriginator})
 	if err != nil {
@@ -213,7 +223,58 @@ func TestSTHHeadSource_DecodesAndTranslates(t *testing.T) {
 	if got.TreeSize != 42 || len(got.Signatures) != 2 {
 		t.Fatalf("decoded head = size %d / %d sigs, want 42 / 2", got.TreeSize, len(got.Signatures))
 	}
+	// The time-bearing variant surfaces the persistence clock for the
+	// frozen-log freshness check.
+	_, at, ok, err := hs.LatestVerifiedHeadWithTime(context.Background(), jrLogDID)
+	if err != nil || !ok || !at.Equal(observed) {
+		t.Fatalf("LatestVerifiedHeadWithTime: at=%v ok=%v err=%v, want observed=%v", at, ok, err, observed)
+	}
 	if _, ok, _ := hs.LatestVerifiedHead(context.Background(), "did:web:stranger"); ok {
 		t.Fatal("unknown log must report no head")
 	}
 }
+
+// witnessSetKitHWS bundles a set + keys + privs (genWitnessSet returns the trio).
+// Relocated here when the scan-per-resolution HistoricalWitnessSetResolver was
+// deleted (superseded by this journal-first resolver).
+type witnessSetKitHWS struct {
+	set   *cosign.WitnessKeySet
+	keys  []types.WitnessPublicKey
+	privs []*ecdsa.PrivateKey
+}
+
+
+func newKitHWS(t *testing.T, n, k int, netID cosign.NetworkID) witnessSetKitHWS {
+	set, keys, privs := genWitnessSet(t, n, k, netID)
+	return witnessSetKitHWS{set: set, keys: keys, privs: privs}
+}
+
+
+// dualSignedRotation builds an ON-LOG-encodable rotation (both scheme tags set
+// + both signature slices non-empty): OLD set authorizes the new-set hash, NEW
+// set accepts it. EncodeWitnessRotationPayload requires this dual-signed form
+// (the package-level buildRotation is gossip-only and lacks NewSignatures).
+func dualSignedRotation(t *testing.T, old, nw witnessSetKitHWS, sigCount int, netID cosign.NetworkID) types.WitnessRotation {
+	t.Helper()
+	payload := cosign.NewRotationPayloadSHA256(witness.ComputeSetHash(nw.keys))
+	sign := func(kit witnessSetKitHWS) []types.WitnessSignature {
+		out := make([]types.WitnessSignature, sigCount)
+		for i := 0; i < sigCount; i++ {
+			sb, err := cosign.SignECDSA(payload, netID, cosign.HashAlgoSHA256, kit.privs[i])
+			if err != nil {
+				t.Fatalf("SignECDSA rotation: %v", err)
+			}
+			out[i] = types.WitnessSignature{PubKeyID: kit.keys[i].ID, SchemeTag: signatures.SchemeECDSA, SigBytes: sb}
+		}
+		return out
+	}
+	return types.WitnessRotation{
+		CurrentSetHash:    witness.ComputeSetHash(old.keys),
+		NewSet:            nw.keys,
+		SchemeTagOld:      signatures.SchemeECDSA,
+		SchemeTagNew:      signatures.SchemeECDSA,
+		CurrentSignatures: sign(old),
+		NewSignatures:     sign(nw),
+	}
+}
+

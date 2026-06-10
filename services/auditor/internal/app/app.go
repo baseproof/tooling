@@ -51,7 +51,7 @@ type Deps struct {
 	// POSITION-AWARE — a head is verified against the set that cosigned it
 	// (reconstructed from the log), not the current-set snapshot (ZT-SCN-02).
 	// Optional; nil ⇒ legacy snapshot behavior. The auditor wires
-	// *store.HistoricalResolverRegistry.
+	// *store.JournalWitnessSetResolver.
 	WitnessSetResolver gossipverify.HeadWitnessSetResolver
 	// WitnessSets maps each source-log DID to its K-of-N trust root.
 	WitnessSets map[string]*cosign.WitnessKeySet

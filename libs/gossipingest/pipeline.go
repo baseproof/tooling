@@ -152,7 +152,7 @@ type Config struct {
 	// (reconstructed from the log), not the position-blind current-set snapshot —
 	// the fix for a historical (year-1) head being mis-checked against the
 	// modern, rotated-away set (ZT-SCN-02). Optional; nil PRESERVES the legacy
-	// snapshot behavior. The auditor wires *store.HistoricalResolverRegistry.
+	// snapshot behavior. The auditor wires *store.JournalWitnessSetResolver.
 	WitnessSetResolver gossipverify.HeadWitnessSetResolver
 
 	// PollInterval governs the per-peer catch-up cadence. 0 → puller

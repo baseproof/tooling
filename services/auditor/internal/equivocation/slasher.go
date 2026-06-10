@@ -39,8 +39,8 @@ import (
 )
 
 // EraWitnessSetResolver resolves the position-appropriate witness set for a log
-// at a historical position (reconstructed from the log). The auditor's
-// store.HistoricalResolverRegistry satisfies it. Declared narrow here (structural
+// at a historical position (reconstructed from the journaled chain). The
+// auditor's store.JournalWitnessSetResolver satisfies it. Declared narrow here (structural
 // typing) so the slasher takes no dependency on the store package.
 type EraWitnessSetResolver interface {
 	SetAt(ctx context.Context, logDID string, asOf types.LogPosition) (*cosign.WitnessKeySet, error)

@@ -97,8 +97,7 @@ type TileFetcherSource interface {
 //     adversarial (equivocation, SMT-replay) or span eras (history-rewrite); the
 //     era is fixed by position, not by trusting a possibly-forged head.
 //
-// The auditor's store.HistoricalWitnessSetResolver (per log) and the multi-log
-// store.HistoricalResolverRegistry satisfy it. Declared narrow at the consumer
+// The auditor's journal-first store.JournalWitnessSetResolver satisfies it. Declared narrow at the consumer
 // (Go structural typing) so gossipverify takes no dependency on the auditor's
 // store package and there is no import cycle.
 type HeadWitnessSetResolver interface {

@@ -5,9 +5,11 @@
 //
 // # WHY JOURNAL-FIRST, NOT SCAN-PER-RESOLUTION
 //
-// HistoricalWitnessSetResolver proves its chain by re-walking the ledger over
-// HTTP — authoritative, but O(committed prefix) per horizon advance: the wrong
-// cost model for the per-event verify hot path at year-15 scale. This resolver
+// A scan-per-resolution resolver (the pre-AT-2 design, since deleted) proved
+// its chain by re-walking the ledger over HTTP — authoritative, but
+// O(committed prefix) per horizon advance: the wrong cost model for the
+// per-event verify hot path at year-15 scale, and its genesis-defaulted anchor
+// silently self-disabled after the first rotation + restart. This resolver
 // reads the DURABLE journal instead (indexed by (log_did, effective_seq); the
 // chain is tiny — rotations are rare) and re-verifies AUTHENTICITY inductively
 // from genesis on every resolution via the SDK walkers, so a corrupt journal
@@ -55,6 +57,7 @@ package store
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/baseproof/baseproof/crypto/cosign"
 	"github.com/baseproof/baseproof/gossip"
@@ -214,10 +217,11 @@ func (r *JournalWitnessSetResolver) chain(ctx context.Context, logDID string) ([
 	return candidates, canon, nil
 }
 
-// LatestSTHSource is the narrow evidence-store read the head adapter needs.
-// *PostgresStore satisfies it.
+// LatestSTHSource is the narrow evidence-store read the head adapter needs:
+// the newest verified STH event PLUS when it was persisted (the observation
+// clock for frozen-log freshness). *PostgresStore satisfies it.
 type LatestSTHSource interface {
-	LatestSTH(ctx context.Context, originator string) (gossip.SignedEvent, bool, error)
+	LatestSTHWithTime(ctx context.Context, originator string) (gossip.SignedEvent, time.Time, bool, error)
 }
 
 // STHHeadSource adapts the durable evidence store's latest verified STH into
@@ -247,26 +251,35 @@ func NewSTHHeadSource(src LatestSTHSource, originatorByLog map[string]string) (*
 }
 
 // LatestVerifiedHead returns the newest verified cosigned head persisted for
-// the log; ok=false when none is held.
+// the log; ok=false when none is held. (The witnessrotation.VerifiedHeadSource
+// seam — the scan reconciler's fallback target does not need the clock.)
 func (s *STHHeadSource) LatestVerifiedHead(ctx context.Context, logDID string) (types.CosignedTreeHead, bool, error) {
+	head, _, ok, err := s.LatestVerifiedHeadWithTime(ctx, logDID)
+	return head, ok, err
+}
+
+// LatestVerifiedHeadWithTime additionally returns WHEN the head was persisted —
+// the observation clock the witness-rotation consistency audit's frozen-log
+// freshness check runs against.
+func (s *STHHeadSource) LatestVerifiedHeadWithTime(ctx context.Context, logDID string) (types.CosignedTreeHead, time.Time, bool, error) {
 	key := logDID
 	if o, ok := s.originatorByLog[logDID]; ok {
 		key = o
 	}
-	ev, ok, err := s.src.LatestSTH(ctx, key)
+	ev, observedAt, ok, err := s.src.LatestSTHWithTime(ctx, key)
 	if err != nil {
-		return types.CosignedTreeHead{}, false, fmt.Errorf("auditor/store: latest STH for %q: %w", key, err)
+		return types.CosignedTreeHead{}, time.Time{}, false, fmt.Errorf("auditor/store: latest STH for %q: %w", key, err)
 	}
 	if !ok {
-		return types.CosignedTreeHead{}, false, nil
+		return types.CosignedTreeHead{}, time.Time{}, false, nil
 	}
 	event, err := findings.FromWire(ev.Kind, ev.Body)
 	if err != nil {
-		return types.CosignedTreeHead{}, false, fmt.Errorf("auditor/store: decode latest STH for %q: %w", key, err)
+		return types.CosignedTreeHead{}, time.Time{}, false, fmt.Errorf("auditor/store: decode latest STH for %q: %w", key, err)
 	}
 	f, isHead := event.(*findings.CosignedTreeHeadFinding)
 	if !isHead {
-		return types.CosignedTreeHead{}, false, fmt.Errorf("auditor/store: latest STH for %q decoded to %T, want CosignedTreeHeadFinding", key, event)
+		return types.CosignedTreeHead{}, time.Time{}, false, fmt.Errorf("auditor/store: latest STH for %q decoded to %T, want CosignedTreeHeadFinding", key, event)
 	}
-	return f.Head, true, nil
+	return f.Head, observedAt, true, nil
 }

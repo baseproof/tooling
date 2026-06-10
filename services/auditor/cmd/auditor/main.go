@@ -154,19 +154,21 @@ type config struct {
 	// lands.
 	custodyInterval time.Duration
 
-	// rotationScanInterval (AUDITOR_ROTATION_SCAN_INTERVAL, default 0 =
-	// disabled) is the cadence of the incremental witness-rotation log scan
-	// (AT-2): each pass covers only [cursor, cosigned target) per peer log,
-	// journaling any rotation gossip missed (tail-omission closure). 0 = job
-	// not registered; the rotation journal stays gossip-fed only. Typical
-	// production value: 5–15 minutes.
+	// rotationScanInterval (AUDITOR_ROTATION_SCAN_INTERVAL, default 10m;
+	// set an explicit "0" to disable) is the cadence of the incremental
+	// witness-rotation log scan (AT-2): each pass covers only
+	// [cursor, cosigned target) per peer log, journaling any rotation gossip
+	// missed. ON BY DEFAULT: tail-omission closure is a safety property of
+	// the trust root, not optional telemetry — safety machinery that ships
+	// dark is tech debt.
 	rotationScanInterval time.Duration
 
 	// rotationConsistencyInterval (AUDITOR_ROTATION_CONSISTENCY_INTERVAL,
-	// default 0 = disabled) is the cadence of the witness-rotation consistency
-	// audit: safety (journaled chain walks clean; latest verified head is
-	// cosigned by an on-chain set) alerts Critical, liveness (rotation adopted
-	// within the grace window) alerts Warning. 0 = audit not registered.
+	// default 10m; set an explicit "0" to disable) is the cadence of the
+	// witness-rotation consistency audit: safety (journaled chain walks
+	// clean; latest verified head is cosigned by an on-chain set) alerts
+	// Critical; liveness (rotation adopted within the grace window; log not
+	// frozen) alerts Warning. ON BY DEFAULT, same rationale as the scan.
 	rotationConsistencyInterval time.Duration
 
 	// rotationAdoptionGrace (AUDITOR_ROTATION_ADOPTION_GRACE, default 1h) is
@@ -175,6 +177,13 @@ type config struct {
 	// the cosign switch is operationally fuzzy and gossip delivery is
 	// independent, so divergence INSIDE the window is expected and silent.
 	rotationAdoptionGrace time.Duration
+
+	// frozenLogMaxHeadAge (AUDITOR_FROZEN_LOG_MAX_HEAD_AGE, default 1h; "0"
+	// disables) bounds how old a log's newest VERIFIED head may be before
+	// the consistency audit flags the log FROZEN (Warning). Freshness
+	// semantics are the SDK's witness/staleness.go — one definition of
+	// "stale" across the ecosystem.
+	frozenLogMaxHeadAge time.Duration
 
 	// equivScanInterval (AUDITOR_EQUIVOCATION_SCAN_INTERVAL, default 0 =
 	// disabled) is the cadence the INDEPENDENT equivocation scanner polls each
@@ -254,9 +263,11 @@ func loadConfig() config {
 		commitmentInterval: envDuration("AUDITOR_COMMITMENT_INTERVAL", 0),
 		custodyInterval:    envDuration("AUDITOR_CUSTODY_INTERVAL", 0),
 		// AT-2: witness-rotation scan reconciliation + consistency audit.
-		rotationScanInterval:        envDuration("AUDITOR_ROTATION_SCAN_INTERVAL", 0),
-		rotationConsistencyInterval: envDuration("AUDITOR_ROTATION_CONSISTENCY_INTERVAL", 0),
+		// ON BY DEFAULT (explicit "0" disables): both are safety machinery.
+		rotationScanInterval:        envDuration("AUDITOR_ROTATION_SCAN_INTERVAL", 10*time.Minute),
+		rotationConsistencyInterval: envDuration("AUDITOR_ROTATION_CONSISTENCY_INTERVAL", 10*time.Minute),
 		rotationAdoptionGrace:       envDuration("AUDITOR_ROTATION_ADOPTION_GRACE", time.Hour),
+		frozenLogMaxHeadAge:         envDuration("AUDITOR_FROZEN_LOG_MAX_HEAD_AGE", time.Hour),
 		// Independent equivocation scanner (push leg). Disabled unless both
 		// the interval AND a gossip signing key are set.
 		equivScanInterval:    envDuration("AUDITOR_EQUIVOCATION_SCAN_INTERVAL", 0),
@@ -617,19 +628,7 @@ func run(ctx context.Context, cfg config, logger *slog.Logger) error {
 		// restart. Fail-static per log: an unreadable chain keeps the genesis
 		// seed (exactly correct for a never-rotated log; loudly logged
 		// otherwise).
-		for _, root := range trustRoots {
-			cur, rerr := journalResolver.CurrentSet(ctx, root.LogDID)
-			if rerr != nil {
-				logger.Warn("auditor: witness-set anchor reconstruction failed; keeping genesis seed",
-					"log_did", root.LogDID, "err", rerr.Error())
-				continue
-			}
-			if cur != root.Genesis {
-				logger.Info("auditor: live witness set re-seeded from journaled rotation chain",
-					"log_did", root.LogDID, "originator", originatorByLog[root.LogDID])
-			}
-			witnessSets[originatorByLog[root.LogDID]] = cur
-		}
+		reseedWitnessSets(ctx, trustRoots, journalResolver, witnessSets, originatorByLog, logger)
 
 		sthHeads, err := store.NewSTHHeadSource(st, originatorByLog)
 		if err != nil {
@@ -675,45 +674,11 @@ func run(ctx context.Context, cfg config, logger *slog.Logger) error {
 				}
 				reconcilers = append(reconcilers, rec)
 			}
-			rotationScan = func(jctx context.Context) ([]sdkmonitoring.Alert, error) {
-				now := time.Now().UTC()
-				var alerts []sdkmonitoring.Alert
-				for _, rec := range reconcilers {
-					report, rerr := rec.RunOnce(jctx)
-					if rerr != nil {
-						sev := sdkmonitoring.Warning // transport/transient by default
-						if errors.Is(rerr, witnessrotation.ErrNoVerifiableTarget) ||
-							errors.Is(rerr, witnessrotation.ErrJournalChainBroken) ||
-							errors.Is(rerr, witnessrotation.ErrOnLogRotationInvalid) {
-							sev = sdkmonitoring.Critical
-						}
-						alerts = append(alerts, sdkmonitoring.Alert{
-							Monitor:     "witness_rotation_scan",
-							Severity:    sev,
-							Destination: sdkmonitoring.Ops,
-							Message:     fmt.Sprintf("rotation scan for %s failed: %v", report.LogDID, rerr),
-							Details:     map[string]any{"log_did": report.LogDID, "from": report.From},
-							EmittedAt:   now,
-						})
-						continue
-					}
-					if report.NewlyJournaled > 0 {
-						alerts = append(alerts, sdkmonitoring.Alert{
-							Monitor:     "witness_rotation_scan",
-							Severity:    sdkmonitoring.Warning,
-							Destination: sdkmonitoring.Ops,
-							Message: fmt.Sprintf("scan journaled %d on-log rotation(s) for %s that gossip never delivered (window [%d,%d))",
-								report.NewlyJournaled, report.LogDID, report.From, report.Until),
-							Details: map[string]any{
-								"log_did": report.LogDID, "newly_journaled": report.NewlyJournaled,
-								"from": report.From, "until": report.Until,
-							},
-							EmittedAt: now,
-						})
-					}
-				}
-				return alerts, nil
+			scanners := make([]rotationScanner, len(reconcilers))
+			for i, rec := range reconcilers {
+				scanners[i] = rec
 			}
+			rotationScan = buildRotationScanJob(scanners, time.Now)
 		}
 
 		// AT-2 read-side audit: assemble per-log inputs for the consistency
@@ -723,7 +688,10 @@ func run(ctx context.Context, cfg config, logger *slog.Logger) error {
 		if cfg.rotationConsistencyInterval > 0 && len(trustRoots) > 0 {
 			roots := trustRoots
 			rotationConsistencySource = func(jctx context.Context) (monitoring.WitnessRotationConsistencyConfig, error) {
-				out := monitoring.WitnessRotationConsistencyConfig{Grace: cfg.rotationAdoptionGrace}
+				out := monitoring.WitnessRotationConsistencyConfig{
+					Grace:      cfg.rotationAdoptionGrace,
+					MaxHeadAge: cfg.frozenLogMaxHeadAge,
+				}
 				for _, root := range roots {
 					records, rerr := rotJournal.RecordsFor(jctx, root.LogDID)
 					if rerr != nil {
@@ -735,12 +703,16 @@ func run(ctx context.Context, cfg config, logger *slog.Logger) error {
 					} else if ok {
 						recordedAt = at
 					}
-					var latestHead *types.CosignedTreeHead
-					if h, ok, herr := sthHeads.LatestVerifiedHead(jctx, root.LogDID); herr != nil {
+					var (
+						latestHead   *types.CosignedTreeHead
+						latestHeadAt time.Time
+					)
+					if h, at, ok, herr := sthHeads.LatestVerifiedHeadWithTime(jctx, root.LogDID); herr != nil {
 						return monitoring.WitnessRotationConsistencyConfig{}, fmt.Errorf("latest verified head for %s: %w", root.LogDID, herr)
 					} else if ok {
 						head := h
 						latestHead = &head
+						latestHeadAt = at
 					}
 					out.Logs = append(out.Logs, monitoring.RotationLogState{
 						LogDID:                   root.LogDID,
@@ -748,6 +720,7 @@ func run(ctx context.Context, cfg config, logger *slog.Logger) error {
 						Records:                  records,
 						LatestRotationRecordedAt: recordedAt,
 						LatestHead:               latestHead,
+						LatestHeadAt:             latestHeadAt,
 					})
 				}
 				return out, nil

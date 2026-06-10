@@ -200,3 +200,73 @@ func TestWitnessRotationConsistency_NeverRotated_NoHead_Silent(t *testing.T) {
 		t.Fatalf("never-rotated log with no head must be silent, got %v", alerts)
 	}
 }
+
+func TestWitnessRotationConsistency_FrozenLog_WarnsViaStalenessVocabulary(t *testing.T) {
+	s0 := newWRCKit(t, 3, 2)
+	now := time.Now()
+	head := s0.cosign(t, 500, 0x05)
+	state := func(observedAt time.Time) RotationLogState {
+		return RotationLogState{LogDID: wrcLogDID, Genesis: s0.set, LatestHead: &head, LatestHeadAt: observedAt}
+	}
+	run := func(lg RotationLogState, maxAge time.Duration) []sdkmon.Alert {
+		t.Helper()
+		alerts, err := CheckWitnessRotationConsistency(context.Background(),
+			WitnessRotationConsistencyConfig{Logs: []RotationLogState{lg}, Grace: time.Hour, MaxHeadAge: maxAge}, now)
+		if err != nil {
+			t.Fatalf("check: %v", err)
+		}
+		return alerts
+	}
+
+	// Fresh head: silent.
+	if alerts := run(state(now.Add(-5*time.Minute)), time.Hour); len(alerts) != 0 {
+		t.Fatalf("fresh head must be silent, got %v", alerts)
+	}
+	// Stale head: exactly one Warning (frozen log), never Critical.
+	alerts := run(state(now.Add(-3*time.Hour)), time.Hour)
+	if len(alerts) != 1 || alerts[0].Severity != sdkmon.Warning {
+		t.Fatalf("frozen log must be one Warning, got %v", alerts)
+	}
+	// MaxHeadAge 0 disables the check (witness.StalenessConfig semantics).
+	if alerts := run(state(now.Add(-3*time.Hour)), 0); len(alerts) != 0 {
+		t.Fatalf("MaxHeadAge=0 must disable the frozen check, got %v", alerts)
+	}
+	// Zero observation time: freshness not assessable — skipped, not alerted.
+	if alerts := run(state(time.Time{}), time.Hour); len(alerts) != 0 {
+		t.Fatalf("zero LatestHeadAt must skip the frozen check, got %v", alerts)
+	}
+}
+
+// Frozen + non-adoption co-fire: a rotated-but-unadopted log whose head is also
+// stale reports BOTH liveness facts (different clocks, different remediations).
+func TestWitnessRotationConsistency_FrozenAndNotAdopted_BothWarn(t *testing.T) {
+	s0, s1 := newWRCKit(t, 3, 2), newWRCKit(t, 3, 2)
+	now := time.Now()
+	oldSetHead := s0.cosign(t, 200, 0x06)
+	alerts, err := CheckWitnessRotationConsistency(context.Background(), WitnessRotationConsistencyConfig{
+		Logs: []RotationLogState{{
+			LogDID:  wrcLogDID,
+			Genesis: s0.set,
+			Records: []types.WitnessRotationRecord{{
+				Rotation:     s0.rotationTo(t, s1),
+				EffectivePos: types.LogPosition{LogDID: wrcLogDID, Sequence: 100},
+			}},
+			LatestRotationRecordedAt: now.Add(-3 * time.Hour),
+			LatestHead:               &oldSetHead,
+			LatestHeadAt:             now.Add(-3 * time.Hour),
+		}},
+		Grace:      time.Hour,
+		MaxHeadAge: time.Hour,
+	}, now)
+	if err != nil {
+		t.Fatalf("check: %v", err)
+	}
+	if len(alerts) != 2 {
+		t.Fatalf("want frozen + non-adoption (2 warnings), got %d: %v", len(alerts), alerts)
+	}
+	for _, a := range alerts {
+		if a.Severity != sdkmon.Warning {
+			t.Fatalf("liveness alerts must be Warning, got %v", a)
+		}
+	}
+}

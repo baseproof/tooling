@@ -17,7 +17,12 @@
 //	    latest verified head is still cosigned by a PRE-rotation set (the
 //	    ledger logged the rotation but keeps cosigning under the old keys),
 //	    or no head covering the rotation has been observed at all (stalled
-//	    cosigning or stalled gossip).
+//	    cosigning or stalled gossip);
+//	  - FROZEN LOG: the newest verified head was observed more than
+//	    MaxHeadAge ago — the log stopped publishing (or gossip stopped
+//	    delivering), rotation or not. Freshness semantics come from the
+//	    SDK's witness/staleness.go (witness.CheckFreshness), so "stale"
+//	    has exactly one definition across the ecosystem.
 //
 // The grace window is the async-correctness load-bearing piece: the cosign
 // switch after a rotation is operationally fuzzy (the SDK documents that
@@ -66,6 +71,11 @@ type RotationLogState struct {
 	// for this log (e.g. the auditor's durable evidence store). nil when no
 	// verified head is held yet — the audit then has nothing to assert.
 	LatestHead *types.CosignedTreeHead
+	// LatestHeadAt is when LatestHead was observed/persisted — the clock the
+	// frozen-log freshness check runs against (TreeHead carries no timestamp,
+	// so observation time is the only honest clock). Zero ⇒ freshness is not
+	// assessable for this log and the frozen check is skipped.
+	LatestHeadAt time.Time
 }
 
 // WitnessRotationConsistencyConfig configures one audit pass.
@@ -74,6 +84,10 @@ type WitnessRotationConsistencyConfig struct {
 	// Grace is the adoption window for the liveness half. <=0 ⇒
 	// DefaultRotationAdoptionGrace.
 	Grace time.Duration
+	// MaxHeadAge bounds how old the newest verified head may be before the
+	// log is flagged FROZEN (Warning). 0 disables the frozen check — the same
+	// "no staleness check" semantics as witness.StalenessConfig.MaxAge == 0.
+	MaxHeadAge time.Duration
 }
 
 // RotationConsistencySource returns the current audit inputs; the scheduler
@@ -95,12 +109,12 @@ func CheckWitnessRotationConsistency(
 
 	var alerts []monitoring.Alert
 	for _, lg := range cfg.Logs {
-		alerts = append(alerts, checkOneLog(lg, grace, now)...)
+		alerts = append(alerts, checkOneLog(lg, grace, cfg.MaxHeadAge, now)...)
 	}
 	return alerts, nil
 }
 
-func checkOneLog(lg RotationLogState, grace time.Duration, now time.Time) []monitoring.Alert {
+func checkOneLog(lg RotationLogState, grace, maxHeadAge time.Duration, now time.Time) []monitoring.Alert {
 	if lg.Genesis == nil || lg.Genesis.Size() == 0 {
 		return []monitoring.Alert{{
 			Monitor:     MonitorWitnessRotationConsistency,
@@ -177,13 +191,41 @@ func checkOneLog(lg RotationLogState, grace time.Duration, now time.Time) []moni
 		}}
 	}
 
-	// LIVENESS — only meaningful when a rotation exists and the grace window
-	// has elapsed since it was journaled.
+	// LIVENESS, part 1 — FROZEN LOG. The newest verified head (already proven
+	// on-chain above) is too old: the log stopped publishing, or gossip
+	// stopped delivering — rotation or not. Freshness semantics are the SDK's
+	// (witness.CheckFreshness; MaxAge 0 ⇒ check disabled). Independent of the
+	// adoption check below: frozen says "nothing new observed", non-adoption
+	// says "the rotation never took effect" — different clocks, different
+	// remediations, both honest.
+	var alerts []monitoring.Alert
+	if maxHeadAge > 0 && !lg.LatestHeadAt.IsZero() {
+		if fr, ferr := witness.CheckFreshness(lg.LatestHeadAt, now, witness.StalenessConfig{MaxAge: maxHeadAge}); ferr != nil && fr != nil && !fr.IsFresh {
+			alerts = append(alerts, monitoring.Alert{
+				Monitor:     MonitorWitnessRotationConsistency,
+				Severity:    monitoring.Warning,
+				Destination: monitoring.Ops,
+				Message: fmt.Sprintf("log %s appears FROZEN: newest verified head (TreeSize=%d) observed %s ago (max %s)",
+					lg.LogDID, head.TreeSize, fr.Age.Round(time.Second), maxHeadAge),
+				Details: map[string]any{
+					"log_did":          lg.LogDID,
+					"head_tree_size":   head.TreeSize,
+					"head_observed_at": lg.LatestHeadAt,
+					"age_seconds":      fr.Age.Seconds(),
+					"max_age_seconds":  maxHeadAge.Seconds(),
+				},
+				EmittedAt: now,
+			})
+		}
+	}
+
+	// LIVENESS, part 2 — ADOPTION. Only meaningful when a rotation exists and
+	// the grace window has elapsed since it was journaled.
 	if len(lg.Records) == 0 || matched == len(candidates)-1 {
-		return nil // never rotated, or the newest set is adopted: healthy
+		return alerts // never rotated, or the newest set is adopted: healthy
 	}
 	if lg.LatestRotationRecordedAt.IsZero() || now.Sub(lg.LatestRotationRecordedAt) <= grace {
-		return nil // inside the async adoption window: divergence is expected
+		return alerts // inside the async adoption window: divergence is expected
 	}
 
 	lastRotSeq := lg.Records[len(lg.Records)-1].EffectivePos.Sequence
@@ -191,7 +233,7 @@ func checkOneLog(lg RotationLogState, grace time.Duration, now time.Time) []moni
 	if head.TreeSize <= lastRotSeq {
 		reason = "no verified head covering the rotation observed yet (stalled cosigning or stalled gossip)"
 	}
-	return []monitoring.Alert{{
+	return append(alerts, monitoring.Alert{
 		Monitor:     MonitorWitnessRotationConsistency,
 		Severity:    monitoring.Warning,
 		Destination: monitoring.Ops,
@@ -208,5 +250,5 @@ func checkOneLog(lg RotationLogState, grace time.Duration, now time.Time) []moni
 			"grace_seconds":      grace.Seconds(),
 		},
 		EmittedAt: now,
-	}}
+	})
 }
