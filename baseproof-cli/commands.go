@@ -14,7 +14,13 @@ func submitCmd() *cobra.Command {
 		Short: "Submit ONE entry to the network",
 		Long: `Submit ONE entry: a new entity (default), a same-signer amendment
 (--amend <seq>), a delegation (--delegate-to <did>), or a DELEGATED amendment
-(--amend <seq> --delegation <seq>). Amendments/delegations sign with --key-file.`,
+(--amend <seq> --delegation <seq>). Amendments/delegations sign with --key-file.
+
+On a GATED network (the bundle carries a write_endpoint) the write goes THROUGH the
+JN enforcer, which runs its admission gate and mints the gate-5 WriteAuthorization
+the ledger requires. Cosignatures come in two shapes: INLINE multi-sig
+(--cosigner-keys k1,k2 — one entry, N signatures) or a TWO-PART attestation
+(--cosign <log-did>@<seq> — a separate entry cosigning a prior primary).`,
 		Args: cobra.NoArgs,
 		RunE: forward(cli.RunSubmit),
 	}
@@ -28,6 +34,8 @@ func submitCmd() *cobra.Command {
 	f.String("out-key", "", "write the generated signer key (hex) here (new entity only)")
 	f.String("token", "", "Mode A credit token; empty ⇒ Mode B PoW")
 	f.Int("difficulty", 0, "Mode B PoW difficulty (0 ⇒ query the ledger)")
+	f.String("cosigner-keys", "", "comma-separated key files (hex) added as INLINE cosignatures on ONE entry (in-band multi-sig; needs a gated write_endpoint)")
+	f.String("cosign", "", "TWO-PART attestation: this entry cosigns the prior primary at <log-did>@<seq> (sets Header.CosignatureOf)")
 	f.Duration("timeout", 30*time.Second, "per-request HTTP timeout")
 	return c
 }
