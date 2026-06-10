@@ -1,9 +1,10 @@
 # CLI consolidation — evidence review & plan amendments
 
 **Status:** review of `docs/CLI_CONSOLIDATION.md` against code at HEAD
-**Evidence base:** `tooling@b02997a` (libs/v0.1.9), `cli@1dfa3fc`, `baseproof@c688a2f`
-(v0.0.4-rc3), `judicial-network@534974c`. Every claim below was verified by reading
-code, imports, tags, and tests — not comments or docs. Where the plan and the code
+**Evidence base:** `tooling@b02997a` (libs/v0.1.9), `baseproof@c688a2f` (v0.0.4-rc3);
+re-verified same-day against `cli@732d146` (v0.1.1) and `judicial-network@91c3852`
+after both repos moved mid-review. Every claim below was verified by reading code,
+imports, tags, and tests — not comments or docs. Where the plan and the code
 disagree, the code wins and the discrepancy is called out.
 
 ## 1. Verification of the plan's claims
@@ -17,67 +18,64 @@ disagree, the code wins and the discrepancy is called out.
 | "promote `clienttls` + `retryhttp` to libs (~162 + ~150 lines)" | **Half-wrong.** `libs/clienttls` already exists but is a *different* API (379 lines; env+flags; returns `*http.Client` + `Posture`) vs the ledger's flag-only `*tls.Config` variant (163 lines). `retryhttp` has **no** libs equivalent at all. The port is an adaptation, not a promotion. | `libs/clienttls/clienttls.go` vs `services/ledger/internal/clienttls/clienttls.go`; `internal/retryhttp/retryhttp.go` (151 lines, no counterpart under `libs/`) |
 | "or switch the tools to `libs/clitools`" | **Only for reads.** `clitools.VerifyClient` calls `/v1/verify/*` and `ExchangeClient` calls `/v1/build-sign-submit` — routes the ledger does **not** register; they are exchange-side (JN network-api) surfaces. Only `LedgerClient` talks to the ledger. Also see §3 (clitools is court-coupled). | ledger route table `services/ledger/api/server.go:404-651` (53 routes, none of these); `libs/clitools/{verify_client.go:59-77,exchange_client.go:61}` |
 | Ledger admin API / operations API / maintenance flag (Plane 3) | **None exists.** No route matching admin/maintenance/operation. But `Server.writable` (`atomic.Bool`) already degrades writes to 503 while reads serve — the natural seam for soft maintenance. | `services/ledger/api/server.go:171` and route table at `:404-651` |
-| Shim was byte-identical, drifted via PR #69 | Confirmed — and the drift is **worse than stated** (see §2) | `diff baseproof-cli/commands.go cli/commands.go`; libs tag archaeology |
+| Shim was byte-identical, drifted via PR #69 | Drifted 06-10 02:52→12:14, then **manually re-synced** (cli PR #2 "Relay from tooling/baseproof-cli", released as `v0.1.1`); byte-identical again. See §2. | `cli@12b4fe1`; `diff baseproof-cli/commands.go <(git show origin/main:commands.go)` = identical |
 | `cli` repo unscanned by the dependency law | Confirmed: the law scans `libs` + `services/{auditor,witness}` only; `baseproof-cli/` and `e2e/` are also outside it | `scripts/dependency-law.sh:37` (`find libs services -name go.mod`), `scripts/lib/governed.sh` |
 | Reference cleanup is a broad sweep risk | **Smaller than feared.** CI references none of the binaries. Touch points: `services/ledger/scripts/local/Dockerfile:60-114` (builds submit-stamp, init-network, backfill, admission-authority, rebuild-projection), `scripts/run-e2e.sh:91` (runs init-network), `run-local.sh:78` (submit-stamp, commented out). | reference sweep, all workflows checked |
 | e2e drives the `libs/cli` seams | Confirmed for `network add --from-ledger`, `submit`, `proof`, `verify` (offline), `info --verify`, `load`. **Not** covered: `witnesses`, `config`, and the whole gated-write surface (no enforcer in the fleet). | `e2e/runner/runner.go:107-202` |
 
-## 2. Finding — the two-front-end relay has already failed (highest urgency)
+## 2. Finding — `baseproof/cli` is the canonical front end; the relay held this
+## time, by hand
 
-The "relay changes to `cli`" workflow has no mechanism, no CI, and no owner; it broke
-within hours of the extraction.
+**Correction history.** An earlier draft of this review reported the extracted
+`cli` repo stuck at `libs v0.1.7`, missing the gated-write surface, with a
+behavioral consequence (a `write_endpoint` bundle silently degrading to a direct —
+refused — ledger write). That was accurate at clone time and is **no longer
+current**: cli PR #2 ("Relay from tooling/baseproof-cli: gated-network writes +
+cosignature models", `12b4fe1`, merged 06-10 12:14) bumped the pin to
+`libs v0.1.9`, restored `commands.go` to byte-identical with the shim, and shipped
+as release **`v0.1.1`**; judicial-network PR #163 (`65872da`) converged on
+`libs v0.1.9` + SDK `rc3` the same day. The version matrix is flat at this instant:
+cli, JN, and tooling HEAD all consume libs v0.1.9.
 
-**Timeline (git evidence).** `libs/cli` was built 06-09 20:51→00:03; the shim got its
-Cobra surface 06-10 01:05 (`783cc35`); the `cli` repo was extracted from that state
-(`cb2fab0`); the JN write-through (`6ce625f`, 06-10 02:52) then landed on `libs/cli`
-+ the shim — **after** the extraction snapshot and **after** the `libs/v0.1.7` tag.
+What the episode establishes (and what remains actionable):
 
-**Version skew (tag evidence).** `libs/v0.1.7` = `7886125`; the write-through is in
-v0.1.8/v0.1.9. Current pins: shim → local `replace ../libs` (HEAD, v0.1.9-equivalent);
-`cli` repo → `libs v0.1.7`; judicial-network → `libs v0.1.6` + SDK `rc2`; ledger
-tenant → SDK `rc2`. Three different vintages of "the same" client logic are live.
+- **`baseproof/cli` is the CLI.** It owns the packaging layer the shim never will —
+  version stamping, man pages, completions, GoReleaser, Sigstore keyless signing,
+  SLSA provenance, Homebrew tap. The shim is not a front end to maintain; it is a
+  delete-when-convenient line item (migration step 1; verified zero CI/e2e
+  references). This review spends no further analysis on it. The development-loop
+  need it served (a binary built against libs HEAD) is met by a checkout of the
+  `cli` repo with a local `replace`, or `go run` against the workspace.
+- **The relay is still a manual process** that worked because someone noticed
+  within ~13 hours; the commit message *is* the process. There is no parity test,
+  no tag-freshness gate, and no automation that would catch the next missed relay
+  at compile time. cli PR #2 added no tests (its diff: `commands.go`, `go.mod`,
+  `go.sum`, `.goreleaser.yaml` only), so nothing pins the Cobra surface to the
+  libs seams.
+- **The strict-decode gap now has a released instance.** `cli v0.1.0` binaries
+  (installed before the relay) parse a `write_endpoint` bundle with plain
+  `json.Unmarshal` — no `DisallowUnknownFields` (`libs/cli/clientbundle.go:92-94`)
+  — silently dropping the field and writing direct, which a gated ledger refuses.
+  Nothing in the bundle tells an old binary "you are too old for this network";
+  only upgrading fixes it. `netmanifest.Decode` already shows the strict pattern
+  (`judicial-network/netmanifest/manifest.go:496-507`).
 
-**The failure is behavioral, not cosmetic.** `LoadClientBundle` parses with plain
-`json.Unmarshal` — no `DisallowUnknownFields` (`libs/cli/clientbundle.go:92-94`).
-A bundle carrying `write_endpoint` fed to the `cli`-repo binary (libs v0.1.7,
-pre-`WriteEndpoint`) is **silently accepted, the field dropped, and the write goes
-direct to the ledger** — which a gated ledger refuses (gate-5 `WriteAuthorization`).
-Same bundle file, two binaries, opposite write behavior, no error message that names
-the cause. (Contrast: `netmanifest.Decode` *does* reject unknown fields,
-`judicial-network/netmanifest/manifest.go:496-507` — the strictness exists in the
-ecosystem; the client bundle just doesn't use it.)
+### Amendment 2A — make recurrence impossible at compile time
 
-**Structural cause.** The Cobra layer re-declares every flag and `forward()` relays
-only flags that are *declared* (`baseproof-cli/main.go:59-68`); the logic seam and
-the flag surface live in different repos with no parity check. Two hand-maintained
-`commands.go` files + a manual three-step relay (tag libs → bump go.mod → mirror
-flags) is the drift machine. Neither front end is built by tooling CI (zero workflow
-references to `baseproof-cli/`); the `cli` repo's CI is solid (gofmt/vet/test,
-GoReleaser snapshot, Sigstore + SLSA on tags) but builds against the stale pin.
+1. **Surface-as-spec:** move flag/command declarations into `libs/cli` as data (a
+   `CommandSpec` table the stdlib dispatch **and** the Cobra front end both
+   render). "The logic is the library" becomes "the surface is the library"; a
+   parity test in the `cli` repo locks binary ↔ libs.
+2. **Tag-freshness gate:** a `cli`-repo CI job that fails when the `libs` pin is
+   older than the newest `libs/v*` tag — the same canonical-derivation pattern as
+   tooling's SDK-version-pin job (`ci.yml:73-112`). Optionally, a tooling job that
+   builds the `cli` repo against libs HEAD via `replace` before tagging.
+3. **Strict bundle decode** (see §4A.5) so released binaries fail loudly on
+   newer bundles instead of silently changing write behavior.
+4. Delete `tooling/baseproof-cli` whenever convenient — no analysis needed.
 
-**Both directions have drifted.** Shim-only: `--cosigner-keys`, `--cosign`, gated-
-network help text. cli-only: version stamping, `docs.go` man pages, visible
-`completion`, LICENSE/Makefile/goreleaser/release workflows.
-
-### Amendment 2A — collapse to one front end *first*, not after the ledger namespace
-
-Reorder migration step 1 to make shim deletion the opening move:
-
-1. Bump `cli` go.mod → `libs v0.1.9` (SDK rc3 follows transitively).
-2. Port the two flags + help text to `cli/commands.go` (the logic is already in the
-   published libs).
-3. Delete `tooling/baseproof-cli` (CI never referenced it; only docs do).
-4. Make the surface drift *impossible*, not reviewed-for: move the flag
-   declarations into `libs/cli` as data (a `CommandSpec`/flag table the stdlib
-   dispatch **and** the Cobra front end both render). "The logic is the library"
-   becomes "the surface is the library." A parity test in the `cli` repo then locks
-   binary ↔ libs.
-5. Add a cross-repo freshness gate, mirroring the existing SDK-version-pin job
-   (`ci.yml:73-112` derives the canonical from `libs/go.mod`): a `cli`-repo CI job
-   that fails when `libs` pin < latest `libs/v*` tag, and (optionally) a tooling job
-   that builds the `cli` repo against libs HEAD via `replace` before tagging.
-
-Until step 4 lands, every new `libs/cli` flag is a latent repeat of PR #69.
+Until item 1 lands, every new `libs/cli` flag is a latent repeat of the PR #69
+drift, with detection dependent on a human noticing.
 
 ## 3. Finding — domain-agnosticism: imports are clean, vocabulary is not
 
@@ -203,8 +201,9 @@ Evidence of the gap:
 
 Also: pick one user-facing term per artifact (the CLI's `verify --bundle` help
 currently calls the client bundle a "network bundle", `cli/commands.go:97`) and
-de-duplicate `networkbundle` by switching JN to `libs/networkbundle` on its next
-libs bump.
+de-duplicate `networkbundle` by switching JN to `libs/networkbundle`. Note: JN's
+bump to libs v0.1.9 (JN PR #163) did **not** de-duplicate — versions are now
+aligned, so the switch is a one-line import change awaiting someone to make it.
 
 ## 5. Finding — test coverage: strong core, gaps exactly where the risk is
 
@@ -255,6 +254,42 @@ lands.
 5. **Add the missing workstreams**: the network-bundle items (§4A) and the
    domain-vocabulary law (§3C) are prerequisites for "domain-agnostic CLI that
    fully implements the network bundle", and neither appears in the plan.
+
+## 6b. Addendum — found & fixed during this review: the witness-history
+## genesis hole
+
+Live repro (the mo5 network): `baseproof witnesses` → `HTTP 404 from
+/v1/network/witnesses/current` while `info --verify` showed `witnesses 2-of-0`
+yet verified the horizon 2/2. Root cause, traced end-to-end: the
+`/v1/network/witnesses/*` endpoints serve only `witness_sets` rows
+(`api/witnesses.go`), the **only** writer of that table is the rotation path
+(`witnessclient/rotation_handler.go` — `INSERT INTO witness_sets`), and boot
+falls back to the genesis set **in memory only**
+(`cmd/ledger/boot/wire/gossip.go::wireWitnessQuorum`) — so a never-rotated
+network 404s forever, and worse, the FIRST rotation's `UPDATE … WHERE
+retired_seq IS NULL` retires nothing on an empty table, leaving the genesis
+era permanently uncovered. Migration 0014 designed the genesis-baseline row
+("0 for the genesis baseline … loaded from config at boot") but nothing wrote
+it; the handler doc prescribed *operator seeding* — an off-log step.
+
+Fixed in this branch, per the log-driven doctrine (nothing operator-seeded;
+the row is a pure derivation of the trust root):
+
+- `services/ledger/witnessclient/genesis_seed.go` — `SeedGenesisBaseline`,
+  idempotent boot-time reconcile: empty table → genesis row ACTIVE at
+  effective_seq 0; rotated-before-baseline table → genesis row RETIRED at the
+  earliest rotation (hole backfill); already recorded → no-op. Wired
+  fail-closed at the end of `wireWitnessQuorum`; writer-only (`ledger-reader`
+  does not run this wiring). Three DB-gated tests.
+- `libs/cli` — `witnesses` falls back on 404 to the genesis set derived from
+  the **hash-verified bootstrap** (works against unpatched ledgers and PG-off
+  readers; refuses to guess over a *real* history hole when `/current`
+  serves); `info` renders `K-of-N (genesis, derived from bootstrap)` instead
+  of the misleading `K-of-0`. Typed `httpStatusError` from `getJSON`. Tests.
+
+The deeper design — genesis recorded ON-LOG via an endorsed ceremony, and the
+ceremony generalized to every platform event — is specified in
+`docs/WITNESSED_CONFIGURATION.md`.
 
 ## 7. Definition of done — "fully hashed out"
 

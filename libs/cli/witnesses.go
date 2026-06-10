@@ -7,10 +7,16 @@ package cli
 
 import (
 	"context"
+	"encoding/hex"
+	"errors"
 	"flag"
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
+
+	"github.com/baseproof/baseproof/crypto/cosign"
+	"github.com/baseproof/baseproof/witness"
 )
 
 // wireWitnessKeyFull mirrors api.WitnessPublicKey (the /v1/network/witnesses/*
@@ -62,8 +68,30 @@ func RunWitnesses(ctx context.Context, args []string) error {
 		label = fmt.Sprintf("at tree_size %d", *at)
 	}
 	var set wireWitnessSetFull
+	genesisDerived := false
 	if err := getJSON(ctx, hc, url, &set); err != nil {
-		return fmt.Errorf("fetch witness set (%s): %w", label, err)
+		var hs *httpStatusError
+		if !errors.As(err, &hs) || hs.Code != http.StatusNotFound {
+			return fmt.Errorf("fetch witness set (%s): %w", label, err)
+		}
+		// 404 ⇒ the ledger serves no witness history HERE. For --at, first
+		// prove no history exists AT ALL: a 200 on /current means a real hole
+		// in the recorded history (a ledger that rotated before the
+		// genesis-baseline row existed) — surface that, never guess over it.
+		if *at >= 0 {
+			var cur wireWitnessSetFull
+			if cerr := getJSON(ctx, hc, b.Endpoint+"/v1/network/witnesses/current", &cur); cerr == nil {
+				return fmt.Errorf("fetch witness set (%s): %w — history exists but no recorded set covers this seq; reboot the ledger on a current image to reconcile the genesis baseline", label, err)
+			}
+		}
+		// No history at all ⇒ the genesis set governs every committed seq.
+		// Derive it from the hash-verified bootstrap (the trust root) —
+		// strictly stronger evidence than the unauthenticated projection.
+		gset, gerr := genesisWitnessSetFallback(ctx, hc, b)
+		if gerr != nil {
+			return fmt.Errorf("fetch witness set (%s): %w (genesis fallback failed: %v)", label, err, gerr)
+		}
+		set, genesisDerived = gset, true
 	}
 
 	// Overlay human-name labels (best-effort; absent ⇒ ids only).
@@ -76,6 +104,9 @@ func RunWitnesses(ctx context.Context, args []string) error {
 
 	fmt.Printf("witnesses: %s — set %s  scheme=%d  effective_seq=%d  (%d keys)\n",
 		label, short(set.SetHash), set.SchemeTag, set.EffectiveSeq, len(set.Keys))
+	if genesisDerived {
+		fmt.Printf("witnesses: GENESIS set — derived from the hash-verified bootstrap (the ledger serves no witness history)\n")
+	}
 	if set.RetiredSeq != nil {
 		fmt.Printf("witnesses: this set RETIRED at seq %d — a later set is active (rotation)\n", *set.RetiredSeq)
 	}
@@ -87,4 +118,38 @@ func RunWitnesses(ctx context.Context, args []string) error {
 		fmt.Printf("  [%d] %s%s\n", i, short(k.ID), name)
 	}
 	return nil
+}
+
+// genesisWitnessSetFallback derives the genesis witness set from the
+// hash-verified bootstrap. SetHash is the same row-identity hash a healed
+// ledger would serve (the WitnessKeySet's JCS {network_id, quorum_k,
+// witnesses[]} hash) — computable only when the bundle carries both the
+// network id and quorum_k; left empty otherwise.
+func genesisWitnessSetFallback(ctx context.Context, hc *http.Client, b *ClientBundle) (wireWitnessSetFull, error) {
+	doc, err := fetchBootstrap(ctx, hc, b.Endpoint, b.BootstrapHash)
+	if err != nil {
+		return wireWitnessSetFull{}, err
+	}
+	if len(doc.GenesisWitnessSet) == 0 {
+		return wireWitnessSetFull{}, fmt.Errorf("bootstrap carries no genesis witness set")
+	}
+	keys, err := witness.KeysFromDIDs(doc.GenesisWitnessSet)
+	if err != nil {
+		return wireWitnessSetFull{}, fmt.Errorf("derive genesis keys: %w", err)
+	}
+	set := wireWitnessSetFull{SchemeTag: 1, EffectiveSeq: 0}
+	for _, k := range keys {
+		set.Keys = append(set.Keys, wireWitnessKeyFull{
+			ID:        hex.EncodeToString(k.ID[:]),
+			PublicKey: hex.EncodeToString(k.PublicKey),
+			SchemeTag: k.SchemeTag,
+		})
+	}
+	if id, ierr := b.NetworkID32(); ierr == nil && b.QuorumK > 0 {
+		if ks, kerr := cosign.NewECDSAWitnessKeySet(keys, cosign.NetworkID(id), b.QuorumK); kerr == nil {
+			h := ks.SetHash()
+			set.SetHash = hex.EncodeToString(h[:])
+		}
+	}
+	return set, nil
 }

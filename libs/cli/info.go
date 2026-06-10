@@ -35,6 +35,9 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/baseproof/baseproof/crypto/cosign"
+	"github.com/baseproof/baseproof/witness"
+
 	"github.com/baseproof/tooling/libs/clitools"
 	"github.com/baseproof/tooling/libs/messages"
 	"github.com/baseproof/tooling/libs/networkbundle"
@@ -132,6 +135,12 @@ type netInfo struct {
 	Accepts    []string
 	QuorumK    int
 
+	// WitnessesGenesis marks Witnesses as DERIVED from the hash-verified
+	// bootstrap (genesis fallback) rather than fetched from the ledger's
+	// witness-history endpoint — a never-rotated network, an image predating
+	// the genesis-baseline row, or a PG-off reader.
+	WitnessesGenesis bool
+
 	// verdicts
 	IdentityOK bool
 	HorizonOK  bool
@@ -219,6 +228,26 @@ func gatherNetwork(ctx context.Context, b *ClientBundle, httpClient *http.Client
 	}
 	if getJSONOptional(ctx, httpClient, b.Endpoint+"/v1/admission/difficulty", &diff) == nil {
 		n.Difficulty = diff.Difficulty
+	}
+
+	// Genesis fallback: a network that serves no witness history (never
+	// rotated, an image predating the genesis-baseline row, or a PG-off
+	// reader) still cosigns heads with the genesis set. Derive that set from
+	// the hash-verified bootstrap — the trust root — so the roster shown is
+	// the one verification actually uses, marked as bootstrap-derived.
+	if len(n.Witnesses.Keys) == 0 && len(doc.GenesisWitnessSet) > 0 {
+		if gkeys, gerr := witness.KeysFromDIDs(doc.GenesisWitnessSet); gerr == nil {
+			n.WitnessesGenesis = true
+			for _, k := range gkeys {
+				n.Witnesses.Keys = append(n.Witnesses.Keys, wireWitnessKey{ID: hex.EncodeToString(k.ID[:])})
+			}
+			if b.QuorumK > 0 {
+				if gset, serr := cosign.NewECDSAWitnessKeySet(gkeys, cosign.NetworkID(recomputed), b.QuorumK); serr == nil {
+					h := gset.SetHash()
+					n.Witnesses.SetHash = hex.EncodeToString(h[:])
+				}
+			}
+		}
 	}
 
 	if verify {
@@ -340,6 +369,9 @@ func renderNetwork(w io.Writer, n *netInfo) {
 	fmt.Fprintf(tw, "endpoint\t%s\t\n", n.Endpoint)
 
 	wl := fmt.Sprintf("%d-of-%d  set %s", n.QuorumK, len(n.Witnesses.Keys), short(n.Witnesses.SetHash))
+	if n.WitnessesGenesis {
+		wl += " (genesis, derived from bootstrap)"
+	}
 	if n.verify && n.HorizonOK {
 		wl += fmt.Sprintf("   cosigns horizon %s (%d/%d)", mk(true), n.Cosigs.ValidCosigs, n.Cosigs.Quorum)
 	} else if n.verify {
@@ -431,10 +463,21 @@ func getJSON(ctx context.Context, httpClient *http.Client, u string, out any) er
 	defer func() { _ = resp.Body.Close() }()
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("HTTP %d from %s", resp.StatusCode, u)
+		return &httpStatusError{Code: resp.StatusCode, URL: u}
 	}
 	return json.Unmarshal(raw, out)
 }
+
+// httpStatusError reports a non-200 from getJSON. errors.As lets callers
+// branch on the status (the witnesses genesis fallback keys off 404) without
+// string-matching; Error() keeps the exact prior message, which
+// getJSONOptional's "HTTP 404" match still relies on.
+type httpStatusError struct {
+	Code int
+	URL  string
+}
+
+func (e *httpStatusError) Error() string { return fmt.Sprintf("HTTP %d from %s", e.Code, e.URL) }
 
 func getJSONOptional(ctx context.Context, httpClient *http.Client, u string, out any) error {
 	err := getJSON(ctx, httpClient, u, out)
