@@ -49,8 +49,8 @@ func (s *realTreeLogSource) ScanRange(_ context.Context, start uint64, count int
 	return out, nil
 }
 
-func (s *realTreeLogSource) InclusionProofAt(_ context.Context, seq uint64) (*types.MerkleProof, error) {
-	return s.tree.InclusionProof(nil, seq, s.horizon.TreeSize)
+func (s *realTreeLogSource) InclusionProofAtSize(_ context.Context, seq, treeSize uint64) (*types.MerkleProof, error) {
+	return s.tree.InclusionProof(nil, seq, treeSize)
 }
 func (s *realTreeLogSource) CosignedHorizon(_ context.Context) (types.CosignedTreeHead, error) {
 	return s.horizon, nil
@@ -246,7 +246,7 @@ func TestHistoricalResolver_LeafModelBinding(t *testing.T) {
 	// Direct check: the committed leaf == OnLogEntryLeafHash(entry canonical).
 	id := sha256.Sum256(src.canon[pos[0]])
 	want := envelope.EntryLeafHashBytes(id[:]) // H(0x00 || SHA256(canonical)) == OnLogEntryLeafHash(canonical)
-	proof, _ := src.InclusionProofAt(context.Background(), pos[0])
+	proof, _ := src.InclusionProofAtSize(context.Background(), pos[0], src.horizon.TreeSize)
 	proof.LeafHash = envelope.OnLogEntryLeafHash(src.canon[pos[0]])
 	if proof.LeafHash != want {
 		t.Errorf("on-log leaf model mismatch: %x != %x", proof.LeafHash, want)

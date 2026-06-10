@@ -168,3 +168,33 @@ func TestWitnessSetRegistry_ApplyVerifiedRotation_BogusLeavesTrustUnchanged(t *t
 		t.Fatal("trust mutated despite a failed rotation")
 	}
 }
+
+// FEDERATION CORRECTNESS: a rotated set must be rebuilt under the SET'S OWN
+// NetworkID, not the registry-global one. A registry tracking a federated
+// peer's log (seeded under the peer network's identity) would otherwise
+// silently re-home that trust root on first rotation, and every subsequent
+// cosign check would dispatch against the wrong domain separator.
+func TestWitnessSetRegistry_RotationPreservesPerSetNetworkID(t *testing.T) {
+	cur := newVGWitnesses(t, 3, 2)
+	next := newVGWitnesses(t, 3, 2)
+
+	// Construct the registry under a DIFFERENT (local) network ID than the
+	// tracked set's own — the federated-peer shape.
+	var localNID cosign.NetworkID
+	for i := range localNID {
+		localNID[i] = 0xEE
+	}
+	if localNID == cur.set.NetworkID() {
+		t.Fatal("test setup: IDs must differ")
+	}
+	r := NewWitnessSetRegistry(map[string]*cosign.WitnessKeySet{"did:peerlog": cur.set}, localNID)
+
+	if err := r.ApplyVerifiedRotation("did:peerlog", cur.buildRotation(t, next.keys)); err != nil {
+		t.Fatalf("ApplyVerifiedRotation: %v", err)
+	}
+	got, _ := r.Get("did:peerlog")
+	if got.NetworkID() != cur.set.NetworkID() {
+		t.Fatalf("rotated set NetworkID = %x, want the set's own %x (not the registry-global %x)",
+			got.NetworkID(), cur.set.NetworkID(), localNID)
+	}
+}

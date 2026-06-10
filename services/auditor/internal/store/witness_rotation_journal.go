@@ -59,7 +59,9 @@ package store
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"time"
 
 	"database/sql"
 
@@ -67,6 +69,7 @@ import (
 	"github.com/baseproof/baseproof/types"
 	"github.com/baseproof/baseproof/witness"
 	"github.com/baseproof/tooling/libs/monitoring"
+	"github.com/baseproof/tooling/libs/witnessrotation"
 )
 
 // PostgresWitnessRotationJournal persists the verified witness-set rotation
@@ -76,9 +79,14 @@ type PostgresWitnessRotationJournal struct {
 	db *sql.DB
 }
 
-// Static conformance: this satisfies the reconciler's RotationJournal seam, so
-// every verified rotation the reconciler processes is durably journaled.
-var _ monitoring.RotationJournal = (*PostgresWitnessRotationJournal)(nil)
+// Static conformance: the gossip reconciler's RotationJournal seam (every
+// verified rotation it processes is durably journaled) AND the scan
+// reconciler's read+append seam (the journal is the chain the incremental
+// log-scan reconciles against the on-log truth).
+var (
+	_ monitoring.RotationJournal      = (*PostgresWitnessRotationJournal)(nil)
+	_ witnessrotation.RotationJournal = (*PostgresWitnessRotationJournal)(nil)
+)
 
 // NewPostgresWitnessRotationJournal wraps an open pool. The store does NOT take
 // ownership — the caller (auditor boot wire) owns it and shares it with the
@@ -199,6 +207,27 @@ func (j *PostgresWitnessRotationJournal) WitnessSetAt(
 		return nil, err
 	}
 	return witness.WitnessSetAt(genesisSet, records, asOf)
+}
+
+// LatestRecordedAtFor returns when the NEWEST rotation for logDID was
+// journaled — the wall clock the adoption-grace window (the witness-rotation
+// consistency audit's liveness half) runs against. ok=false when the log has
+// no journaled rotations.
+func (j *PostgresWitnessRotationJournal) LatestRecordedAtFor(ctx context.Context, logDID string) (time.Time, bool, error) {
+	var at time.Time
+	err := j.db.QueryRowContext(ctx,
+		`SELECT recorded_at FROM witness_rotation_records
+		  WHERE log_did = $1
+		  ORDER BY effective_seq DESC
+		  LIMIT 1`,
+		logDID).Scan(&at)
+	if errors.Is(err, sql.ErrNoRows) {
+		return time.Time{}, false, nil
+	}
+	if err != nil {
+		return time.Time{}, false, fmt.Errorf("witness_rotation_records: latest recorded_at for %q: %w", logDID, err)
+	}
+	return at, true, nil
 }
 
 // PurgeFor deletes the journaled rotation chain for logDID. The journal is a

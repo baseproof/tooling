@@ -5,20 +5,20 @@
 // PROVEN witness-rotation chain from a real ledger's HTTP API (the LOG is the
 // source of truth, never gossip).
 //
-// HORIZON-ALIGNED PROOFS. The rebuilder anchors on the witness-cosigned horizon
-// and requires every rotation's inclusion proof to bind to that exact horizon
-// size (proof.TreeSize == horizon.TreeSize). The ledger's /v1/tree/inclusion
-// defaults to the LIVE head (which lags/leads the cosigned horizon), so this
-// adapter pins every inclusion fetch to the horizon size via the v1.42.0
-// ?tree_size=N parameter (clitools.InclusionProofAtSize). The horizon is fetched
-// once and cached for the lifetime of one Rebuild pass.
+// HORIZON-ALIGNED PROOFS. The rebuilder anchors on a witness-cosigned target
+// and requires every rotation's inclusion proof to bind to that exact size
+// (proof.TreeSize == target.TreeSize). The ledger's /v1/tree/inclusion
+// defaults to the LIVE head (which lags/leads the cosigned target), so every
+// inclusion fetch is pinned to the caller-named size via the v1.42.0
+// ?tree_size=N parameter (clitools.InclusionProofAtSize). The size travels
+// explicitly on the interface, so one adapter instance serves any number of
+// scan passes — no per-pass horizon caching, no stale-cache hazard.
 package store
 
 import (
 	"context"
 	"encoding/hex"
 	"fmt"
-	"sync"
 
 	"github.com/baseproof/baseproof/types"
 	"github.com/baseproof/tooling/libs/clitools"
@@ -26,13 +26,9 @@ import (
 )
 
 // LedgerLogSource satisfies witnessrotation.LogSource over a clitools ledger
-// client. Construct via NewLedgerLogSource; one instance per Rebuild pass (it
-// caches the horizon so all inclusion proofs align to the same cosigned size).
+// client. Construct via NewLedgerLogSource; safe to reuse across scan passes.
 type LedgerLogSource struct {
 	client *clitools.LedgerClient
-
-	mu      sync.Mutex
-	horizon *types.CosignedTreeHead // cached after first CosignedHorizon
 }
 
 var _ witnessrotation.LogSource = (*LedgerLogSource)(nil)
@@ -63,34 +59,25 @@ func (s *LedgerLogSource) ScanRange(ctx context.Context, start uint64, count int
 	return out, nil
 }
 
-// InclusionProofAt returns the inclusion proof for seq bound to the cosigned
-// HORIZON size (fetched once, cached), via the ledger's ?tree_size= param.
-func (s *LedgerLogSource) InclusionProofAt(ctx context.Context, seq uint64) (*types.MerkleProof, error) {
-	h, err := s.CosignedHorizon(ctx)
+// InclusionProofAtSize returns the inclusion proof for seq computed at the
+// caller-named tree size (the cosigned target the rebuilder verified), via the
+// ledger's ?tree_size= parameter.
+func (s *LedgerLogSource) InclusionProofAtSize(ctx context.Context, seq, treeSize uint64) (*types.MerkleProof, error) {
+	_ = ctx // clitools' proof fetch carries its own request timeout
+	proof, err := s.client.InclusionProofAtSize(seq, treeSize)
 	if err != nil {
-		return nil, err
-	}
-	proof, err := s.client.InclusionProofAtSize(seq, h.TreeSize)
-	if err != nil {
-		return nil, fmt.Errorf("auditor/store: inclusion seq %d @size %d: %w", seq, h.TreeSize, err)
+		return nil, fmt.Errorf("auditor/store: inclusion seq %d @size %d: %w", seq, treeSize, err)
 	}
 	return proof, nil
 }
 
-// CosignedHorizon fetches (and caches) the ledger's latest witness-cosigned
-// tree head. Cached so all inclusion proofs in one Rebuild pass align to the
-// same horizon — a mid-scan horizon advance would otherwise mismatch
-// proof.TreeSize and fail-closed.
-func (s *LedgerLogSource) CosignedHorizon(ctx context.Context) (types.CosignedTreeHead, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.horizon != nil {
-		return *s.horizon, nil
-	}
+// CosignedHorizon fetches the ledger's latest witness-cosigned tree head —
+// fresh on every call (the scan reconciler decides per pass which verified
+// target to bind proofs to).
+func (s *LedgerLogSource) CosignedHorizon(_ context.Context) (types.CosignedTreeHead, error) {
 	h, err := s.client.Horizon()
 	if err != nil {
 		return types.CosignedTreeHead{}, fmt.Errorf("auditor/store: fetch horizon: %w", err)
 	}
-	s.horizon = &h
 	return h, nil
 }

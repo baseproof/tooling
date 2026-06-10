@@ -126,8 +126,8 @@ func (f *fakeLog) ScanRange(_ context.Context, start uint64, count int) ([]Scann
 	return out, nil
 }
 
-func (f *fakeLog) InclusionProofAt(_ context.Context, seq uint64) (*types.MerkleProof, error) {
-	size := f.horizon.TreeSize
+func (f *fakeLog) InclusionProofAtSize(_ context.Context, seq, treeSize uint64) (*types.MerkleProof, error) {
+	size := treeSize
 	if f.proofSizeOverride != 0 {
 		size = f.proofSizeOverride
 	}
@@ -314,5 +314,32 @@ func TestNewRebuilder_Validation(t *testing.T) {
 				t.Errorf("%s accepted; want error", c.name)
 			}
 		})
+	}
+}
+
+// TestRebuildWindow_IncrementalSuffix: a window scan starting past R1 finds
+// ONLY R2 — the bounded [cursor, target) pass the scan reconciler drives.
+func TestRebuildWindow_IncrementalSuffix(t *testing.T) {
+	const n, k = 5, 3
+	s0, s1, s2 := newKit(t, n, k), newKit(t, n, k), newKit(t, n, k)
+	fl := buildFakeLog(t, []setKit{s0, s1, s2}, 50, s2)
+	rb, err := NewRebuilder(Config{Src: fl, LogDID: rbLogDID, AnchorSet: s2.set})
+	if err != nil {
+		t.Fatalf("NewRebuilder: %v", err)
+	}
+	full, _, err := rb.Rebuild(context.Background())
+	if err != nil {
+		t.Fatalf("Rebuild: %v", err)
+	}
+	if len(full) != 2 {
+		t.Fatalf("full scan found %d rotations, want 2", len(full))
+	}
+	// Start just past R1: only R2 is in the window.
+	window, err := rb.RebuildWindow(context.Background(), full[0].EffectivePos.Sequence+1, fl.horizon)
+	if err != nil {
+		t.Fatalf("RebuildWindow: %v", err)
+	}
+	if len(window) != 1 || window[0].EffectivePos != full[1].EffectivePos {
+		t.Fatalf("window = %+v, want exactly R2 at %v", window, full[1].EffectivePos)
 	}
 }

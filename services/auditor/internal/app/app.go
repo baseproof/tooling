@@ -210,6 +210,31 @@ type Deps struct {
 	// CustodyChainInterval is the cadence the custody-chain job runs at.
 	// Required when CustodyChainSource is non-nil.
 	CustodyChainInterval time.Duration
+
+	// RotationScan runs ONE incremental witness-rotation log-scan pass across
+	// every tracked log (the witnessrotation.ScanReconciler engine, composed in
+	// main with per-log ledger clients + the rotation journal + the durable
+	// cursor). The scan is the journal's tail-omission closure: a rotation a
+	// ledger withheld from gossip is discovered within one interval of being
+	// committed. Optional — when nil (or RotationScanInterval <= 0) the job is
+	// not registered and the journal stays gossip-fed only (AT-1 behavior).
+	RotationScan func(ctx context.Context) ([]sdkmonitoring.Alert, error)
+
+	// RotationScanInterval is the cadence of the rotation scan job. Required
+	// when RotationScan is non-nil; ignored otherwise.
+	RotationScanInterval time.Duration
+
+	// RotationConsistencySource returns the per-log inputs for the
+	// witness-rotation consistency audit (safety: the journaled chain walks
+	// clean and the latest verified head is cosigned by an on-chain set;
+	// liveness: a journaled rotation is adopted within the grace window).
+	// Optional — when nil (or RotationConsistencyInterval <= 0) the audit is
+	// not registered.
+	RotationConsistencySource monitoring.RotationConsistencySource
+
+	// RotationConsistencyInterval is the cadence of the consistency audit.
+	// Required when RotationConsistencySource is non-nil.
+	RotationConsistencyInterval time.Duration
 }
 
 // Pipeline is the constructed auditor: a puller feeding a
@@ -349,8 +374,10 @@ func Build(d Deps) (*Pipeline, error) {
 	registerGovernance := d.GovernanceSource != nil && d.GovernanceInterval > 0
 	registerCommitment := d.DerivationCommitmentSource != nil && d.DerivationCommitmentInterval > 0
 	registerCustody := d.CustodyChainSource != nil && d.CustodyChainInterval > 0
+	registerRotationScan := d.RotationScan != nil && d.RotationScanInterval > 0
+	registerRotationConsistency := d.RotationConsistencySource != nil && d.RotationConsistencyInterval > 0
 	var scheduler *monitoring.Scheduler
-	if registerPrune || horizonAuditor != nil || registerURLDrift || registerGovernance || registerCommitment || registerCustody {
+	if registerPrune || horizonAuditor != nil || registerURLDrift || registerGovernance || registerCommitment || registerCustody || registerRotationScan || registerRotationConsistency {
 		scheduler = monitoring.NewScheduler(monitoring.SchedulerConfig{Logger: d.Logger})
 		if registerPrune {
 			interval := d.PruneInterval
@@ -451,6 +478,36 @@ func Build(d Deps) (*Pipeline, error) {
 				},
 			}); err != nil {
 				return nil, fmt.Errorf("auditor/app: register derivation_commitment_compliance: %w", err)
+			}
+		}
+		if registerRotationScan {
+			// AT-2 write side: incremental log-scan reconciliation of the
+			// rotation journal (tail-omission closure; see
+			// libs/witnessrotation/reconcile.go for the async trust model).
+			if err := scheduler.Register(monitoring.Job{
+				Name:     "witness_rotation_scan",
+				Interval: d.RotationScanInterval,
+				Run:      d.RotationScan,
+			}); err != nil {
+				return nil, fmt.Errorf("auditor/app: register witness_rotation_scan: %w", err)
+			}
+		}
+		if registerRotationConsistency {
+			// AT-2 read-side audit: safety (chain integrity + on-chain head) is
+			// Critical; liveness (rotation adopted within grace) is Warning.
+			rotSrc := d.RotationConsistencySource
+			if err := scheduler.Register(monitoring.Job{
+				Name:     "witness_rotation_consistency",
+				Interval: d.RotationConsistencyInterval,
+				Run: func(ctx context.Context) ([]sdkmonitoring.Alert, error) {
+					cfg, err := rotSrc(ctx)
+					if err != nil {
+						return nil, fmt.Errorf("rotation-consistency source: %w", err)
+					}
+					return monitoring.CheckWitnessRotationConsistency(ctx, cfg, time.Now())
+				},
+			}); err != nil {
+				return nil, fmt.Errorf("auditor/app: register witness_rotation_consistency: %w", err)
 			}
 		}
 		if registerCustody {

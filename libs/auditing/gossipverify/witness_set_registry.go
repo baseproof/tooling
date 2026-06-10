@@ -50,9 +50,12 @@ type WitnessSetRegistry struct {
 }
 
 // NewWitnessSetRegistry seeds the registry from the boot-time witness-set map
-// (typically crosslog.BuildWitnessSets) and the network-wide cosign NetworkID
-// every rotated set must rebind to. The seed map is copied; later mutation of
-// the caller's map does not affect the registry.
+// (typically crosslog.BuildWitnessSets). networkID is the registry's home
+// network identity, retained for diagnostics; rotation rebuilds inherit each
+// set's OWN NetworkID (see applyRotationLocked), so a registry holding sets
+// from more than one network rotates each under the identity it was seeded
+// with — never a cross-network rebind. The seed map is copied; later mutation
+// of the caller's map does not affect the registry.
 func NewWitnessSetRegistry(seed map[string]*cosign.WitnessKeySet, networkID cosign.NetworkID) *WitnessSetRegistry {
 	cp := make(map[string]*cosign.WitnessKeySet, len(seed))
 	for k, v := range seed {
@@ -129,12 +132,18 @@ func (r *WitnessSetRegistry) applyRotationLocked(logDID string, rotation types.W
 		return fmt.Errorf("%w: rotation verify for %q: %w", ErrWitnessRegistry, logDID, err)
 	}
 	// Rebuild under the SDK rotation model: NetworkID + Quorum + BLSVerifier are
-	// inherited from the current set (witness.VerifyRotation does exactly this,
-	// rotation.go), so only the keys change. Preserving current.BLSVerifier() is
-	// load-bearing: on a BLS-quorum network, rebuilding with a nil BLS verifier
-	// (the NewECDSAWitnessKeySet shortcut) makes the set BLS-incapable after the
-	// first rotation, and every subsequent BLS-cosigned head fails to verify.
-	next, err := cosign.NewWitnessKeySet(newKeys, r.networkID, quorum, current.BLSVerifier())
+	// inherited from the CURRENT SET (witness.VerifyRotation does exactly this,
+	// rotation.go), so only the keys change. Two inheritances are load-bearing:
+	//   - current.NetworkID(), not the registry-global ID: a registry tracking a
+	//     FEDERATED peer's log must rotate that set under the peer network's own
+	//     identity — rebinding to the local network's ID would silently re-home
+	//     the trust root and every subsequent cosign check would dispatch against
+	//     the wrong domain separator (cross-network federation correctness).
+	//   - current.BLSVerifier(): on a BLS-quorum network, rebuilding with a nil
+	//     BLS verifier (the NewECDSAWitnessKeySet shortcut) makes the set
+	//     BLS-incapable after the first rotation, and every subsequent
+	//     BLS-cosigned head fails to verify.
+	next, err := cosign.NewWitnessKeySet(newKeys, current.NetworkID(), quorum, current.BLSVerifier())
 	if err != nil {
 		return fmt.Errorf("%w: rebuild rotated set for %q: %w", ErrWitnessRegistry, logDID, err)
 	}

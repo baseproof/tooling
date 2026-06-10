@@ -37,6 +37,7 @@ import (
 	"github.com/baseproof/baseproof/did"
 	sdklog "github.com/baseproof/baseproof/log"
 	"github.com/baseproof/baseproof/log/discover"
+	sdkmonitoring "github.com/baseproof/baseproof/monitoring"
 	sdknetwork "github.com/baseproof/baseproof/network"
 	"github.com/baseproof/baseproof/types"
 	"github.com/baseproof/baseproof/witness"
@@ -44,11 +45,13 @@ import (
 	"github.com/baseproof/tooling/libs/anchorcache"
 	"github.com/baseproof/tooling/libs/auditing/didregistry"
 	"github.com/baseproof/tooling/libs/auditing/peers"
+	"github.com/baseproof/tooling/libs/clitools"
 	"github.com/baseproof/tooling/libs/crosslog"
 	"github.com/baseproof/tooling/libs/monitoring"
 	"github.com/baseproof/tooling/libs/outbound"
 	"github.com/baseproof/tooling/libs/sdkguard"
 	"github.com/baseproof/tooling/libs/tracing"
+	"github.com/baseproof/tooling/libs/witnessrotation"
 	"github.com/baseproof/tooling/services/auditor/internal/app"
 	"github.com/baseproof/tooling/services/auditor/internal/horizon"
 	"github.com/baseproof/tooling/services/auditor/internal/store"
@@ -151,6 +154,28 @@ type config struct {
 	// lands.
 	custodyInterval time.Duration
 
+	// rotationScanInterval (AUDITOR_ROTATION_SCAN_INTERVAL, default 0 =
+	// disabled) is the cadence of the incremental witness-rotation log scan
+	// (AT-2): each pass covers only [cursor, cosigned target) per peer log,
+	// journaling any rotation gossip missed (tail-omission closure). 0 = job
+	// not registered; the rotation journal stays gossip-fed only. Typical
+	// production value: 5–15 minutes.
+	rotationScanInterval time.Duration
+
+	// rotationConsistencyInterval (AUDITOR_ROTATION_CONSISTENCY_INTERVAL,
+	// default 0 = disabled) is the cadence of the witness-rotation consistency
+	// audit: safety (journaled chain walks clean; latest verified head is
+	// cosigned by an on-chain set) alerts Critical, liveness (rotation adopted
+	// within the grace window) alerts Warning. 0 = audit not registered.
+	rotationConsistencyInterval time.Duration
+
+	// rotationAdoptionGrace (AUDITOR_ROTATION_ADOPTION_GRACE, default 1h) is
+	// the async tolerance window the consistency audit allows between a
+	// journaled rotation and the first new-set-cosigned head before warning —
+	// the cosign switch is operationally fuzzy and gossip delivery is
+	// independent, so divergence INSIDE the window is expected and silent.
+	rotationAdoptionGrace time.Duration
+
 	// equivScanInterval (AUDITOR_EQUIVOCATION_SCAN_INTERVAL, default 0 =
 	// disabled) is the cadence the INDEPENDENT equivocation scanner polls each
 	// peer's latest cosigned tree head at. 0 = the scanner is not started.
@@ -228,6 +253,10 @@ func loadConfig() config {
 		governanceInterval: envDuration("AUDITOR_GOVERNANCE_INTERVAL", 0),
 		commitmentInterval: envDuration("AUDITOR_COMMITMENT_INTERVAL", 0),
 		custodyInterval:    envDuration("AUDITOR_CUSTODY_INTERVAL", 0),
+		// AT-2: witness-rotation scan reconciliation + consistency audit.
+		rotationScanInterval:        envDuration("AUDITOR_ROTATION_SCAN_INTERVAL", 0),
+		rotationConsistencyInterval: envDuration("AUDITOR_ROTATION_CONSISTENCY_INTERVAL", 0),
+		rotationAdoptionGrace:       envDuration("AUDITOR_ROTATION_ADOPTION_GRACE", time.Hour),
 		// Independent equivocation scanner (push leg). Disabled unless both
 		// the interval AND a gossip signing key are set.
 		equivScanInterval:    envDuration("AUDITOR_EQUIVOCATION_SCAN_INTERVAL", 0),
@@ -547,6 +576,184 @@ func run(ctx context.Context, cfg config, logger *slog.Logger) error {
 		if err := rotJournal.Migrate(ctx); err != nil {
 			return fmt.Errorf("auditor: migrate rotation journal: %w", err)
 		}
+
+		// AT-2 trust roots: one per peer log. The canonical key is the log's
+		// own DID (what rotation findings stamp into EffectivePos.LogDID and
+		// the journal keys rows by); the gossip-originator DID — the name the
+		// verify path queries — is its alias. The genesis seeds are snapshot
+		// BEFORE the live map is re-seeded with reconstructed current sets.
+		genesisByOriginator := make(map[string]*cosign.WitnessKeySet, len(witnessSets))
+		for k, v := range witnessSets {
+			genesisByOriginator[k] = v
+		}
+		var trustRoots []store.LogTrustRoot
+		originatorByLog := make(map[string]string, len(resolvedPeers))
+		baseURLByLog := make(map[string]string, len(resolvedPeers))
+		for _, rp := range resolvedPeers {
+			gen, ok := genesisByOriginator[rp.originatorDID]
+			if !ok {
+				continue // no genesis seed resolved for this peer
+			}
+			if _, dup := originatorByLog[rp.configuredDID]; dup {
+				continue
+			}
+			trustRoots = append(trustRoots, store.LogTrustRoot{
+				LogDID:  rp.configuredDID,
+				Aliases: []string{rp.originatorDID},
+				Genesis: gen,
+			})
+			originatorByLog[rp.configuredDID] = rp.originatorDID
+			baseURLByLog[rp.configuredDID] = rp.baseURL
+		}
+		journalResolver, err := store.NewJournalWitnessSetResolver(rotJournal, trustRoots)
+		if err != nil {
+			return fmt.Errorf("auditor: journal witness-set resolver: %w", err)
+		}
+
+		// Boot-time anchor reconstruction (AT-2/B): re-seed the live trust map
+		// with the journal-reconstructed CURRENT set per log. After any past
+		// rotation the genesis seed can no longer verify the live horizon —
+		// seeding it would silently re-open the stale-trust gap on every
+		// restart. Fail-static per log: an unreadable chain keeps the genesis
+		// seed (exactly correct for a never-rotated log; loudly logged
+		// otherwise).
+		for _, root := range trustRoots {
+			cur, rerr := journalResolver.CurrentSet(ctx, root.LogDID)
+			if rerr != nil {
+				logger.Warn("auditor: witness-set anchor reconstruction failed; keeping genesis seed",
+					"log_did", root.LogDID, "err", rerr.Error())
+				continue
+			}
+			if cur != root.Genesis {
+				logger.Info("auditor: live witness set re-seeded from journaled rotation chain",
+					"log_did", root.LogDID, "originator", originatorByLog[root.LogDID])
+			}
+			witnessSets[originatorByLog[root.LogDID]] = cur
+		}
+
+		sthHeads, err := store.NewSTHHeadSource(st, originatorByLog)
+		if err != nil {
+			return fmt.Errorf("auditor: STH head source: %w", err)
+		}
+
+		// AT-2 write side: the incremental log-scan reconciliation job
+		// (tail-omission closure). One ScanReconciler per peer log; the
+		// scheduler job runs them all each pass and surfaces outcomes as
+		// alerts — a rotation discovered by SCAN that gossip never delivered
+		// is itself a Warning (the omission evidence), and an unexplainable
+		// cosigner set / broken chain / invalid on-log rotation is Critical.
+		var rotationScan func(context.Context) ([]sdkmonitoring.Alert, error)
+		if cfg.rotationScanInterval > 0 && len(trustRoots) > 0 {
+			cursors, cerr := store.NewPostgresRotationScanCursor(db)
+			if cerr != nil {
+				return fmt.Errorf("auditor: rotation scan cursor: %w", cerr)
+			}
+			if cerr := cursors.Migrate(ctx); cerr != nil {
+				return fmt.Errorf("auditor: migrate rotation scan cursor: %w", cerr)
+			}
+			var reconcilers []*witnessrotation.ScanReconciler
+			for _, root := range trustRoots {
+				client, lerr := clitools.NewLedgerClient(baseURLByLog[root.LogDID], root.LogDID)
+				if lerr != nil {
+					return fmt.Errorf("auditor: ledger client for %s: %w", root.LogDID, lerr)
+				}
+				src, serr := store.NewLedgerLogSource(client)
+				if serr != nil {
+					return fmt.Errorf("auditor: log source for %s: %w", root.LogDID, serr)
+				}
+				rec, rerr := witnessrotation.NewScanReconciler(witnessrotation.ScanReconcilerConfig{
+					Src:      src,
+					Journal:  rotJournal,
+					Cursor:   cursors,
+					Fallback: sthHeads,
+					Genesis:  root.Genesis,
+					LogDID:   root.LogDID,
+					Logger:   logger,
+				})
+				if rerr != nil {
+					return fmt.Errorf("auditor: scan reconciler for %s: %w", root.LogDID, rerr)
+				}
+				reconcilers = append(reconcilers, rec)
+			}
+			rotationScan = func(jctx context.Context) ([]sdkmonitoring.Alert, error) {
+				now := time.Now().UTC()
+				var alerts []sdkmonitoring.Alert
+				for _, rec := range reconcilers {
+					report, rerr := rec.RunOnce(jctx)
+					if rerr != nil {
+						sev := sdkmonitoring.Warning // transport/transient by default
+						if errors.Is(rerr, witnessrotation.ErrNoVerifiableTarget) ||
+							errors.Is(rerr, witnessrotation.ErrJournalChainBroken) ||
+							errors.Is(rerr, witnessrotation.ErrOnLogRotationInvalid) {
+							sev = sdkmonitoring.Critical
+						}
+						alerts = append(alerts, sdkmonitoring.Alert{
+							Monitor:     "witness_rotation_scan",
+							Severity:    sev,
+							Destination: sdkmonitoring.Ops,
+							Message:     fmt.Sprintf("rotation scan for %s failed: %v", report.LogDID, rerr),
+							Details:     map[string]any{"log_did": report.LogDID, "from": report.From},
+							EmittedAt:   now,
+						})
+						continue
+					}
+					if report.NewlyJournaled > 0 {
+						alerts = append(alerts, sdkmonitoring.Alert{
+							Monitor:     "witness_rotation_scan",
+							Severity:    sdkmonitoring.Warning,
+							Destination: sdkmonitoring.Ops,
+							Message: fmt.Sprintf("scan journaled %d on-log rotation(s) for %s that gossip never delivered (window [%d,%d))",
+								report.NewlyJournaled, report.LogDID, report.From, report.Until),
+							Details: map[string]any{
+								"log_did": report.LogDID, "newly_journaled": report.NewlyJournaled,
+								"from": report.From, "until": report.Until,
+							},
+							EmittedAt: now,
+						})
+					}
+				}
+				return alerts, nil
+			}
+		}
+
+		// AT-2 read-side audit: assemble per-log inputs for the consistency
+		// check from the journal (chain + journaling clock) and the durable
+		// evidence store (latest verified head).
+		var rotationConsistencySource monitoring.RotationConsistencySource
+		if cfg.rotationConsistencyInterval > 0 && len(trustRoots) > 0 {
+			roots := trustRoots
+			rotationConsistencySource = func(jctx context.Context) (monitoring.WitnessRotationConsistencyConfig, error) {
+				out := monitoring.WitnessRotationConsistencyConfig{Grace: cfg.rotationAdoptionGrace}
+				for _, root := range roots {
+					records, rerr := rotJournal.RecordsFor(jctx, root.LogDID)
+					if rerr != nil {
+						return monitoring.WitnessRotationConsistencyConfig{}, fmt.Errorf("journal records for %s: %w", root.LogDID, rerr)
+					}
+					var recordedAt time.Time
+					if at, ok, aerr := rotJournal.LatestRecordedAtFor(jctx, root.LogDID); aerr != nil {
+						return monitoring.WitnessRotationConsistencyConfig{}, fmt.Errorf("journal recorded_at for %s: %w", root.LogDID, aerr)
+					} else if ok {
+						recordedAt = at
+					}
+					var latestHead *types.CosignedTreeHead
+					if h, ok, herr := sthHeads.LatestVerifiedHead(jctx, root.LogDID); herr != nil {
+						return monitoring.WitnessRotationConsistencyConfig{}, fmt.Errorf("latest verified head for %s: %w", root.LogDID, herr)
+					} else if ok {
+						head := h
+						latestHead = &head
+					}
+					out.Logs = append(out.Logs, monitoring.RotationLogState{
+						LogDID:                   root.LogDID,
+						Genesis:                  root.Genesis,
+						Records:                  records,
+						LatestRotationRecordedAt: recordedAt,
+						LatestHead:               latestHead,
+					})
+				}
+				return out, nil
+			}
+		}
+
 		didRegistry, err := buildDIDRegistry(peerHTTPClient)
 		if err != nil {
 			return fmt.Errorf("auditor: build DID registry: %w", err)
@@ -554,7 +761,14 @@ func run(ctx context.Context, cfg config, logger *slog.Logger) error {
 		pipe, err := app.Build(app.Deps{
 			Store:           st,
 			RotationJournal: rotJournal,
-			WitnessSets:     witnessSets,
+			// Journal-first position-aware resolution (AT-2): inbound heads
+			// verify against the set that COSIGNED them (era-correct across
+			// rotations), and the slasher re-verifies historical equivocations
+			// against their era set. Without this, verification is pinned to
+			// the live snapshot and a transitional old-set head false-alarms
+			// at every rotation boundary.
+			WitnessSetResolver: journalResolver,
+			WitnessSets:        witnessSets,
 			NetworkID:       nid,
 			DIDRegistry:     didRegistry,
 			Peers:           peerFeeds(resolvedPeers),
@@ -605,6 +819,14 @@ func run(ctx context.Context, cfg config, logger *slog.Logger) error {
 			// Disabled by default — gated on AUDITOR_CUSTODY_INTERVAL > 0.
 			CustodyChainSource:   custodySource,
 			CustodyChainInterval: cfg.custodyInterval,
+
+			// AT-2: incremental rotation log-scan (tail-omission closure) +
+			// the safety/liveness consistency audit. Disabled by default —
+			// gated on the respective AUDITOR_ROTATION_* intervals > 0.
+			RotationScan:                rotationScan,
+			RotationScanInterval:        cfg.rotationScanInterval,
+			RotationConsistencySource:   rotationConsistencySource,
+			RotationConsistencyInterval: cfg.rotationConsistencyInterval,
 		})
 		if err != nil {
 			return fmt.Errorf("auditor: build pipeline: %w", err)

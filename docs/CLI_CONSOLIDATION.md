@@ -103,13 +103,18 @@ lint), `tooling/e2e/cmd/e2e` (e2e runner — already drives `libs/cli`),
 `tooling/services/witness/cmd/gen-fixtures`, `tooling/services/ledger/scripts/ctx-*`.
 None are user-facing.
 
-### The compat shim — delete it
+### The compat shim — delete it (and the drift has already started)
 
-`tooling/baseproof-cli/commands.go` is **byte-identical** to `cli/commands.go`;
-`main.go` differs only by the `cli` repo's version stamping + `docs` command. Its
-own `go.mod` comment promised "extraction to its OWN repository next sprint" — that
-extraction is **done** (the `cli` repo is the live one). The shim is pure
-duplication and should be removed.
+When this doc was first drafted, `tooling/baseproof-cli/commands.go` was
+**byte-identical** to `cli/commands.go`. It no longer is: the JN write-through
+change (PR #69 — `WriteEndpoint`, `--cosigner-keys`, `--cosign`) landed on the
+**shim's** commands.go while the extracted `cli` repo did not receive it. That is
+exactly the drift keeping two front ends invites, and it upgrades this item from
+"nice cleanup" to "actively diverging surface." The shim's own `go.mod` comment
+promised "extraction to its OWN repository next sprint" — the extraction is done
+(the `cli` repo is the live one). Deletion is now a two-step: port the JN-write
+flag surface to the `cli` repo's commands.go (the logic already lives in
+`libs/cli`, shared by both), then remove the shim.
 
 ## The principle that splits Bucket B from Bucket C
 

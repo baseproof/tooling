@@ -174,8 +174,8 @@ func (s *ledgerLogSource) ScanRange(ctx context.Context, start uint64, count int
 	return out, nil
 }
 
-func (s *ledgerLogSource) InclusionProofAt(_ context.Context, seq uint64) (*types.MerkleProof, error) {
-	return s.g.client.InclusionProofAtSize(seq, s.horizon.TreeSize)
+func (s *ledgerLogSource) InclusionProofAtSize(_ context.Context, seq, treeSize uint64) (*types.MerkleProof, error) {
+	return s.g.client.InclusionProofAtSize(seq, treeSize)
 }
 
 func (s *ledgerLogSource) CosignedHorizon(context.Context) (types.CosignedTreeHead, error) {
