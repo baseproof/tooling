@@ -103,10 +103,12 @@ func cmdUp(args []string) error {
 		return err
 	}
 	cfg := stack.Config{
-		WorkDir:     filepath.Join(runDir(), "work"),
-		BuildImages: *build || os.Getenv("E2E_BUILD") == "1",
-		LogDID:      os.Getenv("E2E_LOG_DID"),
-		QuorumK:     envInt("E2E_QUORUM_K", 1),
+		WorkDir:        filepath.Join(runDir(), "work"),
+		BuildImages:    *build || os.Getenv("E2E_BUILD") == "1",
+		LogDID:         os.Getenv("E2E_LOG_DID"),
+		QuorumK:        envInt("E2E_QUORUM_K", 1),
+		TesseraVariant: os.Getenv("E2E_TESSERA"), // "" → fork (default)
+		LedgerImage:    os.Getenv("E2E_LEDGER_IMAGE"),
 	}
 	fmt.Println("== bringing up the docker fleet (pg + seaweedfs + witness + ledger[HTTPS] + auditor) ==")
 	m, err := stack.Build(cfg)
