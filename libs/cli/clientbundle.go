@@ -6,6 +6,7 @@
 package cli
 
 import (
+	"bytes"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -89,8 +90,17 @@ func LoadClientBundle(path string) (*ClientBundle, error) {
 	if err != nil {
 		return nil, fmt.Errorf("client bundle: read %s: %w", path, err)
 	}
+	// Strict decode: an unknown field is a typo or a forward-incompatible
+	// bundle this binary must not silently misread (e.g. a write_endpoint a
+	// pre-field binary would drop, treating a gated network as ungated).
+	// Pre-launch the clean break is correct; DisallowUnknownFields rejects
+	// rather than drops. The bundle's open vocabulary (the Schemas map keys,
+	// Messages, Federation entries) is value-space and unaffected — only
+	// unknown STRUCT keys reject.
 	var b ClientBundle
-	if err := json.Unmarshal(data, &b); err != nil {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&b); err != nil {
 		return nil, fmt.Errorf("client bundle: parse %s: %w", path, err)
 	}
 	if err := b.validate(); err != nil {
