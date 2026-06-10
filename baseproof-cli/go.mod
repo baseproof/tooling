@@ -8,7 +8,11 @@ module github.com/baseproof/tooling/baseproof-cli
 
 go 1.25.7
 
-require github.com/baseproof/tooling/libs v0.0.0-00010101000000-000000000000
+require (
+	github.com/baseproof/tooling/libs v0.0.0-00010101000000-000000000000
+	github.com/spf13/cobra v1.10.2
+	github.com/spf13/pflag v1.0.9
+)
 
 require (
 	github.com/baseproof/baseproof v0.0.4-rc2 // indirect
@@ -22,6 +26,7 @@ require (
 	github.com/go-logr/logr v1.4.3 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/google/uuid v1.6.0 // indirect
+	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/mr-tron/base58 v1.3.0 // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
 	github.com/prometheus/client_golang v1.23.2 // indirect

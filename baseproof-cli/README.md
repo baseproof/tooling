@@ -41,13 +41,15 @@ go build -o baseproof .
   function; the platform e2e (`tooling/e2e`) drives the same functions against a
   real fleet, so the shipped surface is exactly what is tested.
 
-### Roadmap (next sprint, in the extracted repo)
-- Rebuild the surface on **Cobra**: each `RunX` becomes a `cobra.Command`
-  (subcommands, POSIX flags + shell completion + man pages), reusing the proven
-  logic underneath.
-- Switch the `libs` dependency from the in-repo `replace` to the published
-  `require github.com/baseproof/tooling/libs vX.Y.Z`.
+### Cobra surface — DONE
+Each command is a `cobra.Command` with native POSIX flags + shell completion +
+per-command help (`main.go` + `commands.go`). A generic forwarder reconstructs the
+flags a user **set** into the `--name=value` args the `libs/cli` `RunX` seams parse
+(`cmd.Flags().Visit` → only changed flags; unset flags fall through to `RunX`'s own
+defaults), so defaults + logic stay in `libs/cli` **untouched** and the platform
+e2e drives exactly what ships. `cli.Main` (the stdlib-`flag` dispatch) remains in
+libs for embedders.
 
-> **Where Cobra is today:** not yet present — the binary uses the stdlib `flag`
-> dispatch in `libs/cli` (`cli.Main` → a command `switch`). Cobra is the
-> next-sprint rewrite that lands in this module's own repo.
+### Roadmap — next sprint (extraction only, no code change)
+Move this module to its own repository: drop the `replace ../libs` and require the
+published `github.com/baseproof/tooling/libs vX.Y.Z`.
