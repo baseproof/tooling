@@ -64,16 +64,17 @@ type ScannedEntry struct {
 }
 
 // LogSource is the narrow read surface the rebuild needs from a ledger client.
-// *clitools.LedgerClient satisfies it (ScanFrom returns []RawEntry; a thin
-// adapter maps that to []ScannedEntry — see clientAdapter in the auditor wiring).
+// *clitools.LedgerClient satisfies it via a thin adapter (the auditor's
+// store.LedgerLogSource).
 type LogSource interface {
 	// ScanRange returns entries in [start, start+count) in ascending sequence
 	// order, each with its canonical bytes. Fewer than count near the frontier.
 	ScanRange(ctx context.Context, start uint64, count int) ([]ScannedEntry, error)
-	// InclusionProofAt returns the RFC 6962 inclusion proof for the leaf at seq
-	// against the ledger's current tree (proof.TreeSize = that tree's size).
-	// LeafHash MAY be zero (the caller binds it).
-	InclusionProofAt(ctx context.Context, seq uint64) (*types.MerkleProof, error)
+	// InclusionProofAtSize returns the RFC 6962 inclusion proof for the leaf at
+	// seq computed AT the given tree size (proof.TreeSize == treeSize), so the
+	// proof binds to the cosigned target the caller verified — never the live
+	// (lagging/leading) tip. LeafHash MAY be zero (the caller binds it).
+	InclusionProofAtSize(ctx context.Context, seq, treeSize uint64) (*types.MerkleProof, error)
 	// CosignedHorizon returns the latest witness-cosigned tree head.
 	CosignedHorizon(ctx context.Context) (types.CosignedTreeHead, error)
 }
@@ -154,40 +155,60 @@ func (r *Rebuilder) Rebuild(ctx context.Context) ([]witness.HorizonRotationRecor
 	if err != nil {
 		return nil, types.CosignedTreeHead{}, fmt.Errorf("witnessrotation: fetch horizon: %w", err)
 	}
-	// Trust anchor: the horizon must be cosigned by the anchor set the auditor
+	records, err := r.RebuildWindow(ctx, 0, horizon)
+	if err != nil {
+		return nil, types.CosignedTreeHead{}, err
+	}
+	return records, horizon, nil
+}
+
+// RebuildWindow scans [start, target.TreeSize) of the committed prefix and
+// returns the PROVEN rotation records found in that window, in ascending
+// position order. target is the cosigned head every inclusion proof binds to;
+// it is re-verified under the anchor set before any entry is trusted
+// (fail-closed, never blind).
+//
+// This is the INCREMENTAL form of Rebuild: a caller that has already covered
+// [0, start) (a durable scan cursor) re-scans only the new suffix, so the
+// year-15 cost of staying reconciled is O(new entries), not O(history) per
+// pass. Coverage is the caller's contract: advance the cursor to
+// target.TreeSize only after this returns nil error and every returned record
+// has been durably recorded.
+func (r *Rebuilder) RebuildWindow(ctx context.Context, start uint64, target types.CosignedTreeHead) ([]witness.HorizonRotationRecord, error) {
+	// Trust anchor: the target must be cosigned by the anchor set the caller
 	// supplies (its current trusted set). The history walk then re-proves every
 	// rotation inductively from genesis; the anchor check authenticates the SCAN
-	// horizon itself so positions are proven against a trusted root.
-	if cosign.VerifyTreeHeadCosignatures(horizon, r.anchor) < r.anchor.Quorum() {
-		return nil, types.CosignedTreeHead{}, ErrHorizonNotCosigned
+	// target itself so positions are proven against a trusted root.
+	if cosign.VerifyTreeHeadCosignatures(target, r.anchor) < r.anchor.Quorum() {
+		return nil, ErrHorizonNotCosigned
 	}
 
 	var records []witness.HorizonRotationRecord
-	for start := uint64(0); start < horizon.TreeSize; {
-		entries, err := r.src.ScanRange(ctx, start, r.batch)
+	for cursor := start; cursor < target.TreeSize; {
+		entries, err := r.src.ScanRange(ctx, cursor, r.batch)
 		if err != nil {
-			return nil, types.CosignedTreeHead{}, fmt.Errorf("witnessrotation: scan from %d: %w", start, err)
+			return nil, fmt.Errorf("witnessrotation: scan from %d: %w", cursor, err)
 		}
 		if len(entries) == 0 {
 			break
 		}
 		for _, e := range entries {
-			if e.Sequence >= horizon.TreeSize {
+			if e.Sequence >= target.TreeSize {
 				continue // never trust entries beyond the cosigned prefix
 			}
-			rec, ok, perr := r.tryRotation(ctx, e, horizon)
+			rec, ok, perr := r.tryRotation(ctx, e, target)
 			if perr != nil {
-				return nil, types.CosignedTreeHead{}, perr
+				return nil, perr
 			}
 			if ok {
 				records = append(records, rec)
 			}
-			if e.Sequence+1 > start {
-				start = e.Sequence + 1
+			if e.Sequence+1 > cursor {
+				cursor = e.Sequence + 1
 			}
 		}
 	}
-	return records, horizon, nil
+	return records, nil
 }
 
 // tryRotation returns (record, true, nil) if e is a witness-rotation entry whose
@@ -211,7 +232,7 @@ func (r *Rebuilder) tryRotation(ctx context.Context, e ScannedEntry, horizon typ
 			fmt.Errorf("witnessrotation: malformed rotation payload at seq %d: %w", e.Sequence, derr)
 	}
 
-	proof, err := r.src.InclusionProofAt(ctx, e.Sequence)
+	proof, err := r.src.InclusionProofAtSize(ctx, e.Sequence, horizon.TreeSize)
 	if err != nil {
 		return witness.HorizonRotationRecord{}, false, fmt.Errorf("witnessrotation: inclusion seq %d: %w", e.Sequence, err)
 	}

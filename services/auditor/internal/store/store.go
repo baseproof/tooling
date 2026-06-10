@@ -40,6 +40,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/baseproof/baseproof/gossip"
 )
@@ -349,6 +350,34 @@ func (s *PostgresStore) LatestSTH(ctx context.Context, originator string) (gossi
 		return gossip.SignedEvent{}, false, err
 	}
 	return ev, true, nil
+}
+
+// LatestSTHWithTime returns the newest verified cosigned-tree-head event for
+// originator together with WHEN the auditor persisted it
+// (peer_gossip.inserted_at) — the observation clock the frozen-log freshness
+// check runs against (a TreeHead carries no timestamp of its own).
+func (s *PostgresStore) LatestSTHWithTime(ctx context.Context, originator string) (gossip.SignedEvent, time.Time, bool, error) {
+	if originator == "" {
+		return gossip.SignedEvent{}, time.Time{}, false, fmt.Errorf("%w: originator empty", gossip.ErrInvalidConfig)
+	}
+	var (
+		payload    []byte
+		insertedAt time.Time
+	)
+	err := s.db.QueryRowContext(ctx,
+		`SELECT payload, inserted_at FROM peer_gossip WHERE originator = $1 AND kind = $2 ORDER BY lamport DESC LIMIT 1`,
+		originator, string(gossip.KindCosignedTreeHead)).Scan(&payload, &insertedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return gossip.SignedEvent{}, time.Time{}, false, nil
+	}
+	if err != nil {
+		return gossip.SignedEvent{}, time.Time{}, false, fmt.Errorf("gossipfeed: latest sth with time: %w", err)
+	}
+	ev, err := unmarshalEvent(payload)
+	if err != nil {
+		return gossip.SignedEvent{}, time.Time{}, false, err
+	}
+	return ev, insertedAt, true, nil
 }
 
 // Prune deletes events older than the retention cutoff (D8). Returns the
