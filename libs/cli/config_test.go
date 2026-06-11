@@ -78,15 +78,17 @@ func TestNetworkAuthoring(t *testing.T) {
 	peer := newFakeNet(t, nil, false)
 	root := newFakeNet(t, []wireLogNode{{NetworkID: peer.nid, AdmissionURL: peer.url}}, false)
 
-	b, err := authorBundleFromLedger(ctx, root.url, "", "did:web:test-log", 2, 5*time.Second)
+	b, err := authorBundleFromLedger(ctx, root.url, "", "did:web:test-log", 5*time.Second)
 	if err != nil {
 		t.Fatalf("authorBundleFromLedger: %v", err)
 	}
 	if b.NetworkID != root.nid || b.Endpoint != root.url || b.BootstrapHash != root.nid {
 		t.Errorf("authored bundle: id=%s ep=%s hash=%s (want id==hash==%s)", b.NetworkID, b.Endpoint, b.BootstrapHash, root.nid)
 	}
-	if b.LogDID != "did:web:test-log" || b.QuorumK != 2 {
-		t.Errorf("log_did=%q quorum=%d, want did:web:test-log / 2", b.LogDID, b.QuorumK)
+	// QuorumK comes from the hash-verified constitution (GenesisQuorumK=1 in
+	// mustBootstrapDoc), never from an operator flag.
+	if b.LogDID != "did:web:test-log" || b.QuorumK != 1 {
+		t.Errorf("log_did=%q quorum=%d, want did:web:test-log / 1 (constitutional)", b.LogDID, b.QuorumK)
 	}
 	if len(b.Federation) != 1 || b.Federation[0].NetworkID != peer.nid {
 		t.Errorf("federation not captured: %+v", b.Federation)
@@ -97,7 +99,7 @@ func TestNetworkAuthoring(t *testing.T) {
 
 	// ZT: a ledger whose served bootstrap does NOT hash to its claimed id ⇒ fail closed.
 	bad := newFakeNet(t, nil, true) // identity serves ff…ff; bootstrap is the real doc
-	if _, err := authorBundleFromLedger(ctx, bad.url, "", "did:web:x", 1, 5*time.Second); err == nil {
+	if _, err := authorBundleFromLedger(ctx, bad.url, "", "did:web:x", 5*time.Second); err == nil {
 		t.Error("authoring from a ledger whose bootstrap does not hash to its id must fail closed")
 	}
 }

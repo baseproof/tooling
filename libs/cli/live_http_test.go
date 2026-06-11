@@ -208,7 +208,7 @@ func TestInfoVerify_HorizonOverHTTP(t *testing.T) {
 	srv := fx.startFixtureServer(t)
 
 	// The witness set, built exactly as info.go does (info.go:199).
-	nb, err := networkbundle.Build(fx.bdoc, srv.URL, fx.k, networkbundle.Vocabulary{})
+	nb, err := networkbundle.Build(fx.bdoc, srv.URL, networkbundle.Vocabulary{})
 	if err != nil {
 		t.Fatalf("networkbundle.Build: %v", err)
 	}

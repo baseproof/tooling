@@ -14,8 +14,9 @@ PRINCIPLE (minimal trust, CT-style)
 
 WHAT IT DOES
 
- 1. Build the trust root from the bootstrap: genesis_witness_set DIDs +
-    quorum K → a cosign.WitnessKeySet (SDK).
+ 1. Build the trust root from the bootstrap: genesis_witness_set DIDs + the
+    constitutional quorum K (genesis_quorum_k, NetworkID-bound) → a
+    cosign.WitnessKeySet (SDK). -quorum is only a cross-check of that value.
 
  2. Verify the checkpoint: GET /v1/tree/horizon (the proof anchor), verify >= K valid witness
     cosignatures over (RootHash, SMTRoot, ReceiptRoot, TreeSize). ← the only
@@ -41,7 +42,10 @@ SCALE
 USAGE
 
 	audit -url http://ledger:8080 -bootstrap /run/clarity/network-bootstrap.json \
-	      -quorum 2 -manifest /out/backfill-manifest.json -samples 32 -random 16
+	      -manifest /out/backfill-manifest.json -samples 32 -random 16
+
+K comes from the bootstrap's genesis_quorum_k; -quorum is optional and only
+cross-checks it (a differing value is fatal).
 */
 package main
 
@@ -65,6 +69,7 @@ import (
 
 	"github.com/baseproof/tooling/services/ledger/internal/clienttls"
 	"github.com/baseproof/tooling/services/ledger/internal/retryhttp"
+	"github.com/baseproof/tooling/services/ledger/quorum"
 )
 
 // hc is the outbound HTTP client used for every call to the ledger
@@ -84,7 +89,7 @@ func main() {
 	var (
 		ledgerURL = flag.String("url", "http://localhost:8080", "ledger base URL")
 		bootstrap = flag.String("bootstrap", "", "path to network-bootstrap.json (trust root) — REQUIRED")
-		quorum    = flag.Int("quorum", 0, "K-of-N witness quorum to require — REQUIRED")
+		quorum    = flag.Int("quorum", 0, "cross-check of the bootstrap's genesis_quorum_k; 0 (default) adopts it, a differing value is fatal")
 		manifest  = flag.String("manifest", "", "backfill manifest JSON (source of real membership keys)")
 		samples   = flag.Int("samples", 32, "membership keys to sample from the manifest")
 		random    = flag.Int("random", 16, "random absent keys to check non-membership")
@@ -96,13 +101,13 @@ func main() {
 		log.Fatalf("audit: mTLS config: %v", err)
 	}
 	hc = retryhttp.Client(15*time.Second, tlsCfg)
-	if *bootstrap == "" || *quorum < 1 {
-		log.Fatal("audit: -bootstrap and -quorum (>=1) are required")
+	if *bootstrap == "" {
+		log.Fatal("audit: -bootstrap required")
 	}
 
 	// ── 1. Trust root: bootstrap genesis_witness_set → WitnessKeySet ──────────
-	set, n := mustWitnessKeySet(*bootstrap, *quorum)
-	fmt.Printf("audit: trust root — %d genesis witnesses, quorum K=%d\n", n, *quorum)
+	set, k, n := mustWitnessKeySet(*bootstrap, *quorum)
+	fmt.Printf("audit: trust root — %d genesis witnesses, quorum K=%d\n", n, k)
 
 	// SDK v1.22.0 light-client primitives replace this tool's former hand-rolled
 	// HTTP+JSON: the checkpoint client (horizon) + the SMT proof reader. hc gives
@@ -133,7 +138,7 @@ func main() {
 	smtRoot := head.SMTRoot
 	fmt.Printf("audit: checkpoint VERIFIED — tree_size=%d root_hash=%s smt_root=%s (>= K=%d witness cosignatures)\n",
 		head.TreeSize, hex.EncodeToString(head.RootHash[:])[:16]+"…",
-		hex.EncodeToString(smtRoot[:])[:16]+"…", *quorum)
+		hex.EncodeToString(smtRoot[:])[:16]+"…", k)
 
 	rng := rand.New(rand.NewSource(*seed))
 	failures := 0
@@ -212,8 +217,10 @@ func main() {
 
 // mustWitnessKeySet builds the trust root from the bootstrap, exactly as the
 // auditor service does: genesis_witness_set DIDs → ECDSA keys → WitnessKeySet
-// bound to the bootstrap-derived NetworkID.
-func mustWitnessKeySet(path string, quorum int) (*cosign.WitnessKeySet, int) {
+// bound to the bootstrap-derived NetworkID. K is the constitutional
+// genesis_quorum_k (validated by doc.IDs()); flagK is demoted to a cross-check
+// via quorum.ReconcileFlagK. Returns the set, the effective K, and N.
+func mustWitnessKeySet(path string, flagK int) (*cosign.WitnessKeySet, int, int) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		log.Fatalf("audit: read bootstrap %q: %v", path, err)
@@ -225,22 +232,23 @@ func mustWitnessKeySet(path string, quorum int) (*cosign.WitnessKeySet, int) {
 	if doc.ExchangeDID == "" || len(doc.GenesisWitnessSet) == 0 {
 		log.Fatal("audit: bootstrap missing exchange_did / genesis_witness_set")
 	}
-	if quorum > len(doc.GenesisWitnessSet) {
-		log.Fatalf("audit: -quorum %d > N=%d witnesses", quorum, len(doc.GenesisWitnessSet))
-	}
 	ids, err := doc.IDs()
 	if err != nil {
 		log.Fatalf("audit: derive network identity: %v", err)
+	}
+	k, err := quorum.ReconcileFlagK(doc, flagK)
+	if err != nil {
+		log.Fatalf("audit: %v", err)
 	}
 	keys, err := witness.KeysFromDIDs(doc.GenesisWitnessSet)
 	if err != nil {
 		log.Fatalf("audit: resolve witness keys from DIDs: %v", err)
 	}
-	set, err := cosign.NewECDSAWitnessKeySet(keys, ids.NetworkID, quorum)
+	set, err := cosign.NewECDSAWitnessKeySet(keys, ids.NetworkID, k)
 	if err != nil {
 		log.Fatalf("audit: build witness key set: %v", err)
 	}
-	return set, len(doc.GenesisWitnessSet)
+	return set, k, len(doc.GenesisWitnessSet)
 }
 
 // mustManifestKeys reads the backfill manifest and returns its leaf keys as

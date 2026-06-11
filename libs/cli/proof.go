@@ -76,7 +76,7 @@ func RunProof(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	nb, err := networkbundle.Build(doc, b.Endpoint, b.QuorumK, networkbundle.Vocabulary{
+	nb, err := networkbundle.Build(doc, b.Endpoint, networkbundle.Vocabulary{
 		GovernanceSchemas: governanceSchemas(b, logDID),
 		CitedMemberKey:    smtKey,
 	})

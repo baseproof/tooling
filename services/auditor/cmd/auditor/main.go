@@ -80,10 +80,14 @@ type config struct {
 	// gated on having a durable store.
 	gossipDSN     string
 	bootstrapFile string // shared network bootstrap → NetworkID + witness sets
-	quorumK       int    // K-of-N for the bootstrap-derived witness set
-	peers         string // "logDID=baseURL,logDID=baseURL"
-	pollInterval  time.Duration
-	pageLimit     int
+	// quorumK is AUDITOR_WITNESS_QUORUM_K as read (0 = unset), then REPLACED at
+	// boot with the constitutional doc.GenesisQuorumK after the env value passes
+	// the reconcileWitnessQuorumK cross-check (unset adopts; equal honoured;
+	// different fatal).
+	quorumK      int
+	peers        string // "logDID=baseURL,logDID=baseURL"
+	pollInterval time.Duration
+	pageLimit    int
 	// Ladder 5 P9 (#21): bounded-concurrency for the puller→reconciler
 	// hot path. 0 (default) disables the throttle — preserves
 	// pre-Ladder-5 unbounded behavior. Operators set
@@ -244,7 +248,9 @@ func loadConfig() config {
 		gossipDSN: os.Getenv("AUDITOR_GOSSIP_DSN"),
 		// The bootstrap is the one shared, byte-identical trust input every
 		// component loads; honor the fleet's LEDGER_* var so one eval feeds all.
-		bootstrapFile:      resolveFile(envOr("AUDITOR_NETWORK_BOOTSTRAP_FILE", os.Getenv("LEDGER_NETWORK_BOOTSTRAP_FILE")), "/etc/auditor/bootstrap.json", "/etc/secrets/bootstrap.json"),
+		bootstrapFile: resolveFile(envOr("AUDITOR_NETWORK_BOOTSTRAP_FILE", os.Getenv("LEDGER_NETWORK_BOOTSTRAP_FILE")), "/etc/auditor/bootstrap.json", "/etc/secrets/bootstrap.json"),
+		// Cross-check only — the constitutional genesis_quorum_k is the source
+		// of K; 0 (unset) adopts it (reconcileWitnessQuorumK).
 		quorumK:            envInt("AUDITOR_WITNESS_QUORUM_K", 0),
 		peers:              os.Getenv("AUDITOR_PEERS"),
 		pollInterval:       envDuration("AUDITOR_POLL_INTERVAL", 30*time.Second),
@@ -347,10 +353,19 @@ func run(ctx context.Context, cfg config, logger *slog.Logger) error {
 		// Trace every outbound peer hop: a client span per request + traceparent
 		// injection so the auditor's audits stitch into the trace they belong to.
 		peerHTTPClient.Transport = sdklog.WithOTel(peerHTTPClient.Transport)
-		nid, exchangeDID, witnessDIDs, bootstrapDoc, err := loadBootstrap(cfg.bootstrapFile, cfg.quorumK)
+		nid, exchangeDID, witnessDIDs, bootstrapDoc, err := loadBootstrap(cfg.bootstrapFile)
 		if err != nil {
 			return fmt.Errorf("auditor: trust roots: %w", err)
 		}
+		// rc4: GenesisQuorumK is the constitutional, NetworkID-bound quorum — the
+		// single source of truth for K. Demote AUDITOR_WITNESS_QUORUM_K to a
+		// cross-check (see reconcileWitnessQuorumK); cfg.quorumK carries the
+		// reconciled value to every consumer below.
+		quorumK, err := reconcileWitnessQuorumK(bootstrapDoc, cfg.quorumK, cfg.bootstrapFile)
+		if err != nil {
+			return fmt.Errorf("auditor: %w", err)
+		}
+		cfg.quorumK = quorumK
 		// did:web fetch uses the SAME peer-outbound client as every other
 		// outbound surface — one mTLS posture across the binary. did:web
 		// docs are typically served over public HTTPS, but if an operator
@@ -743,15 +758,15 @@ func run(ctx context.Context, cfg config, logger *slog.Logger) error {
 			// at every rotation boundary.
 			WitnessSetResolver: journalResolver,
 			WitnessSets:        witnessSets,
-			NetworkID:       nid,
-			DIDRegistry:     didRegistry,
-			Peers:           peerFeeds(resolvedPeers),
-			HorizonPeers:    horizonPeers(resolvedPeers),
-			HorizonSamples:  cfg.horizonSamples,
-			HorizonInterval: cfg.horizonInterval,
-			PeerHTTPClient:  peerHTTPClient,
-			PollInterval:    cfg.pollInterval,
-			PageLimit:       cfg.pageLimit,
+			NetworkID:          nid,
+			DIDRegistry:        didRegistry,
+			Peers:              peerFeeds(resolvedPeers),
+			HorizonPeers:       horizonPeers(resolvedPeers),
+			HorizonSamples:     cfg.horizonSamples,
+			HorizonInterval:    cfg.horizonInterval,
+			PeerHTTPClient:     peerHTTPClient,
+			PollInterval:       cfg.pollInterval,
+			PageLimit:          cfg.pageLimit,
 			// Ladder 5 P9 (#21): operator-tunable bounded-concurrency for
 			// the puller→reconciler hot path. 0 disables the throttle.
 			MaxInFlightVerify: cfg.maxInFlightVerify,
@@ -934,13 +949,15 @@ func joinGoroutine(shutCtx context.Context, done <-chan struct{}, name string, l
 // loadBootstrap parses the shared network bootstrap document — the same
 // byte-identical doc the witness and ledger load — into the trust primitives
 // the auditor needs: the NetworkID, the canonical exchange_did (diagnostic),
-// and the genesis witness DIDs. It validates the K-of-N quorum against N.
+// and the genesis witness DIDs. doc.IDs() validates the constitutional
+// genesis_quorum_k (1<=K<=N, 2K>N); the AUDITOR_WITNESS_QUORUM_K cross-check
+// against it is the caller's job (reconcileWitnessQuorumK).
 //
 // It deliberately does NOT build the witness-set map: the map KEY is a log's
 // gossip-originator did:key (resolved per-peer; see resolvePeers), which the
 // bootstrap does not carry. Keying solely by exchange_did was the bug that left
 // every STH unmatched ("no witness set for source_log_did <did:key…>").
-func loadBootstrap(path string, quorumK int) (nid cosign.NetworkID, exchangeDID string, witnessDIDs []string, doc sdknetwork.BootstrapDocument, err error) {
+func loadBootstrap(path string) (nid cosign.NetworkID, exchangeDID string, witnessDIDs []string, doc sdknetwork.BootstrapDocument, err error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return nid, "", nil, doc, fmt.Errorf("read bootstrap %s: %w", path, err)
@@ -955,13 +972,32 @@ func loadBootstrap(path string, quorumK int) (nid cosign.NetworkID, exchangeDID 
 	if doc.ExchangeDID == "" || len(doc.GenesisWitnessSet) == 0 {
 		return nid, "", nil, sdknetwork.BootstrapDocument{}, fmt.Errorf("bootstrap %s missing exchange_did / genesis_witness_set", path)
 	}
-	if quorumK <= 0 || quorumK > len(doc.GenesisWitnessSet) {
-		return nid, "", nil, sdknetwork.BootstrapDocument{}, fmt.Errorf("AUDITOR_WITNESS_QUORUM_K=%d invalid for N=%d witnesses in bootstrap",
-			quorumK, len(doc.GenesisWitnessSet))
-	}
 	// doc is returned in full so callers can synthesize the genesis governance
 	// baselines (GenesisSignaturePolicy → signature/algorithm/protocol genesis).
 	return ids.NetworkID, doc.ExchangeDID, append([]string(nil), doc.GenesisWitnessSet...), doc, nil
+}
+
+// reconcileWitnessQuorumK derives the effective witness quorum K from the
+// constitution and demotes AUDITOR_WITNESS_QUORUM_K to a cross-check. Since rc4,
+// genesis_quorum_k is hashed into the NetworkID — the single source of truth
+// for K — so an off-log env knob must never silently override it. The three
+// arms of the demotion rule (envK is the already-parsed cfg.quorumK):
+//
+//	unset (0)        → adopt the constitutional value (doc.GenesisQuorumK)
+//	set, == doc      → honoured (the operator's assertion agrees with the chain)
+//	set, != doc      → fatal (the env disagrees with the identity-bound quorum)
+//
+// doc.IDs() (called by loadBootstrap before this) already enforced 1<=K<=N and
+// the quorum-intersection invariant 2K>N, so the returned K is known-valid.
+func reconcileWitnessQuorumK(doc sdknetwork.BootstrapDocument, envK int, bootstrapPath string) (int, error) {
+	if envK != 0 && envK != doc.GenesisQuorumK {
+		return 0, fmt.Errorf(
+			"AUDITOR_WITNESS_QUORUM_K=%d disagrees with the constitutional genesis_quorum_k=%d in %s: "+
+				"the quorum is bound into the NetworkID, so an env override cannot change it — "+
+				"unset AUDITOR_WITNESS_QUORUM_K to adopt the constitutional value",
+			envK, doc.GenesisQuorumK, bootstrapPath)
+	}
+	return doc.GenesisQuorumK, nil
 }
 
 // resolvedPeer pairs a configured peer feed with the gossip-originator DID the

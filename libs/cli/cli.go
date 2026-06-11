@@ -58,8 +58,8 @@ endpoint, trust root (network id, quorum, bootstrap hash), destination log DID,
 and transport pinning. Ship one bundle per network.
 
 A network can be the active default instead of repeating --bundle every time:
-  baseproof network add <name> --from-ledger <url> --quorum K   # author + store a bundle
-  baseproof network add <name> --from <bundle.json|url>          # import a bundle
+  baseproof network add <name> --from-ledger <url>      # author + store a bundle
+  baseproof network add <name> --from <bundle.json|url>  # import a bundle
   baseproof network use <name>     |  baseproof config set network <name>
   baseproof network list | show    |  baseproof config list
 Commands below take --bundle <file> or --network <name>, else use the active one.

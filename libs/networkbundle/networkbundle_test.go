@@ -30,7 +30,7 @@ func testBootstrap(t *testing.T) (*network.BootstrapDocument, string) {
 
 func TestBuild_GenesisOnly(t *testing.T) {
 	doc, did0 := testBootstrap(t)
-	nb, err := Build(doc, "https://ledger.example:8443", 1, Vocabulary{})
+	nb, err := Build(doc, "https://ledger.example:8443", Vocabulary{})
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
@@ -62,7 +62,7 @@ func TestBuild_WithVocabulary(t *testing.T) {
 	doc, _ := testBootstrap(t)
 	key := [32]byte{0xAB}
 	sr := types.LogPosition{LogDID: "did:web:net", Sequence: 30}
-	nb, err := Build(doc, "https://x", 1, Vocabulary{
+	nb, err := Build(doc, "https://x", Vocabulary{
 		GovernanceSchemas:    map[string]types.LogPosition{"signature_policy_chain": {LogDID: "did:web:net", Sequence: 12}},
 		SignerRotationSchema: &sr,
 		CitedMemberKey:       key,
@@ -79,7 +79,40 @@ func TestBuild_WithVocabulary(t *testing.T) {
 }
 
 func TestBuild_NilDoc(t *testing.T) {
-	if _, err := Build(nil, "https://x", 1, Vocabulary{}); err == nil {
+	if _, err := Build(nil, "https://x", Vocabulary{}); err == nil {
 		t.Error("Build(nil) should error")
+	}
+}
+
+// TestBuild_QuorumFromConstitution pins K single-sourcing (#74): the produced
+// bundle's QuorumK — in the trust root AND the derived witness key set — is the
+// constitutional doc.GenesisQuorumK, with no caller-supplied K to disagree.
+func TestBuild_QuorumFromConstitution(t *testing.T) {
+	dids := make([]string, 3)
+	for i := range dids {
+		kp, err := did.GenerateDIDKeySecp256k1()
+		if err != nil {
+			t.Fatalf("keygen: %v", err)
+		}
+		dids[i] = kp.DID
+	}
+	doc := &network.BootstrapDocument{
+		ProtocolVersion: "1", ExchangeDID: "did:web:exchange.example", NetworkName: "tooling-test",
+		GenesisWitnessSet:           dids,
+		GenesisQuorumK:              2, // constitutional K; N=3 ⇒ 2K>N
+		GenesisTreeHead:             network.GenesisTreeHead{RootHash: strings.Repeat("0", 64), TreeSize: 0},
+		GenesisAdmissionAuthorities: []string{"0123456789abcdef0123456789abcdef01234567"},
+		GenesisAdmissionPolicy:      network.GenesisAdmissionPolicy{GatingRequired: true, CostMode: "uncharged"},
+		GenesisSignaturePolicy:      network.SignaturePolicy{AllowedEntrySigSchemes: []uint16{0x0001}, AllowedCosignSchemeTags: []uint8{0x01}, MinSignaturesPerEntry: 1},
+	}
+	nb, err := Build(doc, "https://ledger.example:8443", Vocabulary{})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if nb.TrustRoot.QuorumK != doc.GenesisQuorumK {
+		t.Errorf("TrustRoot.QuorumK = %d, want the constitutional %d", nb.TrustRoot.QuorumK, doc.GenesisQuorumK)
+	}
+	if nb.Witnesses.Quorum() != doc.GenesisQuorumK {
+		t.Errorf("witness set quorum = %d, want the constitutional %d", nb.Witnesses.Quorum(), doc.GenesisQuorumK)
 	}
 }
