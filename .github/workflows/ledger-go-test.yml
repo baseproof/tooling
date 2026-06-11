@@ -69,6 +69,15 @@ jobs:
       - name: go vet
         run: go vet ./...
 
+      # Compile gate for the -tags=chaos tier. The chaos suite runs on a weekly
+      # cadence (ledger-chaos.yml), and path filters only catch DIRECT touches —
+      # so a refactor in wal/ or store/ can break the chaos-tagged injection
+      # points (chaos/trigger_chaos.go + every chaos.Trigger call site) and sit
+      # broken for up to a week. This keeps the tagged tier honest on every PR
+      # without running it: it must COMPILE even when it doesn't execute.
+      - name: go build -tags=chaos (keep the chaos tier compilable)
+        run: go build -tags=chaos ./...
+
       - name: go test (full suite, serial — the Makefile contract)
         env:
           BASEPROOF_TEST_DSN: postgres://postgres:postgres@localhost:5432/ledger_test?sslmode=disable

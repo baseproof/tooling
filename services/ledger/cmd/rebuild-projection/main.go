@@ -35,7 +35,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -208,20 +207,19 @@ func rebuildWitnessBaseline(
 	if err != nil {
 		return fmt.Errorf("read bootstrap %s: %w", bootstrapFile, err)
 	}
-	var probe network.BootstrapDocument
-	if uErr := json.Unmarshal(raw, &probe); uErr != nil {
-		return fmt.Errorf("parse bootstrap %s: %w", bootstrapFile, uErr)
+	// Fail-closed first contact with our own mounted file, through the SDK's
+	// self-pin door (baseproof#52): strict decode + the genesis ceremony whenever
+	// the policy requires it. A require constitution stripped of endorsements
+	// must not pass — the rebuilt baseline derives only from a verified trust root.
+	doc, err := network.LoadSelfVerifiedBootstrap(raw)
+	if err != nil {
+		return fmt.Errorf("bootstrap %s failed first-contact verification: %w", bootstrapFile, err)
 	}
-	ids, err := probe.IDs()
+	ids, err := doc.IDs()
 	if err != nil {
 		return fmt.Errorf("bootstrap %s: %w", bootstrapFile, err)
 	}
 	pin := [32]byte(ids.NetworkID)
-	// Fail-closed first contact with our own mounted file (#75 Phase B): a
-	// require constitution stripped of endorsements must not pass.
-	if _, err := network.LoadVerifiedBootstrap(raw, pin); err != nil {
-		return fmt.Errorf("bootstrap %s failed first-contact verification: %w", bootstrapFile, err)
-	}
 
 	fetcher := store.NewPostgresEntryFetcher(pool, bs, logDID)
 	meta, err := fetcher.Fetch(ctx, types.LogPosition{LogDID: logDID, Sequence: 0})
