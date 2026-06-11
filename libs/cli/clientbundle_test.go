@@ -128,6 +128,50 @@ func TestClientBundle_MessagesAndFederation(t *testing.T) {
 	}
 }
 
+// TestClientBundle_RejectsUnknownField pins the strict-decode clean break: a
+// bundle carrying a field this binary does not recognize is REJECTED, not
+// silently dropped (the write_endpoint-class hazard — a pre-field binary would
+// drop write_endpoint and treat a gated network as ungated). The bundle's open
+// vocabulary (the Schemas map's section names, Messages, Federation) is
+// value-space and stays accepted — strict decode only rejects unknown STRUCT
+// keys, so the network bundle's expressiveness is maintained.
+func TestClientBundle_RejectsUnknownField(t *testing.T) {
+	nid := strings.Repeat("ab", 32)
+
+	// A valid bundle with an injected unknown top-level key is rejected.
+	valid := ClientBundle{Format: ClientBundleFormat, NetworkID: nid, Endpoint: "https://x", LogDID: "did:web:x", QuorumK: 2}
+	data, err := json.Marshal(valid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(data, &m); err != nil {
+		t.Fatal(err)
+	}
+	m["surprise_field"] = json.RawMessage(`"unexpected"`)
+	raw, err := json.Marshal(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "bundle.json")
+	if err := os.WriteFile(path, raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadClientBundle(path); err == nil {
+		t.Fatal("LoadClientBundle accepted a bundle carrying an unknown field")
+	}
+
+	// The open vocabulary is maintained: an arbitrary Schemas section name is
+	// value-space (a map key), not an unknown struct key, and still loads.
+	okPath := writeBundle(t, ClientBundle{
+		NetworkID: nid, Endpoint: "https://x", QuorumK: 2,
+		Schemas: map[string]uint64{"any_section_name": 7},
+	})
+	if _, err := LoadClientBundle(okPath); err != nil {
+		t.Fatalf("a bundle using the open Schemas vocabulary must still load: %v", err)
+	}
+}
+
 // fakeLedger is a minimal in-memory ledger: accept entry → assign monotonic
 // sequence → answer hash→sequence lookups.
 func fakeLedger() *httptest.Server {
