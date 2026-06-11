@@ -8,7 +8,7 @@ require (
 )
 
 require (
-	github.com/baseproof/baseproof v0.0.4-rc3
+	github.com/baseproof/baseproof v0.0.4-rc5
 	github.com/baseproof/tooling/libs v0.0.0
 	github.com/consensys/gnark-crypto v0.20.1
 )

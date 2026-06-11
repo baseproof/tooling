@@ -3,7 +3,7 @@ module github.com/baseproof/tooling/libs
 go 1.25.7
 
 require (
-	github.com/baseproof/baseproof v0.0.4-rc3
+	github.com/baseproof/baseproof v0.0.4-rc5
 	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.4.1
 	github.com/miekg/pkcs11 v1.1.2
 	github.com/rs/zerolog v1.35.1
