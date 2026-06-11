@@ -83,7 +83,7 @@ func cmdSelftest() error {
 	}
 	defer fx.Close()
 	res, err := runner.ReadStages(context.Background(), runner.Config{
-		LedgerURL: fx.Ledger.URL, CAFile: fx.CAPath, LogDID: fx.LogDID, QuorumK: 2,
+		LedgerURL: fx.Ledger.URL, CAFile: fx.CAPath, LogDID: fx.LogDID,
 		WorkDir: filepath.Join(runDir(), "selftest"),
 	}, fx.Seq, fx.SMTKeyHex)
 	printResult(res)
@@ -143,7 +143,7 @@ func cmdRun(args []string) error {
 	}
 	fmt.Printf("== driving the unified CLI against %s ==\n", m.LedgerURL)
 	res, err := runner.Run(context.Background(), runner.Config{
-		LedgerURL: m.LedgerURL, CAFile: m.CAPath, LogDID: m.LogDID, QuorumK: m.QuorumK,
+		LedgerURL: m.LedgerURL, CAFile: m.CAPath, LogDID: m.LogDID,
 		WorkDir: filepath.Join(runDir(), "run"), LoadN: *load,
 	})
 	printResult(res)

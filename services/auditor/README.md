@@ -51,7 +51,7 @@ network — so custody is *physically disjoint* from enforcement, enforced by
 | `AUDITOR_LISTEN_ADDR` | `:8088` | HTTP listen address |
 | `AUDITOR_GOSSIP_DSN` | *(empty)* | Postgres DSN. **Empty ⇒ health-only mode.** |
 | `AUDITOR_NETWORK_BOOTSTRAP_FILE` | *(falls back to `LEDGER_NETWORK_BOOTSTRAP_FILE`)* | shared trust root → derives `NetworkID` + witness sets |
-| `AUDITOR_WITNESS_QUORUM_K` | `0` | K-of-N for the bootstrap-derived witness set (must be `1..N`) |
+| `AUDITOR_WITNESS_QUORUM_K` | `0` | cross-check of the bootstrap's `genesis_quorum_k` (the single source of K). `0` (unset) adopts it; an equal value is honoured; a differing value is startup-fatal |
 | `AUDITOR_PEERS` | *(empty)* | source feeds, `logDID=baseURL,logDID=baseURL` |
 | `AUDITOR_POLL_INTERVAL` | `30s` | catch-up cadence per peer |
 | `AUDITOR_GOSSIP_RETENTION_DAYS` | `0` (keep all) | prune horizon |
@@ -90,9 +90,10 @@ GOWORK=off go build -o ./bin/auditor ./cmd/auditor
 
 AUDITOR_GOSSIP_DSN='postgres://auditor:…@db:5432/auditor_gossip?sslmode=require' \
 AUDITOR_NETWORK_BOOTSTRAP_FILE=/run/auditor/bootstrap.json \
-AUDITOR_WITNESS_QUORUM_K=5 \
 AUDITOR_PEERS='did:web:state:tn:davidson=https://ledger.example/' \
   ./bin/auditor
+# K comes from the bootstrap's genesis_quorum_k; AUDITOR_WITNESS_QUORUM_K is an
+# optional cross-check (a differing value is startup-fatal).
 ```
 
 Deployment is **per network** — the same image, configured by env + a mounted

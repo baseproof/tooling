@@ -253,7 +253,7 @@ func gatherNetwork(ctx context.Context, b *ClientBundle, httpClient *http.Client
 	if verify {
 		// Horizon: recompute K-of-N cosignatures (+ sampled SMT proofs) against the
 		// witness set DERIVED from the genesis bootstrap — recompute, never trust.
-		if nb, berr := networkbundle.Build(doc, b.Endpoint, b.QuorumK, networkbundle.Vocabulary{}); berr != nil {
+		if nb, berr := networkbundle.Build(doc, b.Endpoint, networkbundle.Vocabulary{}); berr != nil {
 			n.HorizonErr = berr.Error()
 		} else if hr, herr := clitools.VerifyHorizon(ctx, b.Endpoint, nb.Witnesses, 8, httpClient); herr != nil {
 			n.HorizonErr = herr.Error()

@@ -6,7 +6,7 @@
 // require to the published libs tag (e.g. v0.1.7) — no other change.
 module github.com/baseproof/tooling/baseproof-cli
 
-go 1.25.7
+go 1.25.11
 
 require (
 	github.com/baseproof/tooling/libs v0.0.0-00010101000000-000000000000
@@ -15,7 +15,7 @@ require (
 )
 
 require (
-	github.com/baseproof/baseproof v0.0.4-rc2 // indirect
+	github.com/baseproof/baseproof v0.0.4-rc6 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/bits-and-blooms/bitset v1.24.4 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect

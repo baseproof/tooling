@@ -94,6 +94,23 @@ func envIntOr(key string, fallback int) int {
 	return n
 }
 
+// envIntLookup reads an env var as a base-10 int, distinguishing "unset" from
+// "set" and surfacing a parse error rather than silently falling back. Used by
+// the constitutional-quorum cross-check, where the difference between absent
+// (adopt the constitutional value) and present-but-wrong (fatal) is the whole
+// point — envIntOr's fallback-on-error would mask a misconfiguration.
+func envIntLookup(key string) (value int, set bool, err error) {
+	v, ok := os.LookupEnv(key)
+	if !ok || strings.TrimSpace(v) == "" {
+		return 0, false, nil
+	}
+	n, perr := strconv.Atoi(strings.TrimSpace(v))
+	if perr != nil {
+		return 0, true, fmt.Errorf("%s=%q is not an integer: %w", key, v, perr)
+	}
+	return n, true, nil
+}
+
 // envInt64Or reads an env var as a base-10 int64; returns fallback
 // if the var is unset or unparseable. Used for byte-sized configuration
 // values (LEDGER_RECENT_ENTRY_CACHE_MAX_BYTES) where int32 would saturate.

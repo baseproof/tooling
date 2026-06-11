@@ -78,6 +78,7 @@ func TestDaemonE2E(t *testing.T) {
 		ExchangeDID:       "did:web:e2e-test.example",
 		NetworkName:       "daemon-e2e",
 		GenesisWitnessSet: []string{witnessDID},
+		GenesisQuorumK:    1, // REQUIRED since rc4; N=1 ⇒ K=1 (2K>N)
 		GenesisTreeHead: network.GenesisTreeHead{
 			RootHash: "0000000000000000000000000000000000000000000000000000000000000000",
 			TreeSize: 0,

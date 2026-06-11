@@ -83,12 +83,19 @@ const testLogDID = "did:web:test-ledger.example"
 // BASEPROOF_TEST_DSN to its Postgres; local developers point it at
 // any disposable database.
 //
-// LEDGER_TEST_SERIAL: warn-only guard for the shared-DB serialization
-// contract. The Makefile's `test` and `test-chaos` targets set it;
-// `go test ./...` directly (or IDE-launched runs) does not. The
-// warning is reversible — strict failure would block IDE debugging
-// — but the log line is visible in CI so accidental parallel runs
-// show up in test output rather than as flaky "Count=18 want 16".
+// LEDGER_TEST_SERIAL: the shared-DB serialization contract. These
+// requireDB tests share one Postgres (they are NOT per-test-schema
+// isolated like store.IsolatedDB), so running them concurrently with
+// other packages cross-contaminates state and produces flaky
+// "Count=18 want 16" failures that cost a debugging session each. The
+// Makefile's `test`/`test-chaos` targets set the var and run `-p 1`;
+// a bare `go test ./...` does not. This guard REFUSES the unsafe run
+// with a one-line pointer rather than letting it flake — promoted from
+// warn-only (which is precisely how a real contamination shipped
+// undiagnosed). IDE / single-package debugging: set LEDGER_TEST_SERIAL=1
+// yourself (you are asserting "nothing else touches this DB concurrently").
+// This guard is the tracked debt's tripwire; it is deleted when these
+// tests converge on store.IsolatedDB and the var is removed.
 func requireDB(t *testing.T) *pgxpool.Pool {
 	t.Helper()
 	dsn := os.Getenv("BASEPROOF_TEST_DSN")
@@ -96,8 +103,10 @@ func requireDB(t *testing.T) *pgxpool.Pool {
 		t.Skip("BASEPROOF_TEST_DSN unset; skipping integration-style fetcher test")
 	}
 	if os.Getenv("LEDGER_TEST_SERIAL") != "1" {
-		t.Logf("WARNING: LEDGER_TEST_SERIAL != 1; tests are running outside `make test`. " +
-			"Cross-package contamination is possible. Use `make test` for deterministic runs.")
+		t.Fatalf("LEDGER_TEST_SERIAL != 1: this shared-DB test must run serially. " +
+			"Use `make -C services/ledger test` (sets the var + `-p 1`), or set " +
+			"LEDGER_TEST_SERIAL=1 for a single-package/IDE run. Running it concurrently " +
+			"with other packages cross-contaminates the shared Postgres.")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

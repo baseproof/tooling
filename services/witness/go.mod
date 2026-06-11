@@ -1,6 +1,6 @@
 module github.com/baseproof/tooling/services/witness
 
-go 1.25.7
+go 1.25.11
 
 require (
 	github.com/prometheus/client_golang v1.23.2
@@ -8,7 +8,7 @@ require (
 )
 
 require (
-	github.com/baseproof/baseproof v0.0.4-rc3
+	github.com/baseproof/baseproof v0.0.4-rc6
 	github.com/baseproof/tooling/libs v0.0.0
 	github.com/consensys/gnark-crypto v0.20.1
 )

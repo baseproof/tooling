@@ -233,6 +233,7 @@ func buildCrypto(n, k int) (*crypto, error) {
 	bdoc := &network.BootstrapDocument{
 		ProtocolVersion: "1", ExchangeDID: "did:web:exchange.example", NetworkName: "e2e-fixture-net",
 		GenesisWitnessSet:           dids,
+		GenesisQuorumK:              len(dids)/2 + 1, // REQUIRED since rc4 (NetworkID-bound); majority satisfies 2K>N
 		GenesisTreeHead:             network.GenesisTreeHead{RootHash: strings.Repeat("0", 64), TreeSize: 0},
 		GenesisAdmissionAuthorities: []string{"0123456789abcdef0123456789abcdef01234567"},
 		GenesisAdmissionPolicy:      network.GenesisAdmissionPolicy{GatingRequired: true, CostMode: "uncharged"},

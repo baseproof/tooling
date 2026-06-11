@@ -23,136 +23,324 @@ package tests
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"log/slog"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"github.com/baseproof/baseproof/core/envelope"
+	"github.com/baseproof/baseproof/core/smt"
 	"github.com/baseproof/baseproof/crypto/cosign"
 	"github.com/baseproof/baseproof/crypto/signatures"
 	"github.com/baseproof/baseproof/types"
 	"github.com/baseproof/baseproof/witness"
 
+	opbuilder "github.com/baseproof/tooling/services/ledger/builder"
 	"github.com/baseproof/tooling/services/ledger/quorum"
 	"github.com/baseproof/tooling/services/ledger/store"
 	"github.com/baseproof/tooling/services/ledger/witnessclient"
 )
 
-// realRotationPipeline backs the appender's submit + seq-lookup seams with the
-// REAL sequencing effect: tessera.AppendLeaf (the operation sequencer/loop.go
-// performs to assign a leaf) followed by a REAL K-of-N witness cosign round
-// over the new head (persisted to the real tree_heads). It is not a mock — it
-// produces real leaves, heads, signatures and (downstream) proofs.
-type realRotationPipeline struct {
-	h            *witnessedTestHarness
-	seqByID      map[[32]byte]uint64
-	lastCosigned types.CosignedTreeHead
-	cosignedOK   bool
+// singleLeafMerkle is the DETERMINISTIC, SELF-CONSISTENT Merkle half for the
+// dual-commitment representative below: one leaf, whose RFC 6962 single-leaf
+// tree root IS the leaf hash and whose inclusion proof is the empty path. It
+// serves both seams that must agree — the checkpoint loop's CheckpointRooter
+// (RootAtSize / IntegratedSize) and the appender's proof builder — so the
+// appender's self-verify reconstructs to exactly the root the loop bound into
+// the cosigned head. Deliberately fake-but-consistent: the REAL-Merkle join
+// (tessera tiles + this loop at one size) is PR-1.5's capstone; this test's
+// concern is the dual-commitment cosign path, with zero tessera-alignment
+// exposure. It NEVER builds a head — only the loop's named factory does.
+type singleLeafMerkle struct {
+	mu       sync.Mutex
+	leafHash [32]byte
+	size     uint64 // 0 until the leaf integrates, then 1
 }
 
-// Submit mirrors the WAL → sequencer → builder → cosign pipeline, compressed
-// to run synchronously: append the entry identity to the real tree, then
-// collect a real witness cosignature over the resulting head.
-func (p *realRotationPipeline) Submit(
-	ctx context.Context, hash [32]byte, _ []byte, _ int64, _ []types.Web3VerificationReceipt,
-) error {
-	seq, err := p.h.Embedded.AppendLeaf(ctx, hash[:]) // REAL: same call as sequencer/loop.go
-	if err != nil {
-		return err
-	}
-	p.seqByID[hash] = seq
+func (m *singleLeafMerkle) integrate(leaf [32]byte) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.leafHash, m.size = leaf, 1
+}
 
-	head, err := p.h.Embedded.Head() // REAL tree head (root over the committed leaves)
-	if err != nil {
-		return err
+func (m *singleLeafMerkle) IntegratedSize(context.Context) (uint64, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.size, nil
+}
+
+func (m *singleLeafMerkle) RootAtSize(_ context.Context, treeSize uint64) ([32]byte, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if treeSize != 1 || m.size != 1 {
+		return [32]byte{}, fmt.Errorf("singleLeafMerkle: root requested at size %d (integrated %d); only 1 exists", treeSize, m.size)
 	}
-	cosigned, err := p.h.Cosigner.RequestCosignatures(ctx, head) // REAL K-of-N over HTTP → tree_heads
-	if err != nil {
-		return err
+	return m.leafHash, nil // RFC 6962: the single-leaf tree's root IS the leaf hash
+}
+
+// TypedInclusionProof is the appender's proof seam: the single leaf's proof is
+// the empty audit path (LeafHash is bound by the appender itself).
+func (m *singleLeafMerkle) TypedInclusionProof(position, treeSize uint64) (*types.MerkleProof, error) {
+	if position != 0 || treeSize != 1 {
+		return nil, fmt.Errorf("singleLeafMerkle: proof requested at (%d,%d); only (0,1) exists", position, treeSize)
 	}
-	p.lastCosigned = cosigned
-	p.cosignedOK = true
+	return &types.MerkleProof{LeafPosition: 0, TreeSize: 1, Siblings: nil}, nil
+}
+
+// horizonRecorder captures the heads the checkpoint loop publishes (the driver
+// goroutine writes; the test reads after the driver exits).
+type horizonRecorder struct {
+	mu    sync.Mutex
+	heads []types.CosignedTreeHead
+}
+
+func (r *horizonRecorder) PublishCosignedCheckpoint(_ context.Context, head types.CosignedTreeHead) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.heads = append(r.heads, head)
 	return nil
 }
 
-func (p *realRotationPipeline) FetchPrimarySeqByHash(_ context.Context, hash [32]byte) (uint64, bool, error) {
+func (r *horizonRecorder) published() []types.CosignedTreeHead {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]types.CosignedTreeHead(nil), r.heads...)
+}
+
+// checkpointDrivenPipeline backs the appender's submit + seq-lookup seams the
+// way production does: Submit assigns the leaf and commits the SMT batch —
+// and NOTHING ELSE. No head is built here (the harness-drift incident): the
+// cosigned covering head appears only when the REAL CheckpointLoop's named
+// factory builds it from the committed cursor and the REAL validating witness
+// cosigns it, asynchronously, exactly as in a live ledger.
+type checkpointDrivenPipeline struct {
+	pool    *pgxpool.Pool
+	tree    *smt.Tree
+	merkle  *singleLeafMerkle
+	logDID  string
+	seqByID map[[32]byte]uint64
+}
+
+func (p *checkpointDrivenPipeline) Submit(
+	ctx context.Context, hash [32]byte, wire []byte, _ int64, _ []types.Web3VerificationReceipt,
+) error {
+	const seq = uint64(0) // first leaf of the fresh log
+	p.seqByID[hash] = seq
+
+	// Commit the entry's SMT leaf — the builder's atomic-commit effect: the
+	// tree mutates, then smt_root_state records (root, committed_through_seq).
+	pos := types.LogPosition{LogDID: p.logDID, Sequence: seq}
+	if err := p.tree.SetLeaves(ctx, []types.SMTLeaf{{Key: hash, OriginTip: pos, AuthorityTip: pos}}); err != nil {
+		return fmt.Errorf("SetLeaves: %w", err)
+	}
+	root, err := p.tree.Root(ctx)
+	if err != nil {
+		return fmt.Errorf("tree.Root: %w", err)
+	}
+	if _, err := p.pool.Exec(ctx,
+		`UPDATE smt_root_state SET current_root=$1, committed_through_seq=$2 WHERE id=1`,
+		root[:], int64(seq),
+	); err != nil {
+		return fmt.Errorf("commit smt_root_state: %w", err)
+	}
+
+	// The Merkle half integrates the same entry at the same position — the
+	// single-leaf RFC 6962 tree whose root is the on-log entry leaf hash.
+	p.merkle.integrate(envelope.OnLogEntryLeafHash(wire))
+	return nil
+}
+
+func (p *checkpointDrivenPipeline) FetchPrimarySeqByHash(_ context.Context, hash [32]byte) (uint64, bool, error) {
 	seq, ok := p.seqByID[hash]
 	return seq, ok, nil
 }
 
-func TestProductionRotationAppender_EndToEnd_RealTreeRealCosign(t *testing.T) {
+// TestProductionRotationAppender_EndToEnd_RealLoopRealCosign is the
+// DUAL-COMMITMENT CLASS REPRESENTATIVE (tier T2+, per-PR DB job): the cosigned
+// covering head is produced by the REAL CheckpointLoop — its named factory
+// building from the real committed SMT cursor — and signed by the REAL
+// SDK-validating witness over HTTP. The harness fabricates NO head anywhere
+// (the fixture-drift incident this replaces: the old pipeline cosigned a
+// hand-built Merkle-only head whose all-zero SMTRoot every witness rejects).
+// The appender starts against an EMPTY log and must HOLD-and-poll through the
+// pre-first-checkpoint window (the exact boot flow #76's GenesisLogAppender
+// standardizes), succeeding only when the loop publishes for real.
+func TestProductionRotationAppender_EndToEnd_RealLoopRealCosign(t *testing.T) {
 	pool := skipIfNoPostgres(t)
 	ctx := context.Background()
-	logger := slog.Default()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	// REAL harness: EmbeddedAppender tiles + httptest witness fixture (K=1) +
-	// HeadSync persisting cosigned heads to tree_heads(pool).
-	h := newWitnessedTestHarness(t, ctx, pool, logger)
+	// Clean genesis for the loop's singletons (same pattern as
+	// checkpoint_integrity): commit cursor + frontier at the empty root.
+	if _, err := pool.Exec(ctx, `UPDATE smt_root_state SET current_root=$1, committed_through_seq=0 WHERE id=1`, smt.EmptyHash[:]); err != nil {
+		t.Fatalf("reset smt_root_state: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE tile_frontier SET frontier_root=$1, frontier_seq=0 WHERE id=1`, smt.EmptyHash[:]); err != nil {
+		t.Fatalf("reset tile_frontier: %v", err)
+	}
 
-	// The appender reads cosigned heads from the SAME pool the HeadSync writes
-	// to, and inclusion proofs from the harness's real Tessera adapter.
+	// REAL SMT half: in-memory tree, real commit cursor + frontier over PG,
+	// real tile emitter onto a POSIX temp dir.
+	leafStore := smt.NewInMemoryLeafStore()
+	nodeStore := store.NewTailedNodeStore(smt.NewInMemoryNodeStore())
+	tree := smt.NewTree(leafStore, nodeStore)
+	tree.SetRoot(smt.EmptyHash)
+	rootStore := store.NewSMTRootStateStore(pool)
+	tileStore := store.NewPosixSMTTileStore(t.TempDir())
+
+	// REAL validating witness (K=1) + REAL cosign client persisting to
+	// tree_heads(pool) — the signer that rejects malformed heads.
+	netID := nonZeroTestNetworkID()
+	fixture := newWitnessFixture(t, netID, 1)
+	headSync, err := witnessclient.NewHeadSync(witnessclient.HeadSyncConfig{
+		WitnessEndpoints:  fixture.URLs(),
+		QuorumK:           1,
+		PerWitnessTimeout: 2 * time.Second,
+		NetworkID:         netID,
+		HTTPClient:        newTunedHTTPClient(2 * time.Second),
+	}, store.NewTreeHeadStore(pool), logger)
+	if err != nil {
+		t.Fatalf("NewHeadSync: %v", err)
+	}
+
+	// Self-consistent single-leaf Merkle half (see type doc): serves the loop's
+	// rooter AND the appender's proof seam from one source of truth.
+	merkle := &singleLeafMerkle{}
+	recorder := &horizonRecorder{}
+
+	// The REAL production loop — the only head producer in this test.
+	loop := opbuilder.NewCheckpointLoop(
+		store.NewSMTCommitCursor(rootStore),
+		store.NewPgTileFrontier(pool),
+		store.NewBuildTilesEmitter(nodeStore, tileStore),
+		merkle, recorder, headSync, nil, 0, logger,
+	)
+
 	heads := store.NewTreeHeadStore(pool)
 
-	// Active witness set (matches the fixture) → quorum K=1 for the head wait.
-	set, err := cosign.NewWitnessKeySet(h.Fixture.PublicKeys(), h.NetworkID, 1, nil)
-	if err != nil {
-		t.Fatalf("NewWitnessKeySet: %v", err)
+	// EMPTY-WINDOW PIN: over a genuinely empty log the loop HOLDS (genesis
+	// gate) — no head is built, the witness is never asked, nothing persists.
+	if err := loop.CheckpointOnce(ctx); err != nil {
+		t.Fatalf("empty-log CheckpointOnce must hold (nil), got %v", err)
 	}
-	mgr := quorum.NewManager(set)
+	if row, err := heads.LatestCosigned(ctx, 1); err != nil || row != nil {
+		t.Fatalf("empty log persisted a cosigned head (row=%v err=%v)", row, err)
+	}
 
-	// Ledger signing identity. The signature is a real ECDSA signature over the
-	// canonical bytes; the positional proof does not depend on DID↔key
-	// verification (that lives on the consumer / admission path).
+	const logDID = "did:web:ledger.rotation-e2e.test"
+	pipe := &checkpointDrivenPipeline{
+		pool: pool, tree: tree, merkle: merkle,
+		logDID: logDID, seqByID: map[[32]byte]uint64{},
+	}
+
 	priv, err := signatures.GenerateKey()
 	if err != nil {
 		t.Fatalf("GenerateKey: %v", err)
 	}
-	const logDID = "did:web:ledger.rotation-e2e.test"
-
-	pipe := &realRotationPipeline{h: h, seqByID: map[[32]byte]uint64{}}
+	set, err := cosign.NewWitnessKeySet(fixture.PublicKeys(), netID, 1, nil)
+	if err != nil {
+		t.Fatalf("NewWitnessKeySet: %v", err)
+	}
 
 	appender := witnessclient.NewProductionRotationAppender(
-		priv, logDID, logDID, mgr,
-		pipe,      // submitter — real AppendLeaf + real cosign
-		pipe,      // seq lookup — real sequence assigned by AppendLeaf
-		heads,     // real cosigned-head store
-		h.Adapter, // real Tessera inclusion proofs
+		priv, logDID, logDID, quorum.NewManager(set),
+		pipe,   // submitter — leaf assignment + SMT commit, NO head building
+		pipe,   // seq lookup
+		heads,  // real cosigned-head store (written by HeadSync via the loop)
+		merkle, // proof seam — same source as the loop's rooter
 		logger,
 	).WithPolling(10*time.Millisecond, 30*time.Second)
 
-	// The payload is opaque to the appender (it wraps + proves arbitrary bytes);
-	// the rotation's cryptographic validity is ProcessRotation's concern, tested
-	// elsewhere. Here we prove the ON-LOG POSITION, end to end.
-	payload := []byte("on-log witness-rotation payload fixture")
+	// Drive the production loop concurrently, as Run() would: the appender's
+	// covering-head wait must tolerate the pre-first-checkpoint window and
+	// resolve only when the real loop publishes. Loop faults (e.g. the
+	// factory's invalid-head class) are collected and fail the test — the
+	// boundary diagnoses harness mistakes instead of burning retries.
+	driveCtx, stopDriving := context.WithCancel(ctx)
+	defer stopDriving()
+	loopErrs := make(chan error, 16)
+	driverDone := make(chan struct{})
+	go func() {
+		defer close(driverDone)
+		tick := time.NewTicker(10 * time.Millisecond)
+		defer tick.Stop()
+		for {
+			select {
+			case <-driveCtx.Done():
+				return
+			case <-tick.C:
+				if err := loop.CheckpointOnce(driveCtx); err != nil && !errors.Is(err, context.Canceled) {
+					select {
+					case loopErrs <- err:
+					default:
+					}
+				}
+			}
+		}
+	}()
 
+	payload := []byte("on-log witness-rotation payload fixture")
 	canonical, pos, proof, err := appender.AppendRotationEntry(ctx, payload)
+	stopDriving()
+	<-driverDone
 	if err != nil {
 		t.Fatalf("AppendRotationEntry: %v", err)
 	}
-
-	// Reaching here already proves the real chain: the appender ran
-	// smt.VerifyMerkleInclusion(proof, realCosignedRoot) and refused to return
-	// a proof that did not reconstruct. Cross-checks below confirm the bindings.
-	if !pipe.cosignedOK {
-		t.Fatal("no real cosigned head was produced")
+	select {
+	case lerr := <-loopErrs:
+		t.Fatalf("the production loop faulted while driving: %v", lerr)
+	default:
 	}
+
+	// Bindings (the appender already self-verified the proof against the
+	// cosigned root before returning).
 	if want := envelope.OnLogEntryLeafHash(canonical); proof.LeafHash != want {
 		t.Errorf("proof.LeafHash = %x, want OnLogEntryLeafHash(canonical) %x", proof.LeafHash, want)
 	}
-	if pos.LogDID != logDID {
-		t.Errorf("pos.LogDID = %q, want %q", pos.LogDID, logDID)
-	}
-	if pos.Sequence != 0 {
-		t.Errorf("pos.Sequence = %d, want 0 (first leaf of the fresh harness tree)", pos.Sequence)
+	if pos.LogDID != logDID || pos.Sequence != 0 {
+		t.Errorf("pos = {%q %d}, want {%q 0}", pos.LogDID, pos.Sequence, logDID)
 	}
 
-	head := pipe.lastCosigned.TreeHead
+	// THE DUAL-COMMITMENT PIN: the persisted covering head was built by the
+	// loop's factory from the COMMITTED cursor — its SMTRoot is the real
+	// committed root (non-zero), at the size the loop chose, carrying a REAL
+	// validating witness's signature.
+	committedRoot, err := tree.Root(ctx)
+	if err != nil {
+		t.Fatalf("tree.Root: %v", err)
+	}
+	row, err := heads.LatestCosigned(ctx, 1)
+	if err != nil || row == nil {
+		t.Fatalf("no cosigned covering head persisted (row=%v err=%v)", row, err)
+	}
+	if row.TreeSize != 1 {
+		t.Errorf("cosigned head TreeSize = %d, want 1 (the loop's TreeSizeForCommittedSeq(0))", row.TreeSize)
+	}
+	if row.SMTRoot != committedRoot {
+		t.Errorf("cosigned head SMTRoot = %x, want the committed cursor root %x (dual-commitment)", row.SMTRoot[:8], committedRoot[:8])
+	}
+	if row.SMTRoot == ([32]byte{}) {
+		t.Error("cosigned head SMTRoot is all-zero — the incident shape must be impossible here")
+	}
 
-	// CONSUMER PATH: the SDK's positional verifier accepts the proof against the
-	// REAL witness-cosigned head — the exact check finding.VerifyInclusion runs.
+	published := recorder.published()
+	if len(published) != 1 {
+		t.Fatalf("loop published %d horizon(s), want exactly 1", len(published))
+	}
+	head := published[0].TreeHead
+	if len(published[0].Signatures) < 1 {
+		t.Fatal("published horizon carries no witness signatures")
+	}
+
+	// CONSUMER PATH: the SDK's positional verifier accepts the proof against
+	// the published cosigned head — the check finding.VerifyInclusion runs.
 	if err := witness.VerifyRotationInclusion(canonical, proof, head, pos); err != nil {
-		t.Fatalf("VerifyRotationInclusion against the real cosigned head: %v", err)
+		t.Fatalf("VerifyRotationInclusion against the published cosigned head: %v", err)
 	}
 
 	// MUTATION 1 — the footgun leaf H(0x00||canonical) must be REJECTED, proving

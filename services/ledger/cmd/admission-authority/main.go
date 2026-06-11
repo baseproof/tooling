@@ -22,9 +22,12 @@ unverifiable horizon aborts the publish.
 USAGE
 
 	admission-authority -url http://ledger:8080 \
-	    -bootstrap /run/clarity/network-bootstrap.json -quorum 2 \
+	    -bootstrap /run/clarity/network-bootstrap.json \
 	    -g-key /run/clarity/admission-authority.key \
 	    -authorities 0x<J-address>            # enroll J
+
+K comes from the bootstrap's genesis_quorum_k; -quorum is optional and only
+cross-checks it (a differing value is fatal).
 
 After it prints the schema position, set it on the ledger so the keyset resolves
 on-log: LEDGER_ADMISSION_AUTHORITY_SCHEMA=<log-did>@<seq>.
@@ -64,6 +67,7 @@ import (
 
 	"github.com/baseproof/tooling/services/ledger/internal/clienttls"
 	"github.com/baseproof/tooling/services/ledger/internal/retryhttp"
+	"github.com/baseproof/tooling/services/ledger/quorum"
 )
 
 // hc is the outbound HTTP client used for every call to the ledger.
@@ -82,7 +86,7 @@ func main() {
 	var (
 		ledgerURL  = flag.String("url", "http://localhost:8080", "ledger base URL")
 		bootstrap  = flag.String("bootstrap", "", "path to network-bootstrap.json (trust root + log DID) — REQUIRED")
-		quorum     = flag.Int("quorum", 1, "witness quorum K for the verified-anchor cosignature check")
+		quorum     = flag.Int("quorum", 0, "cross-check of the bootstrap's genesis_quorum_k; 0 (default) adopts it, a differing value is fatal")
 		gKeyFile   = flag.String("g-key", "", "authorizing admission-authority key (raw 32-byte hex scalar); MUST be a CURRENT authority — REQUIRED")
 		authsCSV   = flag.String("authorities", "", "comma-separated 0x EOA addresses — the FULL desired admission set (declarative). Empty = freeze {}")
 		schemaArg  = flag.String("schema-pos", "", "existing admission_authority schema as <log-did>@<seq>; empty → publish a fresh schema entry first")
@@ -336,22 +340,25 @@ func mustBootstrap(path string) sdknetwork.BootstrapDocument {
 
 // mustWitnessKeySet builds the K-of-N trust root from the bootstrap, exactly as
 // the auditor does (genesis_witness_set DIDs → ECDSA keys → WitnessKeySet).
-func mustWitnessKeySet(doc sdknetwork.BootstrapDocument, quorum int) *cosign.WitnessKeySet {
+// K is the constitutional genesis_quorum_k (validated by doc.IDs()); flagK is
+// demoted to a cross-check via quorum.ReconcileFlagK.
+func mustWitnessKeySet(doc sdknetwork.BootstrapDocument, flagK int) *cosign.WitnessKeySet {
 	if len(doc.GenesisWitnessSet) == 0 {
 		log.Fatal("admission-authority: bootstrap missing genesis_witness_set")
-	}
-	if quorum < 1 || quorum > len(doc.GenesisWitnessSet) {
-		log.Fatalf("admission-authority: -quorum %d invalid for N=%d witnesses", quorum, len(doc.GenesisWitnessSet))
 	}
 	ids, err := doc.IDs()
 	if err != nil {
 		log.Fatalf("admission-authority: derive network identity: %v", err)
 	}
+	k, err := quorum.ReconcileFlagK(doc, flagK)
+	if err != nil {
+		log.Fatalf("admission-authority: %v", err)
+	}
 	keys, err := witness.KeysFromDIDs(doc.GenesisWitnessSet)
 	if err != nil {
 		log.Fatalf("admission-authority: resolve witness keys: %v", err)
 	}
-	set, err := cosign.NewECDSAWitnessKeySet(keys, ids.NetworkID, quorum)
+	set, err := cosign.NewECDSAWitnessKeySet(keys, ids.NetworkID, k)
 	if err != nil {
 		log.Fatalf("admission-authority: build witness key set: %v", err)
 	}

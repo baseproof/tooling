@@ -35,6 +35,7 @@ func validBootstrap(t *testing.T) network.BootstrapDocument {
 		ExchangeDID:                 "did:web:test.example",
 		NetworkName:                 "test-net-network-handlers",
 		GenesisWitnessSet:           []string{"did:key:zwitness1"},
+		GenesisQuorumK:              1, // REQUIRED since rc4; N=1 ⇒ K=1 (2K>N)
 		GenesisTreeHead:             network.GenesisTreeHead{RootHash: strings.Repeat("01", 32)},
 		GenesisAdmissionAuthorities: []string{"0123456789abcdef0123456789abcdef01234567"},
 		GenesisAdmissionPolicy: network.GenesisAdmissionPolicy{

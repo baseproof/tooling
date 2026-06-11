@@ -29,8 +29,6 @@ package witnessclient_test
 
 import (
 	"context"
-	"crypto/ecdsa"
-	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"os"
@@ -43,7 +41,7 @@ import (
 	"github.com/baseproof/baseproof/crypto/cosign"
 	"github.com/baseproof/baseproof/crypto/signatures"
 	"github.com/baseproof/baseproof/types"
-	"github.com/baseproof/baseproof/witness"
+	"github.com/baseproof/baseproof/witness/witnesstest"
 
 	"github.com/baseproof/tooling/services/ledger/quorum"
 	"github.com/baseproof/tooling/services/ledger/store"
@@ -64,29 +62,6 @@ func requireWitnessDSN(t *testing.T) *pgxpool.Pool {
 	return pool
 }
 
-// freshHistoryKeys generates `n` valid secp256k1 witness keys with
-// canonical PubKeyIDs (SHA-256 over uncompressed pubkey bytes) — the
-// shape rotation findings + cosign.NewWitnessKeySet require.
-func freshHistoryKeys(t *testing.T, n int) ([]types.WitnessPublicKey, []*ecdsa.PrivateKey) {
-	t.Helper()
-	keys := make([]types.WitnessPublicKey, n)
-	privs := make([]*ecdsa.PrivateKey, n)
-	for i := 0; i < n; i++ {
-		priv, err := signatures.GenerateKey()
-		if err != nil {
-			t.Fatalf("GenerateKey[%d]: %v", i, err)
-		}
-		pub := signatures.PubKeyBytes(&priv.PublicKey)
-		keys[i] = types.WitnessPublicKey{
-			ID:        sha256.Sum256(pub),
-			PublicKey: pub,
-			SchemeTag: signatures.SchemeECDSA,
-		}
-		privs[i] = priv
-	}
-	return keys, privs
-}
-
 func historyNetID() cosign.NetworkID {
 	var n cosign.NetworkID
 	for i := range n {
@@ -95,68 +70,30 @@ func historyNetID() cosign.NetworkID {
 	return n
 }
 
-// buildHistoryRotation returns a rotation that ProcessRotation will
-// accept under the same NetworkID — used to exercise the persistence
-// path end-to-end.
-func buildHistoryRotation(
-	t *testing.T,
-	curKeys []types.WitnessPublicKey, curPrivs []*ecdsa.PrivateKey,
-	newKeys []types.WitnessPublicKey,
-	K int,
-	netID cosign.NetworkID,
-) types.WitnessRotation {
+// withHandler wires a RotationHandler over the supplied pool with a fresh
+// K-of-N witness set (the predecessor) bound to historyNetID, returning the
+// handler and that set so a test can mint a rotation FROM it via witnesstest.
+func withHandler(t *testing.T, pool *pgxpool.Pool, K, N int) (*witnessclient.RotationHandler, *witnesstest.Set) {
 	t.Helper()
-	currentSetHash := witness.ComputeSetHash(curKeys)
-	newSetHash := witness.ComputeSetHash(newKeys)
-
-	payload := cosign.NewRotationPayloadSHA256(newSetHash)
-	sigs := make([]types.WitnessSignature, K)
-	for i := 0; i < K; i++ {
-		sigBytes, err := cosign.SignECDSA(payload, netID, cosign.HashAlgoSHA256, curPrivs[i])
-		if err != nil {
-			t.Fatalf("SignECDSA rotation[%d]: %v", i, err)
-		}
-		sigs[i] = types.WitnessSignature{
-			PubKeyID:  curKeys[i].ID,
-			SchemeTag: signatures.SchemeECDSA,
-			SigBytes:  sigBytes,
-		}
-	}
-	// NewSignatures is required non-empty by Validate; same-scheme
-	// rotations skip the dual-sign verify step so a placeholder is OK.
-	var placeholderID [32]byte
-	for i := range placeholderID {
-		placeholderID[i] = 0xEE
-	}
-	return types.WitnessRotation{
-		CurrentSetHash:    currentSetHash,
-		NewSet:            newKeys,
-		SchemeTagOld:      signatures.SchemeECDSA,
-		CurrentSignatures: sigs,
-		SchemeTagNew:      signatures.SchemeECDSA,
-		NewSignatures: []types.WitnessSignature{
-			{PubKeyID: placeholderID, SchemeTag: signatures.SchemeECDSA, SigBytes: []byte{0xAA}},
-		},
-	}
-}
-
-// withHandler wires a RotationHandler over the supplied pool with
-// a fresh witness keyset bound to historyNetID.
-func withHandler(t *testing.T, pool *pgxpool.Pool, K, N int) (
-	*witnessclient.RotationHandler,
-	[]types.WitnessPublicKey,
-	[]*ecdsa.PrivateKey,
-) {
-	t.Helper()
-	curKeys, curPrivs := freshHistoryKeys(t, N)
-	set, err := cosign.NewWitnessKeySet(curKeys, historyNetID(), K, nil)
-	if err != nil {
-		t.Fatalf("NewWitnessKeySet: %v", err)
-	}
-	mgr := quorum.NewManager(set)
+	old := witnesstest.NewSet(t, historyNetID(), N, K)
+	mgr := quorum.NewManager(old.KeySet)
 	return witnessclient.NewRotationHandler(
 		pool, mgr, signatures.SchemeECDSA, "https://ledger.test/", nil,
-	), curKeys, curPrivs
+	), old
+}
+
+// mintHistoryRotation mints a complete rotation from old to a fresh
+// newN-member, K-of-N next set, returning the rotation and the next set (for
+// set_hash / key-count assertions). It routes through witnesstest, so the
+// rotation satisfies every current verifier rule — predecessor quorum, Step-6
+// per-joiner consent, and the 2K>N quorum-intersection invariant — by
+// construction. The pre-rc4 hand-rolled builder placed a 0xEE/0xAA placeholder
+// where the joiner consent now must be, which the rc4 verifier rejects; it is
+// gone.
+func mintHistoryRotation(t *testing.T, old *witnesstest.Set, newN, K int) (types.WitnessRotation, []types.WitnessPublicKey) {
+	t.Helper()
+	next := witnesstest.NewSet(t, historyNetID(), newN, K)
+	return witnesstest.MintRotation(t, historyNetID(), old, next, K), next.Keys
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -173,9 +110,8 @@ func TestProcessRotation_PopulatesV1_3Columns(t *testing.T) {
 	pool := requireWitnessDSN(t)
 	ctx := context.Background()
 
-	rh, curKeys, curPrivs := withHandler(t, pool, 2, 3)
-	newKeys, _ := freshHistoryKeys(t, 3)
-	rot := buildHistoryRotation(t, curKeys, curPrivs, newKeys, 2, historyNetID())
+	rh, old := withHandler(t, pool, 2, 3)
+	rot, newKeys := mintHistoryRotation(t, old, 3, 2)
 
 	// v1.39: effective_seq is the on-log appender's returned position, not
 	// MAX(tree_size). Wire an appender at position 0 so this row's
@@ -249,9 +185,8 @@ func TestProcessRotation_RetiresPriorActive(t *testing.T) {
 		t.Fatalf("seed prior row: %v", err)
 	}
 
-	rh, curKeys, curPrivs := withHandler(t, pool, 2, 3)
-	newKeys, _ := freshHistoryKeys(t, 3)
-	rot := buildHistoryRotation(t, curKeys, curPrivs, newKeys, 2, historyNetID())
+	rh, old := withHandler(t, pool, 2, 3)
+	rot, _ := mintHistoryRotation(t, old, 3, 2)
 
 	// v1.39: the new row's effective_seq AND the prior row's retired_seq are
 	// both stamped with the on-log appender's returned position. Commit at
@@ -312,13 +247,11 @@ func TestProcessRotation_FailsClosedOnDuplicateSetHash(t *testing.T) {
 
 	// Construct the new set, compute its expected hash, pre-insert a
 	// row with that exact set_hash — already-retired so the partial
-	// active index doesn't refuse it for unrelated reasons.
-	newKeys, _ := freshHistoryKeys(t, 3)
-	dummySet, err := cosign.NewWitnessKeySet(newKeys, historyNetID(), 2, nil)
-	if err != nil {
-		t.Fatalf("NewWitnessKeySet[predict]: %v", err)
-	}
-	collidingHash := dummySet.SetHash()
+	// active index doesn't refuse it for unrelated reasons. The SAME next
+	// set must back both the predicted hash and the minted rotation.
+	rh, old := withHandler(t, pool, 2, 3)
+	next := witnesstest.NewSet(t, historyNetID(), 3, 2)
+	collidingHash := next.KeySet.SetHash()
 	retired := int64(99)
 	if _, err := pool.Exec(ctx, `
 		INSERT INTO witness_sets (set_hash, keys_json, scheme_tag, effective_seq, retired_seq)
@@ -327,8 +260,7 @@ func TestProcessRotation_FailsClosedOnDuplicateSetHash(t *testing.T) {
 		t.Fatalf("seed colliding row: %v", err)
 	}
 
-	rh, curKeys, curPrivs := withHandler(t, pool, 2, 3)
-	rot := buildHistoryRotation(t, curKeys, curPrivs, newKeys, 2, historyNetID())
+	rot := witnesstest.MintRotation(t, historyNetID(), old, next, 2)
 
 	// The appender must SUCCEED so the flow reaches the persist step (Step 3),
 	// where the duplicate set_hash trips the witness_sets_set_hash unique
@@ -337,7 +269,7 @@ func TestProcessRotation_FailsClosedOnDuplicateSetHash(t *testing.T) {
 	// constraint we're pinning.
 	rh.WithAppender(fakeRotationAppender{logDID: "did:web:ledger.test", seq: 1})
 
-	_, err = rh.ProcessRotation(ctx, rot)
+	_, err := rh.ProcessRotation(ctx, rot)
 	if err == nil {
 		t.Fatal("ProcessRotation accepted a rotation whose new-set hash collides with an existing row; unique constraint not enforced")
 	}
@@ -368,9 +300,8 @@ func TestLoadSetByHash_RoundTrip(t *testing.T) {
 	pool := requireWitnessDSN(t)
 	ctx := context.Background()
 
-	rh, curKeys, curPrivs := withHandler(t, pool, 2, 3)
-	newKeys, _ := freshHistoryKeys(t, 3)
-	rot := buildHistoryRotation(t, curKeys, curPrivs, newKeys, 2, historyNetID())
+	rh, old := withHandler(t, pool, 2, 3)
+	rot, newKeys := mintHistoryRotation(t, old, 3, 2)
 	// Wire the on-log appender (v1.39 requires it); this test asserts only
 	// set_hash + active status, so the appender's position is immaterial.
 	rh.WithAppender(fakeRotationAppender{logDID: "did:web:ledger.test", seq: 0})
@@ -556,16 +487,18 @@ func TestEffectiveSeqFromAppenderPosition(t *testing.T) {
 		smtRoot[i] = 0xBB
 		receiptRoot[i] = 0xCC
 	}
+	// hash_algo is a SMALLINT algorithm code (migration 0001), written by the
+	// production store as int16(hashAlgo) — see store.TreeHeadStore.InsertHead.
+	// Seed it the same way (cosign.HashAlgoSHA256 = 0x01), not as a string.
 	if _, err := pool.Exec(ctx, `
 		INSERT INTO tree_heads (tree_size, root_hash, smt_root, receipt_root, hash_algo)
-		VALUES (42, $1, $2, $3, 'sha256')
-	`, rootHash[:], smtRoot[:], receiptRoot[:]); err != nil {
+		VALUES (42, $1, $2, $3, $4)
+	`, rootHash[:], smtRoot[:], receiptRoot[:], int16(cosign.HashAlgoSHA256)); err != nil {
 		t.Fatalf("seed tree_heads: %v", err)
 	}
 
-	rh, curKeys, curPrivs := withHandler(t, pool, 2, 3)
-	newKeys, _ := freshHistoryKeys(t, 3)
-	rot := buildHistoryRotation(t, curKeys, curPrivs, newKeys, 2, historyNetID())
+	rh, old := withHandler(t, pool, 2, 3)
+	rot, _ := mintHistoryRotation(t, old, 3, 2)
 
 	// Commit at position 1000 — deliberately != the seeded tree_size (42).
 	const appenderPos = 1000

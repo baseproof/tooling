@@ -34,11 +34,12 @@ import (
 
 // Config drives the runner against an already-live ledger. CAFile pins the
 // ledger's HTTPS server cert (server-verify, open HTTPS — no client cert).
+// There is no quorum knob: `network add` reads K from the ledger's verified
+// constitution (doc.GenesisQuorumK).
 type Config struct {
 	LedgerURL string
 	CAFile    string
 	LogDID    string
-	QuorumK   int
 	WorkDir   string // scratch (bundle store + proof files); a temp dir if empty
 	LoadN     int    // load-stage entry count (0 ⇒ skip the load stage)
 }
@@ -192,7 +193,7 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 func activate(ctx context.Context, cfg Config) error {
 	// Name LAST: networkAdd parses flags then takes the lone positional (Go's flag
 	// package stops at the first non-flag token).
-	args := []string{"add", "--from-ledger", cfg.LedgerURL, "--quorum", strconv.Itoa(cfg.QuorumK), "--use"}
+	args := []string{"add", "--from-ledger", cfg.LedgerURL, "--use"}
 	if cfg.CAFile != "" {
 		args = append(args, "--ca-cert", cfg.CAFile)
 	}

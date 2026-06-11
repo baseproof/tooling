@@ -1,9 +1,9 @@
 module github.com/baseproof/tooling/e2e
 
-go 1.25.7
+go 1.25.11
 
 require (
-	github.com/baseproof/baseproof v0.0.4-rc3
+	github.com/baseproof/baseproof v0.0.4-rc6
 	github.com/baseproof/tooling/libs v0.0.0-00010101000000-000000000000
 )
 
