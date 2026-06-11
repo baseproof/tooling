@@ -20,7 +20,7 @@ import (
 // sections (so no live ledger is needed). The canned sections carry no real
 // cosignatures — which is exactly the point of the Zero-Trust test below.
 type fakeStandaloneGather struct {
-	doc     *network.BootstrapDocument
+	doc *network.BootstrapDocument
 }
 
 func (f *fakeStandaloneGather) FetchGenesisBootstrap(context.Context) (*network.BootstrapDocument, error) {

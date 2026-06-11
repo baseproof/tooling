@@ -10,6 +10,7 @@ package cli
 
 import (
 	"context"
+	"crypto/ecdsa"
 	"crypto/sha256"
 	"os"
 	"path/filepath"
@@ -90,7 +91,7 @@ type realFixture struct {
 // (all n cosign), returning the gather, the genesis trust root, and the target
 // entry's sequence. It mirrors the SDK's own v2 fixture, using only public APIs.
 func mustRealGather(t *testing.T, n, k int) (*realGather, map[cosign.NetworkID]protocol.GenesisTrustRoot, uint64) {
-	fx := buildRealFixture(t, n, k)
+	fx := buildRealFixture(t, n, k, false)
 	g := &realGather{
 		bdoc: fx.bdoc, k: fx.k, entry: fx.entryBytes, logTime: fx.logTime,
 		head: fx.head, inc: *fx.inc, smt: *fx.smtProof,
@@ -101,13 +102,16 @@ func mustRealGather(t *testing.T, n, k int) (*realGather, map[cosign.NetworkID]p
 // buildRealFixture assembles the genesis-only real-crypto fixture (n witnesses,
 // quorum k). Extracted from mustRealGather so the live-HTTP e2e can serve the same
 // artifacts; mirrors the SDK's own v2 fixture, using only public APIs.
-func buildRealFixture(t *testing.T, n, k int) *realFixture {
+func buildRealFixture(t *testing.T, n, k int, require bool) *realFixture {
 	t.Helper()
 	ctx := context.Background()
 
-	// 1. Genesis witnesses (real secp256k1 did:key) + their signers.
+	// 1. Genesis witnesses (real secp256k1 did:key) + their signers. The raw
+	// keys are kept so a require-mode fixture can run the genesis ceremony
+	// (EndorseGenesis) with the SAME keys that constitute the network.
 	dids := make([]string, n)
 	signers := make([]cosign.WitnessSigner, n)
+	witnessKeys := make([]*ecdsa.PrivateKey, n)
 	for i := 0; i < n; i++ {
 		kp, err := sdkdid.GenerateDIDKeySecp256k1()
 		if err != nil {
@@ -115,6 +119,7 @@ func buildRealFixture(t *testing.T, n, k int) *realFixture {
 		}
 		dids[i] = kp.DID
 		signers[i] = cosign.NewECDSAWitnessSigner(kp.PrivateKey)
+		witnessKeys[i] = kp.PrivateKey
 	}
 
 	// 2. Bootstrap → canonical → network id.
@@ -132,6 +137,20 @@ func buildRealFixture(t *testing.T, n, k int) *realFixture {
 			AllowedCosignSchemeTags: []uint8{0x01},
 			MinSignaturesPerEntry:   1,
 		},
+	}
+	if require {
+		// Require-endorsement network: the constitution is only valid with a
+		// genesis ceremony. The policy is canonical-bytes material, so it is set
+		// BEFORE IDs()/CanonicalBytes; every witness key then endorses (N-of-N).
+		bdoc.GenesisEndorsementPolicy = network.GenesisEndorsementRequire
+		base := *bdoc
+		for _, wk := range witnessKeys {
+			end, eerr := network.EndorseGenesis(base, wk)
+			if eerr != nil {
+				t.Fatalf("EndorseGenesis: %v", eerr)
+			}
+			bdoc.GenesisEndorsements = append(bdoc.GenesisEndorsements, end)
+		}
 	}
 	ids, err := bdoc.IDs()
 	if err != nil {
