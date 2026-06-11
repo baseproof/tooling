@@ -126,6 +126,12 @@ func run(outDir, outBootstrap, logDID, networkName string, witnessCount int, sch
 		ExchangeDID:       logDID,
 		NetworkName:       networkName,
 		GenesisWitnessSet: genesisDIDs,
+		// GenesisQuorumK is REQUIRED since rc4 and NetworkID-bound: the
+		// constitution is the single source of truth for K. The fixture
+		// generator mints a simple majority (N/2+1), which satisfies the
+		// quorum-intersection invariant 2K>N for every N — matching
+		// init-network's auto default so either tool mints the same shape.
+		GenesisQuorumK: len(genesisDIDs)/2 + 1,
 		GenesisTreeHead: network.GenesisTreeHead{
 			RootHash: zeroRootHash,
 			TreeSize: 0,

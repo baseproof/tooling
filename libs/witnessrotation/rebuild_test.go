@@ -23,6 +23,7 @@ import (
 	"github.com/baseproof/baseproof/crypto/signatures"
 	"github.com/baseproof/baseproof/types"
 	"github.com/baseproof/baseproof/witness"
+	"github.com/baseproof/baseproof/witness/witnesstest"
 )
 
 var rebuildNetID = func() cosign.NetworkID {
@@ -35,7 +36,10 @@ var rebuildNetID = func() cosign.NetworkID {
 
 const rbLogDID = "did:web:court.rebuild.test"
 
+// setKit is backed by the SDK fixture kit; set/keys/privs alias the kit's
+// fields for the head-cosigning helpers below.
 type setKit struct {
+	ws    *witnesstest.Set
 	set   *cosign.WitnessKeySet
 	keys  []types.WitnessPublicKey
 	privs []*ecdsa.PrivateKey
@@ -43,46 +47,16 @@ type setKit struct {
 
 func newKit(t *testing.T, n, k int) setKit {
 	t.Helper()
-	keys := make([]types.WitnessPublicKey, n)
-	privs := make([]*ecdsa.PrivateKey, n)
-	for i := 0; i < n; i++ {
-		p, err := signatures.GenerateKey()
-		if err != nil {
-			t.Fatalf("GenerateKey: %v", err)
-		}
-		pub := signatures.PubKeyBytes(&p.PublicKey)
-		keys[i] = types.WitnessPublicKey{ID: sha256.Sum256(pub), PublicKey: pub, SchemeTag: signatures.SchemeECDSA}
-		privs[i] = p
-	}
-	set, err := cosign.NewWitnessKeySet(keys, rebuildNetID, k, nil)
-	if err != nil {
-		t.Fatalf("NewWitnessKeySet: %v", err)
-	}
-	return setKit{set, keys, privs}
+	ws := witnesstest.NewSet(t, rebuildNetID, n, k)
+	return setKit{ws: ws, set: ws.KeySet, keys: ws.Keys, privs: ws.Privs}
 }
 
+// rotation mints a complete old → nw rotation through the production assembly
+// path (the first `sig` old members authorize, every joiner countersigns —
+// Step-6 consent) and returns the canonical on-log entry bytes carrying it.
 func rotation(t *testing.T, old, nw setKit, sig int) []byte {
 	t.Helper()
-	payload := cosign.NewRotationPayloadSHA256(witness.ComputeSetHash(nw.keys))
-	sign := func(k setKit) []types.WitnessSignature {
-		out := make([]types.WitnessSignature, sig)
-		for i := 0; i < sig; i++ {
-			sb, err := cosign.SignECDSA(payload, rebuildNetID, cosign.HashAlgoSHA256, k.privs[i])
-			if err != nil {
-				t.Fatalf("SignECDSA: %v", err)
-			}
-			out[i] = types.WitnessSignature{PubKeyID: k.keys[i].ID, SchemeTag: signatures.SchemeECDSA, SigBytes: sb}
-		}
-		return out
-	}
-	rot := types.WitnessRotation{
-		CurrentSetHash:    witness.ComputeSetHash(old.keys),
-		NewSet:            nw.keys,
-		SchemeTagOld:      signatures.SchemeECDSA,
-		SchemeTagNew:      signatures.SchemeECDSA,
-		CurrentSignatures: sign(old),
-		NewSignatures:     sign(nw),
-	}
+	rot := witnesstest.MintRotation(t, rebuildNetID, old.ws, nw.ws, sig)
 	payloadBytes, err := witness.EncodeWitnessRotationPayload(rot)
 	if err != nil {
 		t.Fatalf("Encode: %v", err)

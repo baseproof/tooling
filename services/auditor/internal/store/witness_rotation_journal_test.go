@@ -18,7 +18,6 @@ package store
 import (
 	"context"
 	"crypto/ecdsa"
-	"crypto/sha256"
 	"database/sql"
 	"fmt"
 	"os"
@@ -31,6 +30,7 @@ import (
 	"github.com/baseproof/baseproof/crypto/signatures"
 	"github.com/baseproof/baseproof/types"
 	"github.com/baseproof/baseproof/witness"
+	"github.com/baseproof/baseproof/witness/witnesstest"
 )
 
 // rotTestNetID is a fixed non-zero network id (NewWitnessKeySet rejects zero).
@@ -42,62 +42,20 @@ func rotTestNetID() cosign.NetworkID {
 	return n
 }
 
-// genWitnessSet builds an n-key, k-quorum ECDSA witness set + its private keys
-// (the private keys are needed to sign rotations / cosign heads under the set).
-func genWitnessSet(t *testing.T, n, k int, netID cosign.NetworkID) (
-	*cosign.WitnessKeySet, []types.WitnessPublicKey, []*ecdsa.PrivateKey,
-) {
+// genWitnessSet mints an n-key, k-quorum ECDSA witness set via the SDK fixture
+// kit (the kit's private keys sign rotations / cosign heads under the set).
+func genWitnessSet(t *testing.T, n, k int, netID cosign.NetworkID) *witnesstest.Set {
 	t.Helper()
-	keys := make([]types.WitnessPublicKey, n)
-	privs := make([]*ecdsa.PrivateKey, n)
-	for i := 0; i < n; i++ {
-		priv, err := signatures.GenerateKey()
-		if err != nil {
-			t.Fatalf("GenerateKey: %v", err)
-		}
-		pub := signatures.PubKeyBytes(&priv.PublicKey)
-		keys[i] = types.WitnessPublicKey{
-			ID:        sha256.Sum256(pub),
-			PublicKey: pub,
-			SchemeTag: signatures.SchemeECDSA,
-		}
-		privs[i] = priv
-	}
-	set, err := cosign.NewWitnessKeySet(keys, netID, k, nil)
-	if err != nil {
-		t.Fatalf("NewWitnessKeySet: %v", err)
-	}
-	return set, keys, privs
+	return witnesstest.NewSet(t, netID, n, k)
 }
 
-// buildRotation builds a valid rotation oldKeys → newKeys, signed by sigCount
-// of the OLD set's keys over the universal cosign rotation payload. Mirrors the
-// SDK's buildValidRotation; witness.VerifyRotation(rotation, oldSet) accepts it.
-func buildRotation(
-	t *testing.T,
-	oldKeys []types.WitnessPublicKey, oldPrivs []*ecdsa.PrivateKey,
-	newKeys []types.WitnessPublicKey, sigCount int, netID cosign.NetworkID,
-) types.WitnessRotation {
+// buildRotation mints a valid rotation old → next through the production
+// assembly path: the first sigCount OLD members authorize and every joiner
+// countersigns (Step-6 consent), so witness.VerifyRotation accepts it under
+// every current rule.
+func buildRotation(t *testing.T, old, next *witnesstest.Set, sigCount int, netID cosign.NetworkID) types.WitnessRotation {
 	t.Helper()
-	payload := cosign.NewRotationPayloadSHA256(witness.ComputeSetHash(newKeys))
-	sigs := make([]types.WitnessSignature, sigCount)
-	for i := 0; i < sigCount; i++ {
-		sb, err := cosign.SignECDSA(payload, netID, cosign.HashAlgoSHA256, oldPrivs[i])
-		if err != nil {
-			t.Fatalf("SignECDSA rotation: %v", err)
-		}
-		sigs[i] = types.WitnessSignature{
-			PubKeyID:  oldKeys[i].ID,
-			SchemeTag: signatures.SchemeECDSA,
-			SigBytes:  sb,
-		}
-	}
-	return types.WitnessRotation{
-		CurrentSetHash:    witness.ComputeSetHash(oldKeys),
-		NewSet:            newKeys,
-		SchemeTagOld:      signatures.SchemeECDSA,
-		CurrentSignatures: sigs,
-	}
+	return witnesstest.MintRotation(t, netID, old, next, sigCount)
 }
 
 // cosignHead produces a K-of-N cosigned tree head signed by the supplied set's
@@ -149,18 +107,23 @@ func buildSCN02Chain(t *testing.T, logDID string) scn02Chain {
 	t.Helper()
 	const n, k = 5, 3
 	netID := rotTestNetID()
-	s0, k0, p0 := genWitnessSet(t, n, k, netID)
-	s1, k1, p1 := genWitnessSet(t, n, k, netID)
-	s2, k2, _ := genWitnessSet(t, n, k, netID)
+	s0 := genWitnessSet(t, n, k, netID)
+	s1 := genWitnessSet(t, n, k, netID)
+	s2 := genWitnessSet(t, n, k, netID)
 
-	r1 := buildRotation(t, k0, p0, k1, k, netID) // S0 authorizes S1
-	r2 := buildRotation(t, k1, p1, k2, k, netID) // S1 authorizes S2
+	r1 := buildRotation(t, s0, s1, k, netID) // S0 authorizes S1
+	r2 := buildRotation(t, s1, s2, k, netID) // S1 authorizes S2
 
 	records := []types.WitnessRotationRecord{
 		{Rotation: r1, EffectivePos: types.LogPosition{LogDID: logDID, Sequence: 100}},
 		{Rotation: r2, EffectivePos: types.LogPosition{LogDID: logDID, Sequence: 200}},
 	}
-	return scn02Chain{netID: netID, logDID: logDID, s0: s0, s1: s1, s2: s2, k1: k1, p1: p1, records: records}
+	return scn02Chain{
+		netID: netID, logDID: logDID,
+		s0: s0.KeySet, s1: s1.KeySet, s2: s2.KeySet,
+		k1: s1.Keys, p1: s1.Privs,
+		records: records,
+	}
 }
 
 func TestWitnessSetAt_ReconstructsHistoricalSet_ZTSCN02(t *testing.T) {

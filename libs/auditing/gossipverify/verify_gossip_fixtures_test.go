@@ -2,15 +2,13 @@ package gossipverify
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/json"
 	"testing"
 
 	"github.com/baseproof/baseproof/crypto/cosign"
-	"github.com/baseproof/baseproof/crypto/signatures"
 	"github.com/baseproof/baseproof/gossip"
 	"github.com/baseproof/baseproof/types"
-	"github.com/baseproof/baseproof/witness"
+	"github.com/baseproof/baseproof/witness/witnesstest"
 )
 
 func vgNetworkID() cosign.NetworkID {
@@ -22,8 +20,10 @@ func vgNetworkID() cosign.NetworkID {
 }
 
 // vgWitnesses is a K-of-N ECDSA witness keyset plus its signers, for producing
-// real cosignatures over tree heads and rotation payloads.
+// real cosignatures over tree heads and rotation payloads. Backed by the SDK
+// fixture kit; set/keys alias the kit's fields, signers wrap its private keys.
 type vgWitnesses struct {
+	ws      *witnesstest.Set
 	set     *cosign.WitnessKeySet
 	signers []cosign.WitnessSigner
 	keys    []types.WitnessPublicKey
@@ -33,22 +33,12 @@ type vgWitnesses struct {
 func newVGWitnesses(t *testing.T, n, k int) vgWitnesses {
 	t.Helper()
 	nid := vgNetworkID()
-	keys := make([]types.WitnessPublicKey, n)
+	ws := witnesstest.NewSet(t, nid, n, k)
 	signers := make([]cosign.WitnessSigner, n)
-	for i := 0; i < n; i++ {
-		priv, err := signatures.GenerateKey()
-		if err != nil {
-			t.Fatalf("GenerateKey: %v", err)
-		}
+	for i, priv := range ws.Privs {
 		signers[i] = cosign.NewECDSAWitnessSigner(priv)
-		pub := signatures.PubKeyBytes(&priv.PublicKey)
-		keys[i] = types.WitnessPublicKey{ID: sha256.Sum256(pub), PublicKey: pub, SchemeTag: signatures.SchemeECDSA}
 	}
-	set, err := cosign.NewECDSAWitnessKeySet(keys, nid, k)
-	if err != nil {
-		t.Fatalf("NewECDSAWitnessKeySet: %v", err)
-	}
-	return vgWitnesses{set: set, signers: signers, keys: keys, nid: nid}
+	return vgWitnesses{ws: ws, set: ws.KeySet, signers: signers, keys: ws.Keys, nid: nid}
 }
 
 func (w vgWitnesses) cosignedHead(t *testing.T, size uint64, root byte) types.CosignedTreeHead {
@@ -69,27 +59,14 @@ func (w vgWitnesses) cosignedHead(t *testing.T, size uint64, root byte) types.Co
 	return head
 }
 
-// buildRotation builds a valid SAME-scheme witness rotation cur → newKeys,
-// signed by the current witnesses. Same scheme (ECDSA→ECDSA) means no dual-sign
-// is required by witness.VerifyRotation.
-func (w vgWitnesses) buildRotation(t *testing.T, newKeys []types.WitnessPublicKey) types.WitnessRotation {
+// buildRotation mints a valid SAME-scheme witness rotation w → next through
+// the production assembly path: every current witness authorizes and every
+// joiner countersigns (Step-6 consent). It takes the TARGET KIT (not bare
+// keys) because consent requires the new set's private keys; a rotation to
+// the same kit has zero joiners and is valid once minted.
+func (w vgWitnesses) buildRotation(t *testing.T, next vgWitnesses) types.WitnessRotation {
 	t.Helper()
-	payload := cosign.NewRotationPayloadSHA256(witness.ComputeSetHash(newKeys))
-	sigs := make([]types.WitnessSignature, 0, len(w.signers))
-	for _, s := range w.signers {
-		sig, err := s.Sign(context.Background(), payload, w.nid, cosign.HashAlgoSHA256)
-		if err != nil {
-			t.Fatalf("rotation Sign: %v", err)
-		}
-		sigs = append(sigs, sig)
-	}
-	return types.WitnessRotation{
-		CurrentSetHash:    witness.ComputeSetHash(w.keys),
-		NewSet:            newKeys,
-		SchemeTagOld:      signatures.SchemeECDSA,
-		CurrentSignatures: sigs,
-		SchemeTagNew:      signatures.SchemeECDSA,
-	}
+	return witnesstest.MintRotation(t, w.nid, w.ws, next.ws, len(w.keys))
 }
 
 // wireFinding is the encode-capable finding shape the helper accepts.

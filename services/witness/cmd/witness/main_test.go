@@ -114,6 +114,7 @@ func validBootstrapJSON(t *testing.T) []byte {
 		ExchangeDID:       "did:web:test-ledger.example",
 		NetworkName:       "unit-test",
 		GenesisWitnessSet: []string{"did:key:z6MkUnitTestWitness"},
+		GenesisQuorumK:    1, // REQUIRED since rc4; N=1 ⇒ K=1 (2K>N)
 		GenesisTreeHead: network.GenesisTreeHead{
 			RootHash: "0000000000000000000000000000000000000000000000000000000000000000",
 			TreeSize: 0,

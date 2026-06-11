@@ -9,7 +9,6 @@ package monitoring
 import (
 	"context"
 	"crypto/ecdsa"
-	"crypto/sha256"
 	"testing"
 	"time"
 
@@ -17,7 +16,7 @@ import (
 	"github.com/baseproof/baseproof/crypto/signatures"
 	sdkmon "github.com/baseproof/baseproof/monitoring"
 	"github.com/baseproof/baseproof/types"
-	"github.com/baseproof/baseproof/witness"
+	"github.com/baseproof/baseproof/witness/witnesstest"
 )
 
 var wrcNetID = func() cosign.NetworkID {
@@ -30,7 +29,10 @@ var wrcNetID = func() cosign.NetworkID {
 
 const wrcLogDID = "did:web:rotation.audit.test"
 
+// wrcKit is backed by the SDK fixture kit; set/keys/privs alias the kit's
+// fields for the head-cosigning helpers below.
 type wrcKit struct {
+	ws    *witnesstest.Set
 	set   *cosign.WitnessKeySet
 	keys  []types.WitnessPublicKey
 	privs []*ecdsa.PrivateKey
@@ -38,42 +40,17 @@ type wrcKit struct {
 
 func newWRCKit(t *testing.T, n, k int) wrcKit {
 	t.Helper()
-	keys := make([]types.WitnessPublicKey, n)
-	privs := make([]*ecdsa.PrivateKey, n)
-	for i := 0; i < n; i++ {
-		p, err := signatures.GenerateKey()
-		if err != nil {
-			t.Fatalf("GenerateKey: %v", err)
-		}
-		pub := signatures.PubKeyBytes(&p.PublicKey)
-		keys[i] = types.WitnessPublicKey{ID: sha256.Sum256(pub), PublicKey: pub, SchemeTag: signatures.SchemeECDSA}
-		privs[i] = p
-	}
-	set, err := cosign.NewWitnessKeySet(keys, wrcNetID, k, nil)
-	if err != nil {
-		t.Fatalf("NewWitnessKeySet: %v", err)
-	}
-	return wrcKit{set: set, keys: keys, privs: privs}
+	ws := witnesstest.NewSet(t, wrcNetID, n, k)
+	return wrcKit{ws: ws, set: ws.KeySet, keys: ws.Keys, privs: ws.Privs}
 }
 
+// rotationTo mints a complete w → next rotation through the production
+// assembly path: the old quorum authorizes and every joiner countersigns
+// (Step-6 consent), so the rotation satisfies every verifier rule by
+// construction.
 func (w wrcKit) rotationTo(t *testing.T, next wrcKit) types.WitnessRotation {
 	t.Helper()
-	payload := cosign.NewRotationPayloadSHA256(witness.ComputeSetHash(next.keys))
-	sigs := make([]types.WitnessSignature, w.set.Quorum())
-	for i := 0; i < w.set.Quorum(); i++ {
-		sb, err := cosign.SignECDSA(payload, wrcNetID, cosign.HashAlgoSHA256, w.privs[i])
-		if err != nil {
-			t.Fatalf("SignECDSA: %v", err)
-		}
-		sigs[i] = types.WitnessSignature{PubKeyID: w.keys[i].ID, SchemeTag: signatures.SchemeECDSA, SigBytes: sb}
-	}
-	return types.WitnessRotation{
-		CurrentSetHash:    witness.ComputeSetHash(w.keys),
-		NewSet:            next.keys,
-		SchemeTagOld:      signatures.SchemeECDSA,
-		SchemeTagNew:      signatures.SchemeECDSA,
-		CurrentSignatures: sigs,
-	}
+	return witnesstest.MintRotation(t, wrcNetID, w.ws, next.ws, w.ws.KeySet.Quorum())
 }
 
 func (w wrcKit) cosign(t *testing.T, size uint64, root byte) types.CosignedTreeHead {
