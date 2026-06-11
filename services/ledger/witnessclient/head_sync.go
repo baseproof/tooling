@@ -361,26 +361,20 @@ func (hs *HeadSync) RequestCosignatures(ctx context.Context, head types.TreeHead
 	// roots, closing the receipt/state-map forgery vectors.
 	payload := cosign.NewTreeHeadPayload(head)
 
-	// TEMPORARY BRIDGE — DELETE AT THE NEXT SDK BUMP. The rule "no invalid
-	// payload reaches collection" belongs to the SDK's cosign.Collect (the
-	// package that owns Validate enforces it at its own boundary, fixing the
-	// error taxonomy for every consumer at once); rc5's Collect does not yet
-	// enforce it, so this one consumer bridges the gap. Without a gate an
-	// invalid head costs a full K-of-N round-trip and comes back disguised as
-	// a transient quorum failure — it is neither transient nor the witnesses'
-	// fault. The error wraps cosign.ErrInvalidPayload: the deterministic class
-	// the checkpoint loop FAULTS on instead of holding.
-	if verr := payload.Validate(cosign.HashAlgoSHA256); verr != nil {
-		// Validate returns bare field-level errors; bind the typed class here so
-		// the loop's errors.Is(…, cosign.ErrInvalidPayload) branch fires.
-		return types.CosignedTreeHead{}, fmt.Errorf(
-			"witness/head_sync: refusing K-of-N fan-out of an invalid head (tree_size=%d): %w: %w",
-			head.TreeSize, cosign.ErrInvalidPayload, verr)
-	}
-
+	// "No invalid payload reaches collection" is enforced by the rule's owner:
+	// the SDK's Collect (since v0.0.4-rc6) validates before any fan-out and
+	// refuses with the typed cosign.ErrInvalidPayload — the deterministic
+	// class the checkpoint loop FAULTS on instead of holding. (The temporary
+	// rc5-era bridge guard that lived here is deleted; the unchanged seam
+	// test still pins the refusal + zero fan-out, now proving the SDK gate.)
 	result, err := hs.collector.Collect(ctx, payload)
 	if err != nil {
-		hs.logQuorumFailure(err, result, head)
+		// The quorum-failure log is for the TRANSIENT class only — an invalid
+		// payload is the caller's bug, not a witness outage, and logging it as
+		// one would corrupt the operator-facing signal the SRE counter feeds.
+		if !errors.Is(err, cosign.ErrInvalidPayload) {
+			hs.logQuorumFailure(err, result, head)
+		}
 		return types.CosignedTreeHead{}, fmt.Errorf("witness/head_sync: collect: %w", err)
 	}
 
