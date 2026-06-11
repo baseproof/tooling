@@ -136,7 +136,7 @@ override.tf.json
 /rebuild-projection
 /seed-session
 /submit-stamp
-/init-network
+/genesis-ceremony
 
 # --- Node.js / npm / yarn ---
 node_modules/
