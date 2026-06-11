@@ -26,6 +26,23 @@ defaults:
 jobs:
   chaos:
     runs-on: ubuntu-latest
+    # Without a database the entire chaos suite skips its DSN gates and the
+    # job goes green having tested nothing (the shipped-dark mode). The suite
+    # is cheap (~15s) — give it a real Postgres on every run.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: ledger_test
+        ports:
+          - "5432:5432"
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - name: Checkout
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
@@ -39,4 +56,6 @@ jobs:
           go-version-file: services/ledger/go.mod
 
       - name: chaos suite
+        env:
+          BASEPROOF_TEST_DSN: postgres://postgres:postgres@localhost:5432/ledger_test?sslmode=disable
         run: make test-chaos
