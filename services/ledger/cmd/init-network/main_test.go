@@ -10,6 +10,7 @@ import (
 
 	sdkcryptosigs "github.com/baseproof/baseproof/crypto/signatures"
 	sdkdid "github.com/baseproof/baseproof/did"
+	"github.com/baseproof/baseproof/network"
 	sdkwitness "github.com/baseproof/baseproof/witness"
 )
 
@@ -159,7 +160,7 @@ func TestBuildBootstrapDoc_PassesGenesisValidation(t *testing.T) {
 	}
 
 	for _, gating := range []string{"off", "require"} {
-		doc := buildBootstrapDoc("did:web:state:tn:davidson", "clarity-test", gating, []string{did}, addr, 1)
+		doc := buildBootstrapDoc("did:web:state:tn:davidson", "clarity-test", gating, []string{did}, 1, addr, 1)
 		// doc.IDs() runs the SDK's validate() — exactly init-network's gate. A
 		// missing genesis_signature_policy fails here, which is the regression.
 		if _, err := doc.IDs(); err != nil {
@@ -195,7 +196,7 @@ func TestBuildBootstrapDoc_MinSignaturesConfigurable(t *testing.T) {
 	}
 
 	// A configured non-default floor threads through and validates.
-	doc := buildBootstrapDoc("did:web:state:tn:davidson", "clarity-test", "require", []string{did}, addr, 3)
+	doc := buildBootstrapDoc("did:web:state:tn:davidson", "clarity-test", "require", []string{did}, 1, addr, 3)
 	if got := doc.GenesisSignaturePolicy.MinSignaturesPerEntry; got != 3 {
 		t.Fatalf("MinSignaturesPerEntry = %d, want 3 (flag did not thread)", got)
 	}
@@ -205,8 +206,134 @@ func TestBuildBootstrapDoc_MinSignaturesConfigurable(t *testing.T) {
 
 	// A 0 floor is rejected by the SDK at NetworkID derivation, regardless of
 	// the CLI guard — this is the genesis half of the "always > 0" invariant.
-	zero := buildBootstrapDoc("did:web:state:tn:davidson", "clarity-test", "require", []string{did}, addr, 0)
+	zero := buildBootstrapDoc("did:web:state:tn:davidson", "clarity-test", "require", []string{did}, 1, addr, 0)
 	if _, err := zero.IDs(); err == nil {
 		t.Fatal("min-signatures=0 must be rejected by doc.IDs() (admit-unsigned floor)")
+	}
+}
+
+// TestInitNetwork_EmitsConstitutionalK pins the -quorum resolution: the auto
+// default (0) is a simple majority that satisfies 2K>N for representative N,
+// and the resolved K, fed through buildBootstrapDoc, round-trips doc.IDs().
+func TestInitNetwork_EmitsConstitutionalK(t *testing.T) {
+	// Auto-majority resolution per N: 2K>N must hold for every row.
+	for _, tc := range []struct{ n, wantK int }{
+		{1, 1}, {2, 2}, {3, 2}, {4, 3}, {5, 3}, {7, 4},
+	} {
+		k, err := resolveGenesisQuorumK(0, tc.n)
+		if err != nil {
+			t.Fatalf("auto K for N=%d: %v", tc.n, err)
+		}
+		if k != tc.wantK {
+			t.Errorf("auto K for N=%d = %d, want %d", tc.n, k, tc.wantK)
+		}
+		if 2*k <= tc.n {
+			t.Errorf("auto K=%d for N=%d violates 2K>N", k, tc.n)
+		}
+	}
+
+	// For -witnesses 3 the emitted doc carries K=2 and round-trips doc.IDs().
+	dir := t.TempDir()
+	var dids []string
+	for i := 1; i <= 3; i++ {
+		priv, _, err := loadOrGenerateWitnessKey(filepath.Join(dir, "witnesses", fmt.Sprintf("witness-%d.pem", i)))
+		if err != nil {
+			t.Fatalf("witness %d: %v", i, err)
+		}
+		did, err := secp256k1DIDKey(priv)
+		if err != nil {
+			t.Fatalf("witness DID %d: %v", i, err)
+		}
+		dids = append(dids, did)
+	}
+	addr, _, err := loadOrGenerateAdmissionAuthority(filepath.Join(dir, "admission.key"))
+	if err != nil {
+		t.Fatalf("admission authority: %v", err)
+	}
+	k, err := resolveGenesisQuorumK(0, len(dids))
+	if err != nil {
+		t.Fatalf("resolve K: %v", err)
+	}
+	doc := buildBootstrapDoc("did:web:state:tn:davidson", "clarity-test", "require", dids, k, addr, 1)
+	if doc.GenesisQuorumK != 2 {
+		t.Fatalf("emitted GenesisQuorumK = %d, want 2 for N=3", doc.GenesisQuorumK)
+	}
+	if _, err := doc.IDs(); err != nil {
+		t.Fatalf("emitted constitutional doc must round-trip doc.IDs(): %v", err)
+	}
+}
+
+// TestInitNetwork_RefusesDilutingK: asking the tool for a diluting or
+// out-of-range K fails at mint (resolveGenesisQuorumK), not at first boot.
+func TestInitNetwork_RefusesDilutingK(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		k, n    int
+	}{
+		{"diluting 1-of-3", 1, 3},
+		{"diluting 2-of-4", 2, 4},
+		{"diluting 2-of-5", 2, 5},
+		{"K exceeds N", 4, 3},
+	} {
+		if _, err := resolveGenesisQuorumK(tc.k, tc.n); err == nil {
+			t.Errorf("%s: resolveGenesisQuorumK(%d,%d) must fail at mint", tc.name, tc.k, tc.n)
+		}
+	}
+	// The conformant contrast still resolves.
+	if _, err := resolveGenesisQuorumK(2, 3); err != nil {
+		t.Errorf("2-of-3 is conformant (2K>N) and must resolve: %v", err)
+	}
+}
+
+// TestBuildBootstrapDoc_GenesisQuorumK is the producer-side regression for the
+// rc4 invariant: GenesisQuorumK is REQUIRED and bound into the NetworkID, and
+// validate() (inside doc.IDs()) enforces both 1<=K<=N and the
+// quorum-intersection invariant 2K>N. init-network must mint only docs that
+// clear that gate, so the field threads through buildBootstrapDoc and a
+// diluting K (2K<=N) is rejected at NetworkID derivation — the same gate the
+// ledger applies at boot, here at the source.
+func TestBuildBootstrapDoc_GenesisQuorumK(t *testing.T) {
+	dir := t.TempDir()
+	var dids []string
+	for i := 1; i <= 3; i++ { // N=3
+		priv, _, err := loadOrGenerateWitnessKey(filepath.Join(dir, "witnesses", fmt.Sprintf("witness-%d.pem", i)))
+		if err != nil {
+			t.Fatalf("witness %d: %v", i, err)
+		}
+		did, err := secp256k1DIDKey(priv)
+		if err != nil {
+			t.Fatalf("witness DID %d: %v", i, err)
+		}
+		dids = append(dids, did)
+	}
+	addr, _, err := loadOrGenerateAdmissionAuthority(filepath.Join(dir, "admission.key"))
+	if err != nil {
+		t.Fatalf("admission authority: %v", err)
+	}
+	build := func(k int) (network.BootstrapDocument, error) {
+		doc := buildBootstrapDoc("did:web:state:tn:davidson", "clarity-test", "require", dids, k, addr, 1)
+		_, idErr := doc.IDs()
+		return doc, idErr
+	}
+
+	// K=2, N=3: 2*2=4 > 3 — conformant. Threads through and binds into the ID.
+	if doc, err := build(2); err != nil {
+		t.Fatalf("K=2 N=3 must pass SDK validation (2K>N): %v", err)
+	} else if doc.GenesisQuorumK != 2 {
+		t.Fatalf("GenesisQuorumK = %d, want 2 (flag did not thread into the doc)", doc.GenesisQuorumK)
+	}
+
+	// K=1, N=3: 2*1=2 <= 3 — two disjoint 1-quorums could fork. validate() must
+	// reject before a NetworkID can be derived.
+	if _, err := build(1); err == nil {
+		t.Fatal("K=1 N=3 must be rejected by doc.IDs() (2K<=N — quorum-intersection violated)")
+	}
+
+	// K=0 (unset) and K>N are both out of range and rejected.
+	if _, err := build(0); err == nil {
+		t.Fatal("K=0 must be rejected by doc.IDs() (out of range / admit-no-quorum)")
+	}
+	if _, err := build(4); err == nil {
+		t.Fatal("K=4 N=3 must be rejected by doc.IDs() (K>N)")
 	}
 }

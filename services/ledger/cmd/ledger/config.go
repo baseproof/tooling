@@ -815,6 +815,15 @@ func loadConfig() (*Config, error) {
 		// validates it (rejects malformed policy at boot). Held on
 		// Config so wire.go can hand it to SubmissionDeps.
 		cfg.GenesisBootstrapDocument = doc
+
+		// rc4: GenesisQuorumK is the constitutional, NetworkID-bound quorum —
+		// the single source of truth for K. Demote LEDGER_WITNESS_QUORUM_K to a
+		// cross-check (see reconcileWitnessQuorumK).
+		k, kErr := reconcileWitnessQuorumK(doc, cfg.NetworkBootstrapFile)
+		if kErr != nil {
+			return nil, kErr
+		}
+		cfg.WitnessQuorumK = k
 	}
 
 	// Part II.10 — load the federation graph file (if any). Failure
@@ -959,18 +968,48 @@ func (cfg *Config) Validate() error {
 		}
 	}
 
-	// Witness quorum K must be positive when witnesses are
-	// configured (a 0-of-N quorum would never finalize a head).
+	// Witness quorum K must be positive when witnesses are configured (a 0-of-N
+	// quorum would never finalize a head). Under rc4 K is the constitutional
+	// genesis_quorum_k (reconcileWitnessQuorumK), already >0 and 2K>N; this stays
+	// as a defensive floor for the legacy no-bootstrap path.
 	if len(cfg.WitnessEndpoints) > 0 && cfg.WitnessQuorumK <= 0 {
-		return fmt.Errorf("LEDGER_WITNESS_QUORUM_K must be > 0 when LEDGER_WITNESS_ENDPOINTS is set (got %d)",
+		return fmt.Errorf("witness quorum K must be > 0 when LEDGER_WITNESS_ENDPOINTS is set (got %d)",
 			cfg.WitnessQuorumK)
 	}
 	if len(cfg.WitnessEndpoints) > 0 && cfg.WitnessQuorumK > len(cfg.WitnessEndpoints) {
-		return fmt.Errorf("LEDGER_WITNESS_QUORUM_K (%d) cannot exceed LEDGER_WITNESS_ENDPOINTS count (%d)",
+		return fmt.Errorf("witness quorum K (%d) cannot exceed LEDGER_WITNESS_ENDPOINTS count (%d): "+
+			"fewer endpoints than the constitutional quorum can never finalise a head",
 			cfg.WitnessQuorumK, len(cfg.WitnessEndpoints))
 	}
 
 	return nil
+}
+
+// reconcileWitnessQuorumK derives the effective witness quorum K from the
+// constitution and demotes LEDGER_WITNESS_QUORUM_K to a cross-check. Since rc4,
+// genesis_quorum_k is hashed into the NetworkID — the single source of truth
+// for K — so an off-log env knob must never silently override it. The three
+// arms of the demotion rule:
+//
+//	unset            → adopt the constitutional value (doc.GenesisQuorumK)
+//	set, == doc      → honoured (the operator's assertion agrees with the chain)
+//	set, != doc      → fatal (the env disagrees with the identity-bound quorum)
+//
+// doc.IDs() (called by the caller before this) already enforced 1<=K<=N and the
+// quorum-intersection invariant 2K>N, so the returned K is known-valid.
+func reconcileWitnessQuorumK(doc network.BootstrapDocument, bootstrapPath string) (int, error) {
+	envK, set, perr := envIntLookup("LEDGER_WITNESS_QUORUM_K")
+	if perr != nil {
+		return 0, perr
+	}
+	if set && envK != doc.GenesisQuorumK {
+		return 0, fmt.Errorf(
+			"LEDGER_WITNESS_QUORUM_K=%d disagrees with the constitutional genesis_quorum_k=%d in %s: "+
+				"the quorum is bound into the NetworkID, so an env override cannot change it — "+
+				"unset LEDGER_WITNESS_QUORUM_K to adopt the constitutional value",
+			envK, doc.GenesisQuorumK, bootstrapPath)
+	}
+	return doc.GenesisQuorumK, nil
 }
 
 // minPgPoolConns is the hard floor the pool must clear regardless of

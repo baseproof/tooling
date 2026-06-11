@@ -92,6 +92,11 @@ func BuildBootstrap(t *testing.T, dir string, exchangeDID, networkName string, w
 		ExchangeDID:       exchangeDID,
 		NetworkName:       networkName,
 		GenesisWitnessSet: append([]string(nil), witnessDIDs...),
+		// GenesisQuorumK is REQUIRED under rc4 (bound into the NetworkID). The
+		// harness is a bootstrap producer, so it mints a constitutional quorum:
+		// a simple majority (N/2+1), which always satisfies the
+		// quorum-intersection invariant 2K>N that validate() enforces.
+		GenesisQuorumK: len(witnessDIDs)/2 + 1,
 		GenesisTreeHead: network.GenesisTreeHead{
 			RootHash: "0000000000000000000000000000000000000000000000000000000000000000",
 			TreeSize: 0,
@@ -99,6 +104,15 @@ func BuildBootstrap(t *testing.T, dir string, exchangeDID, networkName string, w
 		GenesisAdmissionPolicy: network.GenesisAdmissionPolicy{
 			GatingRequired: false,
 			CostMode:       "uncharged",
+		},
+		// GenesisSignaturePolicy is REQUIRED (hashed into the NetworkID): emit
+		// the zero-trust default — secp256k1-ECDSA entry signatures + ECDSA
+		// cosignatures — matching init-network so a chaos network admits the
+		// same set a real one does.
+		GenesisSignaturePolicy: network.SignaturePolicy{
+			AllowedEntrySigSchemes:  []uint16{0x0001},
+			AllowedCosignSchemeTags: []uint8{0x01},
+			MinSignaturesPerEntry:   1,
 		},
 	}
 	// Validate by computing IDs — surfaces malformed inputs at

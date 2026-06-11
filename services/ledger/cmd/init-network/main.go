@@ -77,6 +77,14 @@ func main() {
 			"<out-dir>/witnesses/witness-<i>.pem and its DID is added "+
 			"to GenesisWitnessSet. The Ledger writer is NEVER in the "+
 			"witness set — that's a network role, not a Ledger role.")
+	quorum := flag.Int("quorum", 0,
+		"genesis witness quorum K-of-N — the GenesisQuorumK bound into the "+
+			"NetworkID (REQUIRED since baseproof SDK rc4: the constitution is the "+
+			"single source of truth for K, so the ledger no longer takes it from "+
+			"the LEDGER_WITNESS_QUORUM_K env). 0 = auto majority (N/2+1). MUST "+
+			"satisfy 1<=K<=N AND 2K>N — the quorum-intersection invariant: with "+
+			"two disjoint K-quorums a fork stops being provable equivocation, so "+
+			"the SDK's validate() rejects 2K<=N before the doc can be minted.")
 	outLedgerKey := flag.String("out-ledger-key", "",
 		"path to write the ledger's OPERATIONAL secp256k1 signer key as a "+
 			"raw 32-byte hex scalar (the format LEDGER_SIGNER_KEY_FILE reads). "+
@@ -100,6 +108,13 @@ func main() {
 	}
 	if *minSignatures < 1 || *minSignatures > 64 {
 		log.Fatalf("init-network: -min-signatures must be in [1, 64] (got %d); a 0 floor would admit unsigned entries", *minSignatures)
+	}
+	// Resolve the genesis quorum K (see resolveGenesisQuorumK): 0 ⇒ auto
+	// majority. An out-of-range or diluting K fails here at mint, not at the
+	// network's first boot.
+	quorumK, qErr := resolveGenesisQuorumK(*quorum, *witnessCount)
+	if qErr != nil {
+		log.Fatalf("init-network: %v", qErr)
 	}
 
 	bootstrapPath := *outBootstrap
@@ -160,7 +175,7 @@ func main() {
 			ifGenerated(ledgerGen), *outLedgerKey, ledgerDID)
 	}
 
-	doc := buildBootstrapDoc(*logDID, *networkName, *gating, genesisDIDs, genesisAuthorityAddr, uint8(*minSignatures))
+	doc := buildBootstrapDoc(*logDID, *networkName, *gating, genesisDIDs, quorumK, genesisAuthorityAddr, uint8(*minSignatures))
 	// IDs() validates the document internally + returns the
 	// derived (NetworkID, NetworkUUID, NetworkDID) — we discard
 	// the IDs and use the validation as our gate.
@@ -184,17 +199,46 @@ func main() {
 	fmt.Printf("init-network: bootstrap     = %s\n", bootstrapPath)
 }
 
+// resolveGenesisQuorumK turns the -quorum flag into the constitutional
+// GenesisQuorumK bound into the NetworkID. flagK==0 means "auto": a simple
+// majority (N/2+1), which satisfies the quorum-intersection invariant 2K>N for
+// every N≥1. An explicit flagK is validated against the same two gates the
+// SDK's validate() applies inside doc.IDs() — 1<=K<=N and 2K>N — so a network
+// that could fork undetectably (two disjoint K-quorums when 2K<=N) can never be
+// minted by this tool, and the operator sees a precise message here rather than
+// a generic NetworkID-derivation failure later.
+func resolveGenesisQuorumK(flagK, witnessCount int) (int, error) {
+	k := flagK
+	if k == 0 {
+		k = witnessCount/2 + 1 // simple majority — 2K>N holds for all N≥1
+	}
+	if k < 1 || k > witnessCount {
+		return 0, fmt.Errorf("-quorum K=%d out of range 1..%d (N witnesses)", k, witnessCount)
+	}
+	if 2*k <= witnessCount {
+		return 0, fmt.Errorf("-quorum K=%d violates the quorum-intersection invariant 2K>N for N=%d: "+
+			"two disjoint K-quorums could each finalise a different head, making a fork unprovable equivocation", k, witnessCount)
+	}
+	return k, nil
+}
+
 // buildBootstrapDoc assembles the genesis BootstrapDocument from the resolved
 // inputs. Extracted from main so the document's validity is unit-testable (see
 // main_test.go) — the SDK's validate() runs inside doc.IDs(), and a missing
 // genesis_signature_policy (required since SDK v1.31) is rejected as an
 // "admit-nothing" policy, which is exactly the regression this guards.
-func buildBootstrapDoc(logDID, networkName, gating string, genesisDIDs []string, genesisAuthorityAddr string, minSignatures uint8) network.BootstrapDocument {
+func buildBootstrapDoc(logDID, networkName, gating string, genesisDIDs []string, quorumK int, genesisAuthorityAddr string, minSignatures uint8) network.BootstrapDocument {
 	return network.BootstrapDocument{
 		ProtocolVersion:   "v1",
 		ExchangeDID:       logDID,
 		NetworkName:       networkName,
 		GenesisWitnessSet: genesisDIDs,
+		// GenesisQuorumK is REQUIRED since baseproof SDK rc4 and is hashed into
+		// the NetworkID: the constitution is the single source of truth for the
+		// K-of-N quorum, so every consumer (ledger, auditor, CLI) derives K from
+		// the verified doc rather than from an off-log config knob. validate()
+		// enforces 1<=K<=N and the quorum-intersection invariant 2K>N.
+		GenesisQuorumK: quorumK,
 		GenesisTreeHead: network.GenesisTreeHead{
 			RootHash: "0000000000000000000000000000000000000000000000000000000000000000",
 			TreeSize: 0,
