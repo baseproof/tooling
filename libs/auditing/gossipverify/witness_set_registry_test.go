@@ -39,7 +39,7 @@ func TestWitnessSetRegistry_ApplyRotation_HappyPath(t *testing.T) {
 	next := newVGWitnesses(t, 3, 2) // fresh keys
 	r := NewWitnessSetRegistry(map[string]*cosign.WitnessKeySet{"did:log": cur.set}, cur.nid)
 
-	if err := r.ApplyRotation("did:log", cur.buildRotation(t, next.keys), 2); err != nil {
+	if err := r.ApplyRotation("did:log", cur.buildRotation(t, next), 2); err != nil {
 		t.Fatalf("ApplyRotation: %v", err)
 	}
 	got, _ := r.Get("did:log")
@@ -79,7 +79,7 @@ func TestWitnessSetRegistry_ApplyRotation_StaleRotationRejected(t *testing.T) {
 	next := newVGWitnesses(t, 3, 2)
 	r := NewWitnessSetRegistry(map[string]*cosign.WitnessKeySet{"did:log": gen.set}, gen.nid)
 
-	staleRot := gen.buildRotation(t, next.keys) // valid against gen
+	staleRot := gen.buildRotation(t, next) // valid against gen
 	if err := r.ApplyRotation("did:log", staleRot, 2); err != nil {
 		t.Fatalf("first ApplyRotation: %v", err)
 	}
@@ -93,7 +93,7 @@ func TestWitnessSetRegistry_ApplyRotation_StaleRotationRejected(t *testing.T) {
 func TestWitnessSetRegistry_ApplyRotation_UnknownLog(t *testing.T) {
 	cur := newVGWitnesses(t, 1, 1)
 	r := NewWitnessSetRegistry(map[string]*cosign.WitnessKeySet{"did:log": cur.set}, cur.nid)
-	if err := r.ApplyRotation("did:other", cur.buildRotation(t, cur.keys), 1); !errors.Is(err, ErrWitnessRegistry) {
+	if err := r.ApplyRotation("did:other", cur.buildRotation(t, cur), 1); !errors.Is(err, ErrWitnessRegistry) {
 		t.Fatalf("err = %v, want ErrWitnessRegistry", err)
 	}
 }
@@ -106,7 +106,7 @@ func TestWitnessSetRegistry_ApplyVerifiedRotation_InheritsQuorum(t *testing.T) {
 	next := newVGWitnesses(t, 3, 3) // fresh keys
 	r := NewWitnessSetRegistry(map[string]*cosign.WitnessKeySet{"did:log": cur.set}, cur.nid)
 
-	if err := r.ApplyVerifiedRotation("did:log", cur.buildRotation(t, next.keys)); err != nil {
+	if err := r.ApplyVerifiedRotation("did:log", cur.buildRotation(t, next)); err != nil {
 		t.Fatalf("ApplyVerifiedRotation: %v", err)
 	}
 	got, _ := r.Get("did:log")
@@ -139,7 +139,7 @@ func TestWitnessSetRegistry_ApplyVerifiedRotation_PreservesBLSVerifier(t *testin
 	}
 	r := NewWitnessSetRegistry(map[string]*cosign.WitnessKeySet{"did:log": blsCapable}, cur.nid)
 
-	if err := r.ApplyVerifiedRotation("did:log", cur.buildRotation(t, next.keys)); err != nil {
+	if err := r.ApplyVerifiedRotation("did:log", cur.buildRotation(t, next)); err != nil {
 		t.Fatalf("ApplyVerifiedRotation: %v", err)
 	}
 	got, _ := r.Get("did:log")
@@ -189,7 +189,7 @@ func TestWitnessSetRegistry_RotationPreservesPerSetNetworkID(t *testing.T) {
 	}
 	r := NewWitnessSetRegistry(map[string]*cosign.WitnessKeySet{"did:peerlog": cur.set}, localNID)
 
-	if err := r.ApplyVerifiedRotation("did:peerlog", cur.buildRotation(t, next.keys)); err != nil {
+	if err := r.ApplyVerifiedRotation("did:peerlog", cur.buildRotation(t, next)); err != nil {
 		t.Fatalf("ApplyVerifiedRotation: %v", err)
 	}
 	got, _ := r.Get("did:peerlog")

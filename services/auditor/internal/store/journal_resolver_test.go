@@ -22,11 +22,10 @@ import (
 	"time"
 
 	"github.com/baseproof/baseproof/crypto/cosign"
-	"github.com/baseproof/baseproof/crypto/signatures"
 	"github.com/baseproof/baseproof/gossip"
 	"github.com/baseproof/baseproof/gossip/findings"
 	"github.com/baseproof/baseproof/types"
-	"github.com/baseproof/baseproof/witness"
+	"github.com/baseproof/baseproof/witness/witnesstest"
 	"github.com/baseproof/tooling/libs/auditing/gossipverify"
 	"github.com/baseproof/tooling/libs/witnessrotation"
 	"github.com/baseproof/tooling/services/auditor/internal/equivocation"
@@ -234,47 +233,29 @@ func TestSTHHeadSource_DecodesAndTranslates(t *testing.T) {
 	}
 }
 
-// witnessSetKitHWS bundles a set + keys + privs (genWitnessSet returns the trio).
-// Relocated here when the scan-per-resolution HistoricalWitnessSetResolver was
-// deleted (superseded by this journal-first resolver).
+// witnessSetKitHWS bundles a fixture-kit set; set/keys/privs alias the kit's
+// fields. Relocated here when the scan-per-resolution
+// HistoricalWitnessSetResolver was deleted (superseded by this journal-first
+// resolver).
 type witnessSetKitHWS struct {
+	ws    *witnesstest.Set
 	set   *cosign.WitnessKeySet
 	keys  []types.WitnessPublicKey
 	privs []*ecdsa.PrivateKey
 }
 
-
 func newKitHWS(t *testing.T, n, k int, netID cosign.NetworkID) witnessSetKitHWS {
-	set, keys, privs := genWitnessSet(t, n, k, netID)
-	return witnessSetKitHWS{set: set, keys: keys, privs: privs}
+	ws := genWitnessSet(t, n, k, netID)
+	return witnessSetKitHWS{ws: ws, set: ws.KeySet, keys: ws.Keys, privs: ws.Privs}
 }
 
-
-// dualSignedRotation builds an ON-LOG-encodable rotation (both scheme tags set
-// + both signature slices non-empty): OLD set authorizes the new-set hash, NEW
-// set accepts it. EncodeWitnessRotationPayload requires this dual-signed form
-// (the package-level buildRotation is gossip-only and lacks NewSignatures).
+// dualSignedRotation mints an ON-LOG-encodable rotation (both scheme tags set
+// + both signature slices non-empty) through the production assembly path:
+// the first sigCount OLD members authorize, every joiner countersigns
+// (Step-6 consent), and the result passes EncodeWitnessRotationPayload's
+// dual-signed structural validation by construction.
 func dualSignedRotation(t *testing.T, old, nw witnessSetKitHWS, sigCount int, netID cosign.NetworkID) types.WitnessRotation {
 	t.Helper()
-	payload := cosign.NewRotationPayloadSHA256(witness.ComputeSetHash(nw.keys))
-	sign := func(kit witnessSetKitHWS) []types.WitnessSignature {
-		out := make([]types.WitnessSignature, sigCount)
-		for i := 0; i < sigCount; i++ {
-			sb, err := cosign.SignECDSA(payload, netID, cosign.HashAlgoSHA256, kit.privs[i])
-			if err != nil {
-				t.Fatalf("SignECDSA rotation: %v", err)
-			}
-			out[i] = types.WitnessSignature{PubKeyID: kit.keys[i].ID, SchemeTag: signatures.SchemeECDSA, SigBytes: sb}
-		}
-		return out
-	}
-	return types.WitnessRotation{
-		CurrentSetHash:    witness.ComputeSetHash(old.keys),
-		NewSet:            nw.keys,
-		SchemeTagOld:      signatures.SchemeECDSA,
-		SchemeTagNew:      signatures.SchemeECDSA,
-		CurrentSignatures: sign(old),
-		NewSignatures:     sign(nw),
-	}
+	return witnesstest.MintRotation(t, netID, old.ws, nw.ws, sigCount)
 }
 

@@ -95,10 +95,9 @@ func TestPG_RotationAT2_LatestRecordedAt(t *testing.T) {
 	}
 
 	netID := rotTestNetID()
-	s0, k0, p0 := genWitnessSet(t, 3, 2, netID)
-	_ = s0
-	_, k1, _ := genWitnessSet(t, 3, 2, netID)
-	rot := buildRotation(t, k0, p0, k1, 2, netID)
+	s0 := genWitnessSet(t, 3, 2, netID)
+	s1 := genWitnessSet(t, 3, 2, netID)
+	rot := buildRotation(t, s0, s1, 2, netID)
 	before := time.Now().Add(-time.Minute)
 	if err := j.RecordRotation(ctx, types.WitnessRotationRecord{
 		Rotation:     rot,
