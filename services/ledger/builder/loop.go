@@ -172,9 +172,28 @@ type MerkleAppender interface {
 // checkpoint cosigns a head over an already-durable root, lagging the commit
 // cursor, so a witness-quorum failure HOLDS the horizon without ever stalling
 // ingestion. Satisfied by *witnessclient.HeadSync.
+//
+// Error contract (stated once; the loop's Step 8 branches on it):
+//
+//   - ErrNoCosigner          — nothing is wired (read-only / trimmed ledger).
+//     A named condition, not a failure: the loop skips publishing.
+//   - cosign.ErrInvalidPayload (wrapped) — the HEAD ITSELF fails the SDK's
+//     payload validation. Deterministic: retrying cannot heal it; the builder
+//     of the head is the bug. The loop faults loudly instead of holding.
+//   - anything else          — the quorum is unreachable (transient). The loop
+//     HOLDS the horizon (commit unaffected) and retries next cycle.
 type WitnessCosigner interface {
 	RequestCosignatures(ctx context.Context, head types.TreeHead) (types.CosignedTreeHead, error)
 }
+
+// ErrNoCosigner is the WitnessCosigner contract's typed "nothing is wired"
+// condition (read-only / trimmed ledger). It replaces the pre-rc5 in-band
+// sentinel — a zero-valued CosignedTreeHead with a nil error — which encoded
+// the control signal on the exact type whose zero fields the SDK rejects, so a
+// zero head could travel through the publish path without anyone noticing.
+// Implementations return it INSTEAD of a zero head; zero-valued heads cease to
+// exist in any flow.
+var ErrNoCosigner = errors.New("builder: no witness cosigner wired (read-only / trimmed ledger)")
 
 // -------------------------------------------------------------------------------------------------
 // 3) BuilderLoop

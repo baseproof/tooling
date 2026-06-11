@@ -37,6 +37,7 @@ import (
 	"github.com/baseproof/baseproof/crypto/signatures"
 	"github.com/baseproof/baseproof/types"
 
+	"github.com/baseproof/tooling/services/ledger/builder"
 	"github.com/baseproof/tooling/services/ledger/store"
 )
 
@@ -266,13 +267,15 @@ func TestNewHeadSync_HappyPath(t *testing.T) {
 }
 
 func TestRequestCosignatures_NilReceiver(t *testing.T) {
+	// The pre-rc5 contract returned a zero CosignedTreeHead with a NIL error —
+	// an in-band sentinel on the exact type whose zero fields the SDK rejects,
+	// which is how a zero head could travel the publish path unnoticed. The
+	// contract is typed now: nothing wired ⇒ builder.ErrNoCosigner, and a nil
+	// error always implies a valid cosigned head.
 	var hs *HeadSync
-	got, err := hs.RequestCosignatures(context.Background(), types.TreeHead{TreeSize: 1})
-	if err != nil {
-		t.Errorf("nil receiver: got err %v, want nil (per documented no-op contract)", err)
-	}
-	if got.TreeSize != 0 {
-		t.Errorf("nil receiver: expected zero CosignedTreeHead, got TreeSize=%d", got.TreeSize)
+	_, err := hs.RequestCosignatures(context.Background(), types.TreeHead{TreeSize: 1})
+	if !errors.Is(err, builder.ErrNoCosigner) {
+		t.Errorf("nil receiver: got err %v, want builder.ErrNoCosigner (typed no-cosigner condition)", err)
 	}
 }
 

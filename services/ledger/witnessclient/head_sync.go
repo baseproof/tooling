@@ -57,6 +57,7 @@ import (
 	"github.com/baseproof/baseproof/crypto/cosign"
 	"github.com/baseproof/baseproof/types"
 
+	"github.com/baseproof/tooling/services/ledger/builder"
 	"github.com/baseproof/tooling/services/ledger/observability"
 	"github.com/baseproof/tooling/services/ledger/store"
 )
@@ -128,8 +129,11 @@ type HeadSyncConfig struct {
 	// EndpointResolverLogDID is the logDID passed to
 	// EndpointResolver.WitnessEndpoints. Typically this binary's
 	// own log DID (cmd/ledger wires it from cfg.LogDID). Empty
-	// disables the resolver-driven snapshot regardless of
-	// EndpointResolver.
+	// with a non-nil EndpointResolver is a CONSTRUCTION ERROR
+	// (NewHeadSync refuses): discovery was requested and an empty
+	// DID would silently disable it, degrading to the legacy
+	// config canary — the silent-URL-substitution posture the
+	// resolver exists to close.
 	EndpointResolverLogDID string
 
 	// EndpointResolverTimeout caps the resolver call at startup.
@@ -228,6 +232,19 @@ func NewHeadSync(cfg HeadSyncConfig, treeStore *store.TreeHeadStore, logger *slo
 	if cfg.QuorumK <= 0 {
 		return nil, fmt.Errorf("witness/head_sync: QuorumK must be > 0")
 	}
+	// A wired resolver with an empty log DID is a CONSTRUCTION error, not a
+	// fallback: the operator asked for on-log endpoint discovery, and an empty
+	// DID would silently disable it — degrading to the legacy config canary,
+	// the exact silent-URL-substitution posture the resolver exists to close.
+	// (The {source="config_canary_fallback", log_did=""} log line is this gap
+	// surfacing at collect time; fail here instead, where it is fixable.)
+	// A nil resolver with config endpoints remains a legitimate mode (tests,
+	// bootstrap window).
+	if cfg.EndpointResolver != nil && cfg.EndpointResolverLogDID == "" {
+		return nil, fmt.Errorf("witness/head_sync: EndpointResolver is wired but EndpointResolverLogDID is empty — " +
+			"on-log endpoint discovery would be silently disabled (config-canary fallback); " +
+			"thread the ledger's log DID or remove the resolver")
+	}
 	if cfg.PerWitnessTimeout <= 0 {
 		cfg.PerWitnessTimeout = 30 * time.Second
 	}
@@ -316,21 +333,26 @@ func (hs *HeadSync) Collector() *cosign.WitnessCollector {
 // CosignedTreeHead so the builder can pass it to
 // MerkleAppender.PublishCosignedCheckpoint after the atomic commit.
 //
-// HARD STALL semantics: a non-nil error MUST cause the builder
-// loop to abort the batch (no commit, no cursor advance). This is
-// the load-bearing wire for Strict STH Finality (Alignment 2):
-// the public CDN cosigned-checkpoint file is updated only on a
-// successful K-of-N collect.
+// CONTRACT (one statement, mirrored at the checkpoint loop's Step 8):
+// on ANY error the PUBLISH aborts — the public CDN cosigned-checkpoint
+// advances only on a successful K-of-N collect (Strict STH Finality,
+// Alignment 2). The COMMIT is unaffected: it was durable before this
+// was called. Only the TRANSIENT class (quorum unreachable) is
+// retried, by the loop's HOLD on the next cycle; the two deterministic
+// classes — builder.ErrNoCosigner (nothing wired) and a head that
+// fails payload validation (wraps cosign.ErrInvalidPayload) — must
+// never be retried, because re-asking cannot change the outcome.
 //
 // Idempotency: the SDK's UNIQUE constraint on
 // tree_head_sigs(tree_size, signer) makes this safe under retry.
 // A re-collect over the same head writes the same rows.
 func (hs *HeadSync) RequestCosignatures(ctx context.Context, head types.TreeHead) (types.CosignedTreeHead, error) {
 	if hs == nil || hs.collector == nil {
-		// No collector wired (test mode, read-only ledger).
-		// Return a zero-value cosigned head so the builder skips
-		// PublishCosignedCheckpoint (head.TreeSize == 0 guard).
-		return types.CosignedTreeHead{}, nil
+		// No collector wired (read-only ledger, trimmed test rig). A TYPED
+		// condition — never a zero-valued head: the old sentinel encoded
+		// "nothing to publish" on the exact type whose zero fields the SDK
+		// rejects, which is how an invalid zero head could travel unnoticed.
+		return types.CosignedTreeHead{}, builder.ErrNoCosigner
 	}
 
 	// Single 104-byte cosign payload (baseproof v1.9.x): the witness
@@ -338,6 +360,24 @@ func (hs *HeadSync) RequestCosignatures(ctx context.Context, head types.TreeHead
 	// There is no V1/V2 toggle — every cosignature covers all three
 	// roots, closing the receipt/state-map forgery vectors.
 	payload := cosign.NewTreeHeadPayload(head)
+
+	// TEMPORARY BRIDGE — DELETE AT THE NEXT SDK BUMP. The rule "no invalid
+	// payload reaches collection" belongs to the SDK's cosign.Collect (the
+	// package that owns Validate enforces it at its own boundary, fixing the
+	// error taxonomy for every consumer at once); rc5's Collect does not yet
+	// enforce it, so this one consumer bridges the gap. Without a gate an
+	// invalid head costs a full K-of-N round-trip and comes back disguised as
+	// a transient quorum failure — it is neither transient nor the witnesses'
+	// fault. The error wraps cosign.ErrInvalidPayload: the deterministic class
+	// the checkpoint loop FAULTS on instead of holding.
+	if verr := payload.Validate(cosign.HashAlgoSHA256); verr != nil {
+		// Validate returns bare field-level errors; bind the typed class here so
+		// the loop's errors.Is(…, cosign.ErrInvalidPayload) branch fires.
+		return types.CosignedTreeHead{}, fmt.Errorf(
+			"witness/head_sync: refusing K-of-N fan-out of an invalid head (tree_size=%d): %w: %w",
+			head.TreeSize, cosign.ErrInvalidPayload, verr)
+	}
+
 	result, err := hs.collector.Collect(ctx, payload)
 	if err != nil {
 		hs.logQuorumFailure(err, result, head)

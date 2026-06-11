@@ -3,10 +3,12 @@ package builder
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 
 	"github.com/baseproof/baseproof/core/smt"
+	"github.com/baseproof/baseproof/crypto/cosign"
 	"github.com/baseproof/baseproof/types"
 )
 
@@ -113,7 +115,7 @@ func (f *fakeRooter) IntegratedSize(context.Context) (uint64, error) {
 }
 
 // fakeWitness records the heads it cosigned and can be forced to fail (witness
-// outage) or to return a zero head (no collector wired).
+// outage) or to report the typed no-cosigner condition (nothing wired).
 type fakeWitness struct {
 	err     error
 	noColl  bool
@@ -126,7 +128,8 @@ func (f *fakeWitness) RequestCosignatures(_ context.Context, head types.TreeHead
 	}
 	f.cosigns = append(f.cosigns, head)
 	if f.noColl {
-		return types.CosignedTreeHead{}, nil // TreeSize == 0 sentinel
+		// The typed contract condition — the zero-head sentinel is dead.
+		return types.CosignedTreeHead{}, ErrNoCosigner
 	}
 	return types.CosignedTreeHead{TreeHead: head}, nil
 }
@@ -340,18 +343,81 @@ func TestCheckpoint_HoldsOnWitnessError(t *testing.T) {
 	}
 }
 
-// TestCheckpoint_NoCollectorNoPublish: a zero-TreeSize cosign return (no witness
-// collector wired — read-only/test ledger) must not publish.
+// TestCheckpoint_NoCollectorNoPublish: the typed ErrNoCosigner condition
+// (read-only / trimmed ledger) is a NAMED SKIP — not a failure, not a hold:
+// nothing publishes, the cycle returns nil, and the SRE quorum-failure hook
+// does not fire (nothing is wrong; nothing is wired).
 func TestCheckpoint_NoCollectorNoPublish(t *testing.T) {
 	commit := &fakeCommit{seq: 3, root: rootN(0x44)}
 	frontier := &fakeFrontier{root: smt.EmptyHash}
 	pub := &fakePublisher{}
 	loop := newLoop(commit, frontier, newFakeTiles(), &fakeWitness{noColl: true}, pub)
+	fired := 0
+	loop.OnWitnessQuorumFailure(func(context.Context) { fired++ })
 	if err := loop.CheckpointOnce(context.Background()); err != nil {
 		t.Fatalf("CheckpointOnce: %v", err)
 	}
 	if len(pub.published) != 0 {
 		t.Fatal("published with no collector wired")
+	}
+	if fired != 0 {
+		t.Fatalf("quorum-failure hook fired %d times on the no-cosigner skip, want 0", fired)
+	}
+}
+
+// TestCheckpoint_InvalidHeadFaults_NeverFansOut pins the factory's
+// postcondition (S1) and the fault class (F1): a committed cursor whose root is
+// ALL-ZERO would produce a head every witness rejects (the SDK's dual-commitment
+// validation). The factory's local Validate refuses it BEFORE any fan-out —
+// the cosigner is never asked, nothing publishes, the SRE quorum hook does not
+// fire (the witnesses are not the problem), and CheckpointOnce FAULTS with the
+// deterministic class (cosign.ErrInvalidPayload) instead of holding: retrying
+// a head that can never validate is the failure mode this closes.
+func TestCheckpoint_InvalidHeadFaults_NeverFansOut(t *testing.T) {
+	commit := &fakeCommit{seq: 3, root: [32]byte{}} // all-zero SMT root: invalid by construction
+	frontier := &fakeFrontier{root: smt.EmptyHash}
+	witness := &fakeWitness{}
+	pub := &fakePublisher{}
+	loop := newLoop(commit, frontier, newFakeTiles(), witness, pub)
+	fired := 0
+	loop.OnWitnessQuorumFailure(func(context.Context) { fired++ })
+
+	err := loop.CheckpointOnce(context.Background())
+	if !errors.Is(err, cosign.ErrInvalidPayload) {
+		t.Fatalf("an unpublishable head must FAULT with cosign.ErrInvalidPayload, got %v", err)
+	}
+	if len(witness.cosigns) != 0 {
+		t.Fatalf("invalid head fanned out to the cosigner %d time(s); the factory must refuse it locally", len(witness.cosigns))
+	}
+	if len(pub.published) != 0 {
+		t.Fatal("published an invalid head")
+	}
+	if fired != 0 {
+		t.Fatalf("quorum-failure hook fired %d times on an invalid-head fault, want 0 (not a quorum problem)", fired)
+	}
+}
+
+// TestCheckpoint_CosignerInvalidPayloadFaults pins F1 independently of the
+// factory (contract drift): if a cosigner ever reports the deterministic
+// invalid-payload class, the loop FAULTS — no hold, no SRE quorum signal, no
+// doomed retry next cycle.
+func TestCheckpoint_CosignerInvalidPayloadFaults(t *testing.T) {
+	commit := &fakeCommit{seq: 7, root: rootN(0x77)}
+	witness := &fakeWitness{err: fmt.Errorf("witness/head_sync: refusing fan-out: %w", cosign.ErrInvalidPayload)}
+	pub := &fakePublisher{}
+	loop := newLoop(commit, &fakeFrontier{root: smt.EmptyHash}, newFakeTiles(), witness, pub)
+	fired := 0
+	loop.OnWitnessQuorumFailure(func(context.Context) { fired++ })
+
+	err := loop.CheckpointOnce(context.Background())
+	if !errors.Is(err, cosign.ErrInvalidPayload) {
+		t.Fatalf("invalid-payload from the cosigner must FAULT, got %v", err)
+	}
+	if fired != 0 {
+		t.Fatalf("quorum-failure hook fired %d times on the deterministic class, want 0", fired)
+	}
+	if len(pub.published) != 0 {
+		t.Fatal("published despite the cosigner refusing the head")
 	}
 }
 
@@ -379,13 +445,20 @@ func TestCheckpoint_SkipsUnchanged(t *testing.T) {
 // because a single committed commentary entry has the SAME (0, EmptyHash) cursor.
 func TestCheckpoint_GenesisSkip(t *testing.T) {
 	commit := &fakeCommit{seq: 0, root: smt.EmptyHash}
+	witness := &fakeWitness{}
 	pub := &fakePublisher{}
-	loop := newLoopR(commit, &fakeFrontier{root: smt.EmptyHash}, newFakeTiles(), &fakeWitness{}, pub, &fakeRooter{integrated: 0})
+	loop := newLoopR(commit, &fakeFrontier{root: smt.EmptyHash}, newFakeTiles(), witness, pub, &fakeRooter{integrated: 0})
 	if err := loop.CheckpointOnce(context.Background()); err != nil {
 		t.Fatalf("CheckpointOnce: %v", err)
 	}
 	if len(pub.published) != 0 {
 		t.Fatal("published over an empty log (integrated size 0)")
+	}
+	// The size-0 impossibility, ASSERTED rather than assumed: an empty log's
+	// cycle never reaches the cosigner, so a witness can never even be asked to
+	// sign a size-0 head (the gate, not signer-side rejection, is the defense).
+	if len(witness.cosigns) != 0 {
+		t.Fatalf("cosigner asked %d time(s) over an empty log, want 0", len(witness.cosigns))
 	}
 }
 

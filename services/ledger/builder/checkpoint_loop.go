@@ -55,6 +55,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/baseproof/baseproof/crypto/cosign"
 	sdklog "github.com/baseproof/baseproof/log"
 	"github.com/baseproof/baseproof/types"
 	"go.opentelemetry.io/otel"
@@ -618,41 +619,29 @@ func (l *CheckpointLoop) CheckpointOnce(ctx context.Context) error {
 		}
 	}
 
-	// ── Step 6: Merkle root at the committed size (deterministic from durable
-	//    tiles). Step 2 already gated treeSize <= integrated, so ErrTilesNotDurable
-	//    here is only a tight race against a shrinking view — HOLD rather than fault. ──
-	rootHash, rErr := l.rooter.RootAtSize(ctx, treeSize)
-	if rErr != nil {
-		if errors.Is(rErr, optessera.ErrTilesNotDurable) {
+	// ── Steps 6–7: build the publishable head through the ONE named factory.
+	//    ErrTilesNotDurable is only a tight race against a shrinking view (Step 2
+	//    already gated treeSize <= integrated) — HOLD rather than fault. Any other
+	//    factory error is deterministic (an invalid head wraps
+	//    cosign.ErrInvalidPayload) and faults the cycle loudly. ──
+	head, hErr := l.buildPublishableHead(ctx, treeSize, cSeq, cRoot)
+	if hErr != nil {
+		if errors.Is(hErr, optessera.ErrTilesNotDurable) {
 			return l.hold(ctx, "merkle_root_not_durable",
-				"tree_size", treeSize, "integrated_size", integrated, "error", rErr)
+				"tree_size", treeSize, "integrated_size", integrated, "error", hErr)
 		}
-		return fmt.Errorf("checkpoint: RootAtSize(%d): %w", treeSize, rErr)
-	}
-	l.logger.DebugContext(ctx, "checkpoint step: root at size",
-		"tree_size", treeSize, "root_hash", fmt.Sprintf("%x", rootHash[:8]))
-
-	// ── Step 7: receipt root over the entries newly covered since the last PUBLISH
-	//    (the delta [lastPublishedSize, cSeq]) — keyed off the cosigned ladder, not
-	//    the tile frontier, so a cosign hold can't orphan the held delta's receipts. ──
-	receiptRoot, rcErr := l.receiptRootForCheckpoint(ctx, cSeq)
-	if rcErr != nil {
-		return fmt.Errorf("checkpoint: receipt root [%d..%d]: %w", l.lastPublishedSize, cSeq, rcErr)
-	}
-	l.logger.DebugContext(ctx, "checkpoint step: receipt root",
-		"from_seq", l.lastPublishedSize, "to_seq", cSeq,
-		"receipt_root", fmt.Sprintf("%x", receiptRoot[:8]))
-
-	head := types.TreeHead{
-		TreeSize:    treeSize,
-		RootHash:    rootHash,
-		SMTRoot:     cRoot,
-		ReceiptRoot: receiptRoot,
+		return hErr
 	}
 
-	// ── Step 8: cosign the durable head (K-of-N). A witness-quorum failure HOLDS
-	//    (horizon frozen, commit unaffected). A zero-TreeSize return means no
-	//    collector is wired (read-only / test ledger) — nothing to publish. ──
+	// ── Step 8: cosign the durable head (K-of-N). The contract, stated once
+	//    (mirrored on WitnessCosigner): publish aborts on any error; the commit
+	//    is already durable; ONLY the transient class retries.
+	//      ErrNoCosigner            → named skip (read-only / trimmed ledger).
+	//      cosign.ErrInvalidPayload → deterministic FAULT — the head we built is
+	//                                 the bug; the factory's Validate makes this
+	//                                 unreachable, so surfacing it means drift.
+	//      anything else            → quorum unreachable — HOLD + SRE signal,
+	//                                 retried next cycle. ──
 	l.logger.DebugContext(ctx, "checkpoint step: request cosignatures",
 		"tree_size", head.TreeSize,
 		"root_hash", fmt.Sprintf("%x", head.RootHash[:8]),
@@ -669,6 +658,19 @@ func (l *CheckpointLoop) CheckpointOnce(ctx context.Context) error {
 	}
 	cosignSpan.End()
 	if cErr != nil {
+		if errors.Is(cErr, ErrNoCosigner) {
+			l.logger.DebugContext(ctx, "checkpoint step: no witness cosigner wired — nothing to publish",
+				"tree_size", treeSize)
+			return nil
+		}
+		if errors.Is(cErr, cosign.ErrInvalidPayload) {
+			// Deterministic: the head fails the SAME validation every witness
+			// applies, so retrying burns K-of-N round-trips on an outcome that
+			// cannot change. Fault the cycle loudly; do NOT fire the quorum-
+			// failure SRE signal (the witnesses are not the problem).
+			return fmt.Errorf("checkpoint: cosigner refused the built head as invalid "+
+				"(deterministic — fix the head's constructor; retry cannot heal): %w", cErr)
+		}
 		// SRE signal (Backpressure Stall): a failed K-of-N cosign request IS a
 		// witness-quorum failure. Fire per cycle so a sustained stall shows a
 		// positive rate(); the hook no-ops until the composition root wires it.
@@ -677,11 +679,6 @@ func (l *CheckpointLoop) CheckpointOnce(ctx context.Context) error {
 		}
 		span.SetAttributes(attribute.String("checkpoint.hold", "witness_quorum_unavailable"))
 		return l.hold(ctx, "witness_quorum_unavailable", "tree_size", treeSize, "error", cErr)
-	}
-	if cosigned.TreeSize == 0 {
-		l.logger.DebugContext(ctx, "checkpoint step: no witness collector wired — nothing to publish",
-			"tree_size", treeSize)
-		return nil
 	}
 	l.logger.DebugContext(ctx, "checkpoint step: cosignatures collected",
 		"tree_size", treeSize, "signatures", len(cosigned.Signatures))
@@ -737,9 +734,9 @@ func (l *CheckpointLoop) CheckpointOnce(ctx context.Context) error {
 	l.lastHoldReason = ""
 	l.logger.InfoContext(ctx, "checkpoint published",
 		"tree_size", treeSize,
-		"smt_root", fmt.Sprintf("%x", cRoot[:8]),
-		"root_hash", fmt.Sprintf("%x", rootHash[:8]),
-		"receipt_root", fmt.Sprintf("%x", receiptRoot[:8]),
+		"smt_root", fmt.Sprintf("%x", head.SMTRoot[:8]),
+		"root_hash", fmt.Sprintf("%x", head.RootHash[:8]),
+		"receipt_root", fmt.Sprintf("%x", head.ReceiptRoot[:8]),
 		"integrated_size", integrated,
 		"signatures", len(cosigned.Signatures),
 	)
@@ -780,6 +777,63 @@ func (l *CheckpointLoop) hold(ctx context.Context, reason string, attrs ...any) 
 // orphaning). lastPublishedSize 0 ⇒ genesis ⇒ the whole committed range [0, cSeq].
 // nil ranger ⇒ the empty ReceiptRoot (the cosign payload accepts a zero ReceiptRoot
 // as "no off-chain receipts").
+// buildPublishableHead is the ONE producer of the head the horizon publishes —
+// the named factory a harness drives instead of re-deriving the recipe. (The
+// fixture-drift incident this closes: a test hand-built a Merkle-only head with
+// an all-zero SMTRoot and burned a full K-of-N round discovering, via opaque
+// quorum noise, what local validation would have said in nanoseconds.)
+//
+// It binds the four fields from their single sources — TreeSize from the
+// committed cursor (store.TreeSizeForCommittedSeq; the +1 lives ONLY there),
+// RootHash from the durable tiles at exactly that size (RootAtSize), SMTRoot
+// from the committed cursor's root, ReceiptRoot over the newly covered delta —
+// and runs the SDK's TreeHeadPayload.Validate before returning. Its
+// postcondition is therefore the Merkle/SMT-alignment contract, assertable at
+// one named return: a head this returns is one the witnesses' own validation
+// accepts (they run the same check inside their signers).
+//
+// Errors: optessera.ErrTilesNotDurable propagates for the caller's HOLD
+// mapping; a Validate failure wraps cosign.ErrInvalidPayload — deterministic,
+// the constructor's input is the bug — which CheckpointOnce surfaces as a
+// fault, never a hold.
+func (l *CheckpointLoop) buildPublishableHead(ctx context.Context, treeSize, cSeq uint64, cRoot [32]byte) (types.TreeHead, error) {
+	// Merkle root at the committed size (deterministic from durable tiles).
+	rootHash, rErr := l.rooter.RootAtSize(ctx, treeSize)
+	if rErr != nil {
+		return types.TreeHead{}, fmt.Errorf("checkpoint: RootAtSize(%d): %w", treeSize, rErr)
+	}
+	l.logger.DebugContext(ctx, "checkpoint step: root at size",
+		"tree_size", treeSize, "root_hash", fmt.Sprintf("%x", rootHash[:8]))
+
+	// Receipt root over the entries newly covered since the last PUBLISH (the
+	// delta [lastPublishedSize, cSeq]) — keyed off the cosigned ladder, not the
+	// tile frontier, so a cosign hold can't orphan the held delta's receipts.
+	receiptRoot, rcErr := l.receiptRootForCheckpoint(ctx, cSeq)
+	if rcErr != nil {
+		return types.TreeHead{}, fmt.Errorf("checkpoint: receipt root [%d..%d]: %w", l.lastPublishedSize, cSeq, rcErr)
+	}
+	l.logger.DebugContext(ctx, "checkpoint step: receipt root",
+		"from_seq", l.lastPublishedSize, "to_seq", cSeq,
+		"receipt_root", fmt.Sprintf("%x", receiptRoot[:8]))
+
+	head := types.TreeHead{
+		TreeSize:    treeSize,
+		RootHash:    rootHash,
+		SMTRoot:     cRoot,
+		ReceiptRoot: receiptRoot,
+	}
+	// Local validation BEFORE the head leaves the factory: the exact check
+	// every witness signer applies. An invalid head never reaches fan-out.
+	// Validate returns bare field-level errors; bind the typed class here so
+	// CheckpointOnce's fault branch (errors.Is cosign.ErrInvalidPayload) fires.
+	if verr := cosign.NewTreeHeadPayload(head).Validate(cosign.HashAlgoSHA256); verr != nil {
+		return types.TreeHead{}, fmt.Errorf("checkpoint: built an unpublishable head at size %d "+
+			"(root_hash=%x smt_root=%x): %w: %w", treeSize, head.RootHash[:8], head.SMTRoot[:8],
+			cosign.ErrInvalidPayload, verr)
+	}
+	return head, nil
+}
+
 func (l *CheckpointLoop) receiptRootForCheckpoint(ctx context.Context, cSeq uint64) ([32]byte, error) {
 	if l.receipts == nil {
 		return [32]byte{}, nil
