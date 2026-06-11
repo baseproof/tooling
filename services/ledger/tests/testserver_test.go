@@ -42,6 +42,7 @@ import (
 	opbytestore "github.com/baseproof/tooling/services/ledger/bytestore"
 	"github.com/baseproof/tooling/services/ledger/store"
 	optessera "github.com/baseproof/tooling/services/ledger/tessera"
+	"github.com/baseproof/tooling/services/ledger/wal"
 )
 
 // Compile-time guarantee: *store.CompositeByteReader satisfies
@@ -82,7 +83,12 @@ type testLedger struct {
 	EntryStore  *store.EntryStore
 	EntryBytes  *opbytestore.Memory
 	EntryReader opbytestore.Reader
-	cancel      context.CancelFunc
+	// WALCommitter is the in-memory WAL the harness submits through —
+	// exposed so the #76 genesis-producer integration test can submit the
+	// constitution through the SAME seam the admission path uses and watch the
+	// real sequencer seat it at sequence 0.
+	WALCommitter *wal.Committer
+	cancel       context.CancelFunc
 
 	// Real-Tessera handles. Populated only when
 	// startTestLedgerWithOpts was called with UseRealTessera=true;
