@@ -26,7 +26,7 @@ func govGather(t *testing.T, srv *httptest.Server, schema types.LogPosition) *St
 	var key [32]byte
 	key[0] = 0x9
 	g, err := NewStandaloneLedgerGather(client, srv.URL, srv.Client(),
-		&network.BootstrapDocument{NetworkName: "gov-test"}, 2, 7, key,
+		&network.BootstrapDocument{NetworkName: "gov-test"}, 7, key,
 		WithGovernanceSchemas(map[string]types.LogPosition{"signature_policy_chain": schema}))
 	if err != nil {
 		t.Fatalf("NewStandaloneLedgerGather: %v", err)
@@ -45,7 +45,7 @@ func TestGather_Governance_Unconfigured(t *testing.T) {
 
 	client, _ := clitools.NewLedgerClient(srv.URL, "did:web:gather.test")
 	g, err := NewStandaloneLedgerGather(client, srv.URL, srv.Client(),
-		&network.BootstrapDocument{NetworkName: "x"}, 2, 7, [32]byte{}) // no WithGovernanceSchemas
+		&network.BootstrapDocument{NetworkName: "x"}, 7, [32]byte{}) // no WithGovernanceSchemas
 	if err != nil {
 		t.Fatalf("gather: %v", err)
 	}

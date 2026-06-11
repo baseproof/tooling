@@ -83,7 +83,6 @@ type StandaloneLedgerGather struct {
 	baseURL    string // for endpoints clitools does not wrap (SMT proof, receipt proof)
 	httpClient *http.Client
 	bootstrap  *network.BootstrapDocument
-	quorumK    int
 	seq        uint64   // the target entry's sequence (for the per-entry section endpoints)
 	smtKey     [32]byte // the target entry's SMT key (the witnessed presence-proof key)
 
@@ -118,20 +117,18 @@ type StandaloneLedgerGather struct {
 	fedPath  map[cosign.NetworkID]bool
 }
 
-// NewStandaloneLedgerGather wires the gather for ONE target entry. bootstrap +
-// quorumK are the network's static genesis configuration (the verify-side trust
-// root derives from the same bootstrap); seq + smtKey identify the entry (seq must
-// match the seq passed to bundle.BuildStandalone).
-// quorumK are the network's static genesis configuration (the verify-side trust
-// root derives from the same bootstrap); seq + smtKey identify the entry. Optional
-// GatherOptions (e.g. WithGovernanceSchemas) enable the Wave-2 deferred sections;
-// with none, the gather produces a Part-I + receipt proof (a genesis-only network).
+// NewStandaloneLedgerGather wires the gather for ONE target entry. bootstrap is
+// the network's verified constitution (the verify-side trust root derives from
+// the same document — including the constitutional GenesisQuorumK, so no K is
+// plumbed beside it); seq + smtKey identify the entry (seq must match the seq
+// passed to bundle.BuildStandalone). Optional GatherOptions (e.g.
+// WithGovernanceSchemas) enable the Wave-2 deferred sections; with none, the
+// gather produces a Part-I + receipt proof (a genesis-only network).
 func NewStandaloneLedgerGather(
 	client LedgerReader,
 	baseURL string,
 	httpClient *http.Client,
 	bootstrap *network.BootstrapDocument,
-	quorumK int,
 	seq uint64,
 	smtKey [32]byte,
 	opts ...GatherOption,
@@ -151,7 +148,7 @@ func NewStandaloneLedgerGather(
 	}
 	g := &StandaloneLedgerGather{
 		client: client, baseURL: baseURL, httpClient: httpClient,
-		bootstrap: bootstrap, quorumK: quorumK, seq: seq, smtKey: smtKey,
+		bootstrap: bootstrap, seq: seq, smtKey: smtKey,
 		discoverer: disc,
 	}
 	for _, opt := range opts {
@@ -162,9 +159,9 @@ func NewStandaloneLedgerGather(
 
 // ── StandaloneGather (Part I) ────────────────────────────────────────────────
 
-func (g *StandaloneLedgerGather) FetchGenesisBootstrap(context.Context) (*network.BootstrapDocument, int, error) {
+func (g *StandaloneLedgerGather) FetchGenesisBootstrap(context.Context) (*network.BootstrapDocument, error) {
 	doc := *g.bootstrap // value copy — the SDK must not mutate the configured doc
-	return &doc, g.quorumK, nil
+	return &doc, nil
 }
 
 func (g *StandaloneLedgerGather) FetchEntry(ctx context.Context, seq uint64) ([]byte, time.Time, error) {

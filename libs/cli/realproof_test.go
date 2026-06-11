@@ -41,8 +41,8 @@ type realGather struct {
 	smt     types.SMTProof
 }
 
-func (g *realGather) FetchGenesisBootstrap(context.Context) (*network.BootstrapDocument, int, error) {
-	return g.bdoc, g.k, nil
+func (g *realGather) FetchGenesisBootstrap(context.Context) (*network.BootstrapDocument, error) {
+	return g.bdoc, nil
 }
 func (g *realGather) FetchEntry(context.Context, uint64) ([]byte, time.Time, error) {
 	return g.entry, g.logTime, nil

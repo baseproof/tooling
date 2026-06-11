@@ -26,7 +26,7 @@ func newTestGather(t *testing.T, srv *httptest.Server, seq uint64) *StandaloneLe
 		key[i] = byte(i + 1)
 	}
 	g, err := NewStandaloneLedgerGather(client, srv.URL, srv.Client(),
-		&network.BootstrapDocument{NetworkName: "gather-test"}, 2, seq, key)
+		&network.BootstrapDocument{NetworkName: "gather-test"}, seq, key)
 	if err != nil {
 		t.Fatalf("NewStandaloneLedgerGather: %v", err)
 	}
@@ -122,19 +122,20 @@ func TestGather_FetchSection_UnsupportedNull(t *testing.T) {
 	}
 }
 
-// FetchGenesisBootstrap returns the configured doc + quorum, never the SDK's
-// mutated copy.
+// FetchGenesisBootstrap returns the configured doc (a value copy), never the
+// SDK's mutated copy. K is not plumbed beside it — the document carries the
+// constitutional GenesisQuorumK.
 func TestGather_FetchGenesisBootstrap(t *testing.T) {
 	g := newTestGather(t, httptest.NewServer(http.NotFoundHandler()), 7)
-	doc, k, err := g.FetchGenesisBootstrap(context.Background())
+	doc, err := g.FetchGenesisBootstrap(context.Background())
 	if err != nil || doc == nil {
 		t.Fatalf("FetchGenesisBootstrap: %v", err)
 	}
-	if k != 2 || doc.NetworkName != "gather-test" {
-		t.Errorf("got K=%d name=%q, want 2 / gather-test", k, doc.NetworkName)
+	if doc.NetworkName != "gather-test" {
+		t.Errorf("got name=%q, want gather-test", doc.NetworkName)
 	}
 	doc.NetworkName = "mutated" // must not affect the gather's configured doc
-	doc2, _, _ := g.FetchGenesisBootstrap(context.Background())
+	doc2, _ := g.FetchGenesisBootstrap(context.Background())
 	if doc2.NetworkName != "gather-test" {
 		t.Error("FetchGenesisBootstrap returned a shared (mutable) document")
 	}

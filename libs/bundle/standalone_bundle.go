@@ -10,7 +10,7 @@ vocabulary the governance + signer chains discover by.
 # WHAT THE BUNDLE SUPPLIES
 
   - Endpoint            → the ledger read API the gather drives (baseURL).
-  - TrustRoot.QuorumK   → the network's K (the same K the verifier binds).
+  - the verified document's GenesisQuorumK → the network's K (the same constitutional K the verifier binds; nothing plumbs K beside the document).
   - TrustRoot.Bootstrap­DocumentHash → the integrity pin the fetched genesis
     bootstrap MUST hash to (fail-fast: a wrong endpoint serves a different net).
   - GovernanceSchemas / SignerRotationSchema → the vocabulary, translated to the
@@ -69,7 +69,7 @@ func NewBundleGather(
 		return nil, err
 	}
 	return NewStandaloneLedgerGather(
-		client, bundle.Endpoint, httpClient, doc, bundle.TrustRoot.QuorumK, seq, smtKey,
+		client, bundle.Endpoint, httpClient, doc, seq, smtKey,
 		append(gatherOptionsFromBundle(bundle), opts...)...,
 	)
 }

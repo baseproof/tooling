@@ -89,12 +89,15 @@ func TestNewBundleGather_SelfConfiguresFromBundle(t *testing.T) {
 	if g.signerRotationSchema == nil || *g.signerRotationSchema != *sr {
 		t.Errorf("signerRotationSchema = %+v, want %+v", g.signerRotationSchema, sr)
 	}
-	// Network identity came from the bundle: quorum + the fetched bootstrap.
-	if g.quorumK != 2 {
-		t.Errorf("quorumK = %d, want 2 (from bundle.TrustRoot)", g.quorumK)
-	}
+	// Network identity came from the FETCHED, hash-verified constitution — K is
+	// read from the document (its constitutional GenesisQuorumK), not plumbed
+	// from the bundle's trust root (that seam is gone; the trust root's K is the
+	// verifier's cross-check input, never the gather's source).
 	if g.bootstrap == nil {
 		t.Fatal("bootstrap was not fetched from the endpoint")
+	}
+	if g.bootstrap.GenesisQuorumK != doc.GenesisQuorumK {
+		t.Errorf("bootstrap.GenesisQuorumK = %d, want the served document's %d", g.bootstrap.GenesisQuorumK, doc.GenesisQuorumK)
 	}
 	if g.baseURL != srv.URL {
 		t.Errorf("baseURL = %q, want the bundle endpoint %q", g.baseURL, srv.URL)

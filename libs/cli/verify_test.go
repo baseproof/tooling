@@ -21,11 +21,10 @@ import (
 // cosignatures — which is exactly the point of the Zero-Trust test below.
 type fakeStandaloneGather struct {
 	doc     *network.BootstrapDocument
-	quorumK int
 }
 
-func (f *fakeStandaloneGather) FetchGenesisBootstrap(context.Context) (*network.BootstrapDocument, int, error) {
-	return f.doc, f.quorumK, nil
+func (f *fakeStandaloneGather) FetchGenesisBootstrap(context.Context) (*network.BootstrapDocument, error) {
+	return f.doc, nil
 }
 func (f *fakeStandaloneGather) FetchEntry(context.Context, uint64) ([]byte, time.Time, error) {
 	return []byte("entry-wire-bytes"), time.Unix(1700000000, 0).UTC(), nil
@@ -74,7 +73,7 @@ func TestVerify_V2_ZeroTrust(t *testing.T) {
 	ctx := context.Background()
 	doc := mustBootstrapDoc(t)
 
-	proof, err := sdkbundle.BuildStandalone(ctx, &fakeStandaloneGather{doc: doc, quorumK: 1}, 1)
+	proof, err := sdkbundle.BuildStandalone(ctx, &fakeStandaloneGather{doc: doc}, 1)
 	if err != nil {
 		t.Fatalf("BuildStandalone: %v", err)
 	}
