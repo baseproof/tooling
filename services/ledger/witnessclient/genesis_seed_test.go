@@ -15,6 +15,7 @@ import (
 	"testing"
 
 	"github.com/baseproof/baseproof/crypto/cosign"
+	"github.com/baseproof/baseproof/witness/witnesstest"
 
 	"github.com/baseproof/tooling/services/ledger/witnessclient"
 )
@@ -27,11 +28,8 @@ func TestSeedGenesisBaseline_EmptyTableInsertsActive(t *testing.T) {
 	ctx := context.Background()
 	pool := requireWitnessDSN(t)
 
-	keys, _ := freshHistoryKeys(t, 3)
-	set, err := cosign.NewWitnessKeySet(keys, historyNetID(), 2, nil)
-	if err != nil {
-		t.Fatalf("NewWitnessKeySet: %v", err)
-	}
+	s := witnesstest.NewSet(t, historyNetID(), 3, 2)
+	set, keys := s.KeySet, s.Keys
 
 	recorded, err := witnessclient.SeedGenesisBaseline(ctx, pool, set, keys, 0x01)
 	if err != nil {
@@ -84,24 +82,17 @@ func TestSeedGenesisBaseline_BackfillsGenesisEraHole(t *testing.T) {
 
 	// The (post-rotation) active row, as ProcessRotation would have written
 	// it on an empty table: effective_seq=7, nothing retired.
-	rotKeys, _ := freshHistoryKeys(t, 3)
-	rotSet, err := cosign.NewWitnessKeySet(rotKeys, historyNetID(), 2, nil)
-	if err != nil {
-		t.Fatalf("NewWitnessKeySet (rotation): %v", err)
-	}
-	rotHash := rotSet.SetHash()
-	if _, err = pool.Exec(ctx, `
+	rot := witnesstest.NewSet(t, historyNetID(), 3, 2)
+	rotHash := rot.KeySet.SetHash()
+	if _, err := pool.Exec(ctx, `
 		INSERT INTO witness_sets
 		    (set_hash, keys_json, scheme_tag, effective_seq, retired_seq, rotation_event_id)
 		VALUES ($1, '[]', 1, 7, NULL, NULL)`, rotHash[:]); err != nil {
 		t.Fatalf("insert rotation row: %v", err)
 	}
 
-	genKeys, _ := freshHistoryKeys(t, 3)
-	genSet, err := cosign.NewWitnessKeySet(genKeys, historyNetID(), 2, nil)
-	if err != nil {
-		t.Fatalf("NewWitnessKeySet (genesis): %v", err)
-	}
+	gen := witnesstest.NewSet(t, historyNetID(), 3, 2)
+	genSet, genKeys := gen.KeySet, gen.Keys
 	genHash := genSet.SetHash()
 
 	recorded, err := witnessclient.SeedGenesisBaseline(ctx, pool, genSet, genKeys, 0x01)
@@ -148,11 +139,8 @@ func TestSeedGenesisBaseline_NoopWhenGenesisRecorded(t *testing.T) {
 	ctx := context.Background()
 	pool := requireWitnessDSN(t)
 
-	keys, _ := freshHistoryKeys(t, 3)
-	set, err := cosign.NewWitnessKeySet(keys, historyNetID(), 2, nil)
-	if err != nil {
-		t.Fatalf("NewWitnessKeySet: %v", err)
-	}
+	s := witnesstest.NewSet(t, historyNetID(), 3, 2)
+	set, keys := s.KeySet, s.Keys
 	if recorded, serr := witnessclient.SeedGenesisBaseline(ctx, pool, set, keys, 0x01); serr != nil || !recorded {
 		t.Fatalf("first seed: recorded=%v err=%v", recorded, serr)
 	}

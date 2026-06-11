@@ -72,11 +72,17 @@ func genesisFixture(t *testing.T, nWitnesses int) (srv *httptest.Server, bundleP
 		}
 		dids[i] = kp.DID
 	}
+	// GenesisQuorumK is REQUIRED + NetworkID-bound since rc4; a simple majority
+	// satisfies 2K>N for any N. The same k feeds the bundle below so the served
+	// constitution and the client handle agree (the CLI derives K from the
+	// verified doc, #74).
+	k := len(dids)/2 + 1
 	doc := network.BootstrapDocument{
 		ProtocolVersion:        "1.0",
 		ExchangeDID:            "did:web:genesis.test",
 		NetworkName:            "genesis-fallback-test",
 		GenesisWitnessSet:      dids,
+		GenesisQuorumK:         k,
 		GenesisTreeHead:        network.GenesisTreeHead{RootHash: strings.Repeat("00", 32)},
 		GenesisAdmissionPolicy: network.GenesisAdmissionPolicy{CostMode: "uncharged"},
 		GenesisSignaturePolicy: network.SignaturePolicy{
@@ -101,7 +107,7 @@ func genesisFixture(t *testing.T, nWitnesses int) (srv *httptest.Server, bundleP
 	t.Cleanup(srv.Close)
 
 	bundlePath = writeBundle(t, ClientBundle{
-		NetworkID: idHex, BootstrapHash: idHex, Endpoint: srv.URL, LogDID: "did:web:x", QuorumK: 2,
+		NetworkID: idHex, BootstrapHash: idHex, Endpoint: srv.URL, LogDID: "did:web:x", QuorumK: k,
 	})
 	return srv, bundlePath
 }
