@@ -36,8 +36,6 @@ package witnessclient_test
 
 import (
 	"context"
-	"crypto/ecdsa"
-	"crypto/sha256"
 	"strings"
 	"testing"
 
@@ -47,6 +45,7 @@ import (
 	"github.com/baseproof/baseproof/gossip/findings"
 	"github.com/baseproof/baseproof/types"
 	"github.com/baseproof/baseproof/witness"
+	"github.com/baseproof/baseproof/witness/witnesstest"
 
 	"github.com/baseproof/tooling/services/ledger/quorum"
 	"github.com/baseproof/tooling/services/ledger/witnessclient"
@@ -106,77 +105,11 @@ func netID(b byte) cosign.NetworkID {
 	return n
 }
 
-// freshKeys generates n witness keys + matching private keys.
-func freshKeys(t *testing.T, n int) ([]types.WitnessPublicKey, []*ecdsa.PrivateKey) {
-	t.Helper()
-	keys := make([]types.WitnessPublicKey, n)
-	privs := make([]*ecdsa.PrivateKey, n)
-	for i := 0; i < n; i++ {
-		priv, err := signatures.GenerateKey()
-		if err != nil {
-			t.Fatalf("freshKeys[%d]: %v", i, err)
-		}
-		pubBytes := signatures.PubKeyBytes(&priv.PublicKey)
-		id := sha256.Sum256(pubBytes)
-		keys[i] = types.WitnessPublicKey{ID: id, PublicKey: pubBytes, SchemeTag: signatures.SchemeECDSA}
-		privs[i] = priv
-	}
-	return keys, privs
-}
-
-// buildValidRotation creates a rotation signed under the OLD set's
-// private keys, against the supplied NetworkID. Mirrors the SDK's
-// tests/witness_rotation_helpers_test.go::buildValidRotation. The
-// rotation is dual-sign-clean (SchemeTagOld == SchemeTagNew == ECDSA),
-// so the SDK Verify's Step 5 dual-sign branch is skipped — placeholder
-// NewSignatures satisfy Validate's non-empty check without contributing
-// to the cryptographic verdict.
-func buildValidRotation(
-	t *testing.T,
-	setSize, sigCount, newSetSize int,
-	signedUnderNetwork cosign.NetworkID,
-) (currentKeys []types.WitnessPublicKey, rotation types.WitnessRotation) {
-	t.Helper()
-	currentKeys, currentPrivs := freshKeys(t, setSize)
-	newKeys, _ := freshKeys(t, newSetSize)
-	setHash := witness.ComputeSetHash(currentKeys)
-	newSetHash := witness.ComputeSetHash(newKeys)
-
-	payload := cosign.NewRotationPayloadSHA256(newSetHash)
-	sigs := make([]types.WitnessSignature, sigCount)
-	for i := 0; i < sigCount; i++ {
-		sigBytes, err := cosign.SignECDSA(payload, signedUnderNetwork, cosign.HashAlgoSHA256, currentPrivs[i])
-		if err != nil {
-			t.Fatalf("SignECDSA rotation[%d]: %v", i, err)
-		}
-		sigs[i] = types.WitnessSignature{
-			PubKeyID:  currentKeys[i].ID,
-			SchemeTag: signatures.SchemeECDSA,
-			SigBytes:  sigBytes,
-		}
-	}
-
-	// Placeholder NewSignatures — same-scheme rotation skips Step 5
-	// dual-sign verification, but the finding's Validate requires
-	// non-empty NewSignatures.
-	var placeholderID [32]byte
-	for i := range placeholderID {
-		placeholderID[i] = 0xEE
-	}
-	newSigs := []types.WitnessSignature{
-		{PubKeyID: placeholderID, SchemeTag: signatures.SchemeECDSA, SigBytes: []byte{0xAA}},
-	}
-
-	rotation = types.WitnessRotation{
-		CurrentSetHash:    setHash,
-		NewSet:            newKeys,
-		SchemeTagOld:      signatures.SchemeECDSA,
-		CurrentSignatures: sigs,
-		SchemeTagNew:      signatures.SchemeECDSA,
-		NewSignatures:     newSigs,
-	}
-	return currentKeys, rotation
-}
+// Rotation fixtures are minted through witness/witnesstest (NewSet +
+// MintRotation): valid-by-construction under every current verifier rule
+// (predecessor quorum, Step-6 per-joiner consent, 2K>N). The hand-rolled
+// buildValidRotation/freshKeys that placed placeholder NewSignatures predated
+// per-joiner consent and the rc4 verifier rejects them — they are gone.
 
 // ─────────────────────────────────────────────────────────────────────
 // Property tests
@@ -197,14 +130,15 @@ func TestRotationHandler_CrossNetworkReplay_Rejects(t *testing.T) {
 	netA := netID('A')
 	netB := netID('B')
 
-	// Build a valid rotation signed under Network-A's NetworkID.
-	currentKeys, rotation := buildValidRotation(t, N, K, N, netA)
+	// Mint a valid, joiner-consented rotation under Network-A's NetworkID.
+	oldA := witnesstest.NewSet(t, netA, N, K)
+	rotation := witnesstest.MintRotation(t, netA, oldA, witnesstest.NewSet(t, netA, N, K), K)
 
 	// Handler holds a WitnessKeySet bound to Network-B's NetworkID
 	// — the keys match the rotation's OLD set, but the NetworkID
 	// is the wrong jurisdiction. The cryptographic domain-
 	// separation invariant should refuse the rotation.
-	setB, err := cosign.NewWitnessKeySet(currentKeys, netB, K, nil)
+	setB, err := cosign.NewWitnessKeySet(oldA.Keys, netB, K, nil)
 	if err != nil {
 		t.Fatalf("NewWitnessKeySet[netB]: %v", err)
 	}
@@ -266,9 +200,10 @@ func TestRotationHandler_SameNetwork_AcceptControl(t *testing.T) {
 	const K, N = 2, 3
 	netA := netID('A')
 
-	currentKeys, rotation := buildValidRotation(t, N, K, N, netA)
+	oldA := witnesstest.NewSet(t, netA, N, K)
+	rotation := witnesstest.MintRotation(t, netA, oldA, witnesstest.NewSet(t, netA, N, K), K)
 
-	setA, err := cosign.NewWitnessKeySet(currentKeys, netA, K, nil)
+	setA, err := cosign.NewWitnessKeySet(oldA.Keys, netA, K, nil)
 	if err != nil {
 		t.Fatalf("NewWitnessKeySet[netA]: %v", err)
 	}

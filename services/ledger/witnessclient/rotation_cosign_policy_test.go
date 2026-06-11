@@ -7,6 +7,7 @@ import (
 
 	"github.com/baseproof/baseproof/crypto/cosign"
 	"github.com/baseproof/baseproof/crypto/signatures"
+	"github.com/baseproof/baseproof/witness/witnesstest"
 
 	"github.com/baseproof/tooling/services/ledger/quorum"
 	"github.com/baseproof/tooling/services/ledger/witnessclient"
@@ -25,11 +26,12 @@ func TestProcessRotation_EnforcesCosignSchemePolicy(t *testing.T) {
 	const K, N = 2, 3
 	netA := netID('A')
 
-	// buildValidRotation produces ECDSA (0x01) witnesses in NewSet that verify
-	// under the current set — so VerifyRotation passes and only the cosign-scheme
-	// policy distinguishes the two sub-cases below.
-	currentKeys, rotation := buildValidRotation(t, N, K, N, netA)
-	setA, err := cosign.NewWitnessKeySet(currentKeys, netA, K, nil)
+	// witnesstest mints an ECDSA (0x01) NewSet through a fully-consented rotation
+	// that VerifyRotation accepts — so verification passes and only the
+	// cosign-scheme policy distinguishes the two sub-cases below.
+	oldA := witnesstest.NewSet(t, netA, N, K)
+	rotation := witnesstest.MintRotation(t, netA, oldA, witnesstest.NewSet(t, netA, N, K), K)
+	setA, err := cosign.NewWitnessKeySet(oldA.Keys, netA, K, nil)
 	if err != nil {
 		t.Fatalf("NewWitnessKeySet: %v", err)
 	}
