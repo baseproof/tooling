@@ -480,7 +480,7 @@ func Wire(ctx context.Context, cfg Config, d *deps.AppDeps) error {
 		return fmt.Errorf("wire: tail recovery: %w", err)
 	}
 
-	startGoroutines(ctx, d, bl, checkpointLoop, seq, ship, detector, smtDetector)
+	startGoroutines(ctx, d, cfg, bl, checkpointLoop, seq, ship, detector, smtDetector)
 
 	return nil
 }
@@ -2076,6 +2076,7 @@ func composeServers(cfg Config, d *deps.AppDeps, handlers api.Handlers) error {
 func startGoroutines(
 	ctx context.Context,
 	d *deps.AppDeps,
+	cfg Config,
 	bl *builder.BuilderLoop,
 	checkpointLoop *builder.CheckpointLoop,
 	seq *sequencer.Sequencer,
@@ -2083,6 +2084,30 @@ func startGoroutines(
 	detector *integrity.Detector,
 	smtDetector *integrity.SMTDetector,
 ) {
+	// #76: the constitution must be sequenced at position 0 BEFORE the write
+	// surface opens. Start the sequencer (it drains the WAL → entry_index), then
+	// synchronously ensure the genesis record, THEN open /v1/entries below. A log
+	// that cannot seat its constitution at sequence 0 must not serve writes.
+	lifecycle.SafeRunInWG(ctx, &d.WG, "sequencer", d.Logger, d.Fatal, func() error {
+		if err := seq.Run(ctx); err != nil && !ctxCanceledOrDeadline(err) {
+			d.Fatal <- fmt.Errorf("sequencer: %w", err)
+			return err
+		}
+		return nil
+	})
+	genesisRecord, err := ensureGenesisRecordFromDeps(ctx, d, cfg)
+	if err != nil {
+		d.Fatal <- fmt.Errorf("genesis record: %w", err)
+		return
+	}
+	// #76 Part 2: re-root the witness_sets baseline from the log's own seq-0
+	// record (a cache of the log, not a config seed). Before /v1/entries opens,
+	// so the history endpoints never serve a missing-baseline 404.
+	if err := reRootWitnessBaselineFromDeps(ctx, d, cfg, genesisRecord); err != nil {
+		d.Fatal <- fmt.Errorf("genesis baseline re-root: %w", err)
+		return
+	}
+
 	lifecycle.SafeRunInWG(ctx, &d.WG, "http-server", d.Logger, d.Fatal, func() error {
 		if d.HTTPServer == nil || d.HTTPListener == nil {
 			return nil
@@ -2136,14 +2161,6 @@ func startGoroutines(
 	lifecycle.SafeRunInWG(ctx, &d.WG, "shipper", d.Logger, d.Fatal, func() error {
 		if err := ship.Run(ctx); err != nil && !ctxCanceledOrDeadline(err) {
 			d.Fatal <- fmt.Errorf("shipper: %w", err)
-			return err
-		}
-		return nil
-	})
-
-	lifecycle.SafeRunInWG(ctx, &d.WG, "sequencer", d.Logger, d.Fatal, func() error {
-		if err := seq.Run(ctx); err != nil && !ctxCanceledOrDeadline(err) {
-			d.Fatal <- fmt.Errorf("sequencer: %w", err)
 			return err
 		}
 		return nil
