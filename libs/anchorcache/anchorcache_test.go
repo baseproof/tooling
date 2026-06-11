@@ -32,6 +32,7 @@ func validBootstrapBytes(t *testing.T) ([]byte, [32]byte) {
 		ExchangeDID:                 "did:web:fixture.example",
 		NetworkName:                 "anchorcache-fixture",
 		GenesisWitnessSet:           []string{"did:key:zfixture1"},
+		GenesisQuorumK:              1, // REQUIRED since rc4; N=1 ⇒ K=1 (2K>N)
 		GenesisTreeHead:             network.GenesisTreeHead{RootHash: strings.Repeat("01", 32)},
 		GenesisAdmissionAuthorities: []string{"0123456789abcdef0123456789abcdef01234567"},
 		GenesisAdmissionPolicy:      network.GenesisAdmissionPolicy{GatingRequired: true, CostMode: "uncharged"},

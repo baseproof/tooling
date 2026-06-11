@@ -9,12 +9,12 @@
 //   ./services/witness    the witness daemon (stateless notary)
 //   ./e2e                 the platform e2e (drives libs against a docker fleet)
 //   ./baseproof-cli       the unified client binary (staged for its own repo)
-go 1.25.7
+go 1.25.11
 
 use (
+	./baseproof-cli
+	./e2e
 	./libs
 	./services/auditor
 	./services/witness
-	./e2e
-	./baseproof-cli
 )

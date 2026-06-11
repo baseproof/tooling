@@ -34,6 +34,7 @@ func fixtureBundleBytes(t *testing.T) []byte {
 		ExchangeDID:                 "did:web:fixture.example",
 		NetworkName:                 "fixture-net",
 		GenesisWitnessSet:           []string{"did:key:zfixture1"},
+		GenesisQuorumK:              1, // REQUIRED since rc4; N=1 ⇒ K=1 (2K>N)
 		GenesisTreeHead:             network.GenesisTreeHead{RootHash: strings.Repeat("01", 32)},
 		GenesisAdmissionAuthorities: []string{"0123456789abcdef0123456789abcdef01234567"},
 		GenesisAdmissionPolicy:      network.GenesisAdmissionPolicy{GatingRequired: true, CostMode: "uncharged"},

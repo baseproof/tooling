@@ -50,6 +50,7 @@ func writeBootstrap(t *testing.T, n int) (path, exchangeDID string) {
 		NetworkName:       "auditor-test-net",
 		ExchangeDID:       exchangeDID,
 		GenesisWitnessSet: dids,
+		GenesisQuorumK:    len(dids)/2 + 1, // REQUIRED since rc4; majority always satisfies 2K>N
 		GenesisTreeHead: sdknetwork.GenesisTreeHead{
 			RootHash: hex.EncodeToString(make([]byte, 32)),
 			TreeSize: 0,

@@ -122,6 +122,7 @@ func buildRealFixture(t *testing.T, n, k int) *realFixture {
 		ExchangeDID:                 "did:web:exchange.example",
 		NetworkName:                 "real-fixture-net",
 		GenesisWitnessSet:           dids,
+		GenesisQuorumK:              len(dids)/2 + 1, // REQUIRED since rc4; majority always satisfies 2K>N
 		GenesisTreeHead:             network.GenesisTreeHead{RootHash: strings.Repeat("0", 64), TreeSize: 0},
 		GenesisAdmissionAuthorities: []string{"0123456789abcdef0123456789abcdef01234567"},
 		GenesisAdmissionPolicy:      network.GenesisAdmissionPolicy{GatingRequired: true, CostMode: "uncharged"},

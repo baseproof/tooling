@@ -118,6 +118,7 @@ func minimalBootstrapDoc(t *testing.T) string {
   "exchange_did": "did:web:test-exchange.example.org",
   "network_name": "test-network",
   "genesis_witness_set": [%q],
+  "genesis_quorum_k": 1,
   "genesis_tree_head": {
     "tree_size": 0,
     "root_hash": "0000000000000000000000000000000000000000000000000000000000000000"
