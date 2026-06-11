@@ -88,7 +88,7 @@ fi
 # /keys/. The witness daemon reads them at boot.
 echo "== generating witness key + network bootstrap (.run/e2e/) =="
 mkdir -p "${KEYS_DIR}"
-go run ./cmd/init-network \
+go run ./cmd/genesis-ceremony dev \
     -out-dir="${KEYS_DIR}" \
     -out-bootstrap="${KEYS_DIR}/network-bootstrap.json" \
     -log-did="did:baseproof:ledger:e2e" \

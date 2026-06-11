@@ -36,6 +36,7 @@ MODULE BOUNDARY:
 package main
 
 import (
+	"bytes"
 	"crypto/ecdsa"
 	"encoding/hex"
 	"encoding/json"
@@ -87,17 +88,23 @@ func main() {
 	genesisAuditorFindingsURL := flag.String("genesis-auditor-findings-url", "",
 		"findings-publishing URL stamped on every -genesis-auditor-did entry "+
 			"(required when -genesis-auditor-did is set).")
+	endorsementPolicy := flag.String("endorsement-policy", "require",
+		`genesis endorsement policy: "require" (default) binds `+
+			"GenesisEndorsementPolicy=require into the NetworkID and has every "+
+			"genesis witness key this tool mints self-endorse the constitution "+
+			"(N-of-N), so the fixture network is born endorsed exactly like a "+
+			`production mint. "off" emits no policy and no endorsements.`)
 	flag.Parse()
 
 	if err := run(*outDir, *outBootstrap, *logDID, *networkName, *witnessCount, *scheme,
-		*genesisAuditorDIDs, *genesisAuditorFindingsURL, os.Stdout); err != nil {
+		*genesisAuditorDIDs, *genesisAuditorFindingsURL, *endorsementPolicy, os.Stdout); err != nil {
 		log.Fatalf("gen-fixtures: %v", err)
 	}
 }
 
 // run is the testable body. It is exported via lowercase so
 // main_test.go can drive it without exec'ing a subprocess.
-func run(outDir, outBootstrap, logDID, networkName string, witnessCount int, scheme, genesisAuditorDIDs, genesisAuditorFindingsURL string, stdout *os.File) error {
+func run(outDir, outBootstrap, logDID, networkName string, witnessCount int, scheme, genesisAuditorDIDs, genesisAuditorFindingsURL, endorsementPolicy string, stdout *os.File) error {
 	if witnessCount < 1 {
 		return fmt.Errorf("-witnesses must be >= 1 (got %d): a network without witnesses cannot finalise heads", witnessCount)
 	}
@@ -116,7 +123,10 @@ func run(outDir, outBootstrap, logDID, networkName string, witnessCount int, sch
 	if scheme != "ecdsa" && scheme != "bls" {
 		return fmt.Errorf("-scheme must be \"ecdsa\" or \"bls\" (got %q)", scheme)
 	}
-	genesisDIDs, keyPaths, cosignTags, err := generateWitnessKeys(outDir, scheme, witnessCount, stdout)
+	if endorsementPolicy != "require" && endorsementPolicy != "off" {
+		return fmt.Errorf(`-endorsement-policy must be "require" or "off" (got %q)`, endorsementPolicy)
+	}
+	genesisDIDs, genesisPrivs, keyPaths, cosignTags, err := generateWitnessKeys(outDir, scheme, witnessCount, stdout)
 	if err != nil {
 		return err
 	}
@@ -130,7 +140,7 @@ func run(outDir, outBootstrap, logDID, networkName string, witnessCount int, sch
 		// constitution is the single source of truth for K. The fixture
 		// generator mints a simple majority (N/2+1), which satisfies the
 		// quorum-intersection invariant 2K>N for every N — matching
-		// init-network's auto default so either tool mints the same shape.
+		// genesis-ceremony's auto default so either tool mints the same shape.
 		GenesisQuorumK: len(genesisDIDs)/2 + 1,
 		GenesisTreeHead: network.GenesisTreeHead{
 			RootHash: zeroRootHash,
@@ -151,6 +161,13 @@ func run(outDir, outBootstrap, logDID, networkName string, witnessCount int, sch
 			MinSignaturesPerEntry:   1,
 		},
 	}
+	// #77 A6: the fixture network is born ENDORSED by default — the policy is
+	// canonical-bytes material (NetworkID-bound), and every genesis witness key
+	// this tool just minted self-endorses below, so JN/e2e bootstraps clear the
+	// same require gate a production mint does.
+	if endorsementPolicy == "require" {
+		doc.GenesisEndorsementPolicy = network.GenesisEndorsementRequire
+	}
 
 	// Genesis auditors: secp256k1 did:key(s) the always-on auditor-scope gate
 	// recognizes from sequence 0 (bound into the NetworkID via the JCS bytes).
@@ -160,14 +177,33 @@ func run(outDir, outBootstrap, logDID, networkName string, witnessCount int, sch
 	}
 	doc.GenesisAuditors = auditors
 
-	if _, err := doc.IDs(); err != nil {
+	ids, err := doc.IDs()
+	if err != nil {
 		return fmt.Errorf("validate bootstrap document: %w", err)
 	}
-
-	body, err := json.MarshalIndent(doc, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshal bootstrap: %w", err)
+	if doc.RequiresEndorsement() {
+		for i, priv := range genesisPrivs {
+			e, eErr := network.EndorseGenesis(doc, priv)
+			if eErr != nil {
+				return fmt.Errorf("genesis witness #%d endorse: %w", i+1, eErr)
+			}
+			doc.GenesisEndorsements = append(doc.GenesisEndorsements, e)
+		}
 	}
+	// Serving form + the first-contact round-trip: a fixture that cannot pass
+	// the gate every consumer runs must never be written.
+	served, err := network.EndorsedBootstrapBytes(doc)
+	if err != nil {
+		return fmt.Errorf("serving-form emit: %w", err)
+	}
+	var pretty bytes.Buffer
+	if err := json.Indent(&pretty, served, "", "  "); err != nil {
+		return fmt.Errorf("indent serving form: %w", err)
+	}
+	if _, err := network.LoadVerifiedBootstrap(pretty.Bytes(), [32]byte(ids.NetworkID)); err != nil {
+		return fmt.Errorf("first-contact round-trip (refusing to write a fixture that fails it): %w", err)
+	}
+	body := pretty.Bytes()
 	if err := os.MkdirAll(filepath.Dir(bootstrapPath), 0o755); err != nil {
 		return fmt.Errorf("mkdir bootstrap dir: %w", err)
 	}
@@ -239,20 +275,21 @@ func ifGenerated(generated bool) string {
 //     secp256k1-only), so the anchor is the resolvable genesis witness and the
 //     BLS witnesses join the verifying set on-log via the
 //     WitnessEndpointDeclaration each daemon emits at boot. cosignTags=[ECDSA, BLS].
-func generateWitnessKeys(outDir, scheme string, witnessCount int, stdout *os.File) (genesisDIDs, keyPaths []string, cosignTags []uint8, err error) {
+func generateWitnessKeys(outDir, scheme string, witnessCount int, stdout *os.File) (genesisDIDs []string, genesisPrivs []*ecdsa.PrivateKey, keyPaths []string, cosignTags []uint8, err error) {
 	if scheme == "bls" {
 		// Genesis anchor: an ECDSA did:key so genesis_witness_set is valid and
 		// resolvable; the BLS witnesses below join on-log.
 		anchorPath := filepath.Join(outDir, "witnesses", "genesis-anchor.pem")
 		anchor, generated, aerr := loadOrGenerateWitnessKey(anchorPath)
 		if aerr != nil {
-			return nil, nil, nil, fmt.Errorf("genesis anchor (%s): %w", anchorPath, aerr)
+			return nil, nil, nil, nil, fmt.Errorf("genesis anchor (%s): %w", anchorPath, aerr)
 		}
 		anchorDID, derr := witkey.DID(anchor)
 		if derr != nil {
-			return nil, nil, nil, fmt.Errorf("genesis anchor (%s): derive DID: %w", anchorPath, derr)
+			return nil, nil, nil, nil, fmt.Errorf("genesis anchor (%s): derive DID: %w", anchorPath, derr)
 		}
 		genesisDIDs = append(genesisDIDs, anchorDID)
+		genesisPrivs = append(genesisPrivs, anchor)
 		keyPaths = append(keyPaths, anchorPath)
 		fmt.Fprintf(stdout, "gen-fixtures: genesis anchor (ecdsa) %s %s -> %s\n",
 			ifGenerated(generated), anchorPath, anchorDID)
@@ -261,31 +298,32 @@ func generateWitnessKeys(outDir, scheme string, witnessCount int, stdout *os.Fil
 			path := filepath.Join(outDir, "witnesses", fmt.Sprintf("witness-%d.bls.pem", i))
 			id, gen, berr := loadOrGenerateBLSKey(path)
 			if berr != nil {
-				return nil, nil, nil, fmt.Errorf("bls witness #%d (%s): %w", i, path, berr)
+				return nil, nil, nil, nil, fmt.Errorf("bls witness #%d (%s): %w", i, path, berr)
 			}
 			keyPaths = append(keyPaths, path)
 			fmt.Fprintf(stdout, "gen-fixtures: bls witness #%d %s %s -> pub_key_id %s (joins on-log)\n",
 				i, ifGenerated(gen), path, hex.EncodeToString(id[:]))
 		}
-		return genesisDIDs, keyPaths, []uint8{0x01, 0x02}, nil
+		return genesisDIDs, genesisPrivs, keyPaths, []uint8{0x01, 0x02}, nil
 	}
 
 	for i := 1; i <= witnessCount; i++ {
 		path := filepath.Join(outDir, "witnesses", fmt.Sprintf("witness-%d.pem", i))
 		priv, generated, gerr := loadOrGenerateWitnessKey(path)
 		if gerr != nil {
-			return nil, nil, nil, fmt.Errorf("witness #%d (%s): %w", i, path, gerr)
+			return nil, nil, nil, nil, fmt.Errorf("witness #%d (%s): %w", i, path, gerr)
 		}
 		did, derr := witkey.DID(priv)
 		if derr != nil {
-			return nil, nil, nil, fmt.Errorf("witness #%d (%s): derive DID: %w", i, path, derr)
+			return nil, nil, nil, nil, fmt.Errorf("witness #%d (%s): derive DID: %w", i, path, derr)
 		}
 		genesisDIDs = append(genesisDIDs, did)
+		genesisPrivs = append(genesisPrivs, priv)
 		keyPaths = append(keyPaths, path)
 		fmt.Fprintf(stdout, "gen-fixtures: witness #%d %s %s -> %s\n",
 			i, ifGenerated(generated), path, did)
 	}
-	return genesisDIDs, keyPaths, []uint8{0x01}, nil
+	return genesisDIDs, genesisPrivs, keyPaths, []uint8{0x01}, nil
 }
 
 // loadOrGenerateBLSKey reads an existing BLS witness key at path, or generates

@@ -111,8 +111,8 @@ func loadOrGenerateTesseraSigner(keyFile, origin, logDID string, logger *slog.Lo
 // didKeyFromSecp256k1Priv derives a DID off the secp256k1 curve, fails
 // closed at boot, and never produces a usable identity. So the on-disk
 // form is a 32-byte big-endian scalar as hex — the same dialect
-// cmd/init-network uses for the admission-authority secp256k1 key (and
-// what `init-network -out-ledger-key` writes). A PEM file is rejected with
+// cmd/genesis-ceremony uses for the admission-authority secp256k1 key (and
+// what `genesis-ceremony dev -out-ledger-key` writes). A PEM file is rejected with
 // an explicit message rather than mis-parsed.
 //
 // Priority:

@@ -1152,7 +1152,7 @@ func buildResolverInputs(
 // The cosignature verifier is selected from the network's SIGNATURE POLICY
 // (allowedCosignSchemeTags, from the bootstrap's GenesisSignaturePolicy) via
 // crosslog.BuildWitnessSetsForPolicy — not hardcoded. Every network today
-// admits ECDSA only (init-network sets AllowedCosignSchemeTags=[0x01]), so
+// admits ECDSA only (genesis-ceremony sets AllowedCosignSchemeTags=[0x01]), so
 // this resolves to the exact ECDSA-only construction; the moment a network's
 // policy admits BLS, the production BLS verifier is threaded automatically,
 // and a policy admitting a scheme the auditor cannot verify fails the build

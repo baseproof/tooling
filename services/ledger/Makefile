@@ -33,10 +33,22 @@ help: ## List available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
 		awk 'BEGIN{FS=":.*?## "}; {printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2}'
 
-build: ## Compile every package
+# First-run guard: the committed go.work links ./third_party/tessera (the
+# fork submodule), so on a FRESH clone every default go command fails with a
+# missing-module error until the submodule is initialized — a confusing first
+# touch (CI inits it via `submodules: recursive`; plain clones don't). The
+# guard self-heals exactly that case and is a no-op once initialized.
+submodules:
+	@if [ ! -f third_party/tessera/go.mod ] && grep -q 'third_party/tessera' go.work 2>/dev/null; then \
+	  echo "first run: initializing the tessera fork submodule (committed go.work links it)"; \
+	  git -C "$$(git rev-parse --show-toplevel)" submodule update --init services/ledger/third_party/tessera; \
+	fi
+.PHONY: submodules
+
+build: submodules ## Compile every package
 	$(GO) build ./...
 
-test: ## Run all tests (integration tests skip without BASEPROOF_TEST_DSN)
+test: submodules ## Run all tests (integration tests skip without BASEPROOF_TEST_DSN)
 	# -p 1 serializes PACKAGES (not tests within a package). Defense-in-
 	# depth against cross-package contamination: every integration-style
 	# test (builder/cursor_reader, store/smt_state, cmd/rebuild-projection,

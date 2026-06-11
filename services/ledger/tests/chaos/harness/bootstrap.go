@@ -34,7 +34,7 @@ trade-off:
 If a future chaos test needs a stable LEDGER_DID across restart,
 write a raw 32-byte secp256k1 scalar as hex to a file and point
 LEDGER_SIGNER_KEY_FILE at it (the loader reads that dialect — see
-cmd/ledger/signers.go; generate one with `init-network
+cmd/ledger/signers.go; generate one with `genesis-ceremony dev
 -out-ledger-key`). secp256k1 is not a stdlib x509 curve, so the
 loader takes a hex scalar, not a PEM.
 */
@@ -107,7 +107,7 @@ func BuildBootstrap(t *testing.T, dir string, exchangeDID, networkName string, w
 		},
 		// GenesisSignaturePolicy is REQUIRED (hashed into the NetworkID): emit
 		// the zero-trust default — secp256k1-ECDSA entry signatures + ECDSA
-		// cosignatures — matching init-network so a chaos network admits the
+		// cosignatures — matching genesis-ceremony so a chaos network admits the
 		// same set a real one does.
 		GenesisSignaturePolicy: network.SignaturePolicy{
 			AllowedEntrySigSchemes:  []uint16{0x0001},

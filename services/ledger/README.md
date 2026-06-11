@@ -55,7 +55,7 @@ generic 2-node topology with their own values.
 
 Single binary (`cmd/ledger`). Read-only sibling
 (`cmd/ledger-reader`) serves the read endpoints without admission.
-Local-dev bootstrap helper (`cmd/init-network`) generates a self-
+Local-dev bootstrap helper (`cmd/genesis-ceremony dev`) generates a self-
 witness K=1 topology for `scripts/run-local.sh`. Kubernetes target
 — one writer replica per log DID, advisory-locked.
 

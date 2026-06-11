@@ -163,7 +163,7 @@ func TestBuildBootstrapDoc_PassesGenesisValidation(t *testing.T) {
 	}
 
 	for _, gating := range []string{"off", "require"} {
-		doc := buildBootstrapDoc("did:web:state:tn:davidson", "clarity-test", gating, "require", []string{did}, 1, addr, 1)
+		doc := buildBootstrapDoc("did:web:state:tn:davidson", "clarity-test", gating, "require", []string{did}, 1, addr, 1, nil, "")
 		// doc.IDs() runs the SDK's validate() — exactly init-network's gate. A
 		// missing genesis_signature_policy fails here, which is the regression.
 		if _, err := doc.IDs(); err != nil {
@@ -199,7 +199,7 @@ func TestBuildBootstrapDoc_MinSignaturesConfigurable(t *testing.T) {
 	}
 
 	// A configured non-default floor threads through and validates.
-	doc := buildBootstrapDoc("did:web:state:tn:davidson", "clarity-test", "require", "require", []string{did}, 1, addr, 3)
+	doc := buildBootstrapDoc("did:web:state:tn:davidson", "clarity-test", "require", "require", []string{did}, 1, addr, 3, nil, "")
 	if got := doc.GenesisSignaturePolicy.MinSignaturesPerEntry; got != 3 {
 		t.Fatalf("MinSignaturesPerEntry = %d, want 3 (flag did not thread)", got)
 	}
@@ -209,7 +209,7 @@ func TestBuildBootstrapDoc_MinSignaturesConfigurable(t *testing.T) {
 
 	// A 0 floor is rejected by the SDK at NetworkID derivation, regardless of
 	// the CLI guard — this is the genesis half of the "always > 0" invariant.
-	zero := buildBootstrapDoc("did:web:state:tn:davidson", "clarity-test", "require", "require", []string{did}, 1, addr, 0)
+	zero := buildBootstrapDoc("did:web:state:tn:davidson", "clarity-test", "require", "require", []string{did}, 1, addr, 0, nil, "")
 	if _, err := zero.IDs(); err == nil {
 		t.Fatal("min-signatures=0 must be rejected by doc.IDs() (admit-unsigned floor)")
 	}
@@ -257,7 +257,7 @@ func TestInitNetwork_EmitsConstitutionalK(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolve K: %v", err)
 	}
-	doc := buildBootstrapDoc("did:web:state:tn:davidson", "clarity-test", "require", "require", dids, k, addr, 1)
+	doc := buildBootstrapDoc("did:web:state:tn:davidson", "clarity-test", "require", "require", dids, k, addr, 1, nil, "")
 	if doc.GenesisQuorumK != 2 {
 		t.Fatalf("emitted GenesisQuorumK = %d, want 2 for N=3", doc.GenesisQuorumK)
 	}
@@ -303,7 +303,7 @@ func mintWitnessFixture(t *testing.T, n int) (dids []string, privs []*ecdsa.Priv
 func TestMintServedBootstrap_RequireSelfEndorses(t *testing.T) {
 	const n = 3
 	dids, privs, addr := mintWitnessFixture(t, n)
-	doc := buildBootstrapDoc("did:web:state:tn:davidson", "clarity-test", "require", "require", dids, 2, addr, 1)
+	doc := buildBootstrapDoc("did:web:state:tn:davidson", "clarity-test", "require", "require", dids, 2, addr, 1, nil, "")
 	ids, err := doc.IDs()
 	if err != nil {
 		t.Fatalf("IDs: %v", err)
@@ -352,7 +352,7 @@ func TestMintServedBootstrap_RequireSelfEndorses(t *testing.T) {
 // demands no ceremony) — the pre-write round-trip gate applies in BOTH modes.
 func TestMintServedBootstrap_OffPolicy(t *testing.T) {
 	dids, privs, addr := mintWitnessFixture(t, 3)
-	doc := buildBootstrapDoc("did:web:state:tn:davidson", "clarity-test", "require", "off", dids, 2, addr, 1)
+	doc := buildBootstrapDoc("did:web:state:tn:davidson", "clarity-test", "require", "off", dids, 2, addr, 1, nil, "")
 	ids, err := doc.IDs()
 	if err != nil {
 		t.Fatalf("IDs: %v", err)
@@ -383,8 +383,8 @@ func TestMintServedBootstrap_OffPolicy(t *testing.T) {
 // consumer's TOFU pin.
 func TestEndorsementPolicy_BoundIntoNetworkID(t *testing.T) {
 	dids, _, addr := mintWitnessFixture(t, 3)
-	reqDoc := buildBootstrapDoc("did:web:state:tn:davidson", "clarity-test", "require", "require", dids, 2, addr, 1)
-	offDoc := buildBootstrapDoc("did:web:state:tn:davidson", "clarity-test", "require", "off", dids, 2, addr, 1)
+	reqDoc := buildBootstrapDoc("did:web:state:tn:davidson", "clarity-test", "require", "require", dids, 2, addr, 1, nil, "")
+	offDoc := buildBootstrapDoc("did:web:state:tn:davidson", "clarity-test", "require", "off", dids, 2, addr, 1, nil, "")
 
 	reqIDs, err := reqDoc.IDs()
 	if err != nil {
@@ -447,7 +447,7 @@ func TestBuildBootstrapDoc_GenesisQuorumK(t *testing.T) {
 		t.Fatalf("admission authority: %v", err)
 	}
 	build := func(k int) (network.BootstrapDocument, error) {
-		doc := buildBootstrapDoc("did:web:state:tn:davidson", "clarity-test", "require", "require", dids, k, addr, 1)
+		doc := buildBootstrapDoc("did:web:state:tn:davidson", "clarity-test", "require", "require", dids, k, addr, 1, nil, "")
 		_, idErr := doc.IDs()
 		return doc, idErr
 	}

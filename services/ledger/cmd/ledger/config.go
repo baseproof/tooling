@@ -312,7 +312,7 @@ type Config struct {
 	// LedgerSignerKeyFile is the path to the ledger's secp256k1
 	// signing key — a raw 32-byte big-endian scalar, hex-encoded
 	// (NOT PEM: secp256k1 is not a stdlib x509 curve). The same
-	// on-disk form cmd/init-network writes via -out-ledger-key. The
+	// on-disk form cmd/genesis-ceremony dev writes via -out-ledger-key. The
 	// ledger uses it to sign its own entries (anchor publisher,
 	// commitment publisher). When empty, an ephemeral key is
 	// generated at boot — fine for local dev, never for production.

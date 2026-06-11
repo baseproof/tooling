@@ -679,7 +679,7 @@ func TestHTTP_CreditDeduction(t *testing.T) {
 // ═════════════════════════════════════════════════════════════════════════════
 
 func TestHTTP_EndToEnd_SubmitAndQueryBack(t *testing.T) {
-	t.Skipf("harness sequencer never sequences — documented-dark with exit criteria in baseproof/tooling#82")
+	t.Skipf("harness sequencer never sequences — documented-dark with exit criteria in baseproof/tooling#91")
 	op := startTestLedger(t)
 	op.seedSession(t, "tok-e2e", "did:example:exchange-e2e", 100)
 
@@ -858,7 +858,7 @@ func TestHTTP_BatchSubmission_HistoricalDuplicate_409(t *testing.T) {
 // ═════════════════════════════════════════════════════════════════════════════
 
 func TestHTTP_EntryResponseShape(t *testing.T) {
-	t.Skipf("harness sequencer never sequences — documented-dark with exit criteria in baseproof/tooling#82")
+	t.Skipf("harness sequencer never sequences — documented-dark with exit criteria in baseproof/tooling#91")
 	op := startTestLedger(t)
 	op.seedSession(t, "tok-shape", "did:example:exchange-shape", 100)
 

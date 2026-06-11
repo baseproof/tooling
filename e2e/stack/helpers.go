@@ -67,7 +67,7 @@ func httpStatus(url string) int {
 }
 
 // resolveRoot finds the tooling repo root (the dir holding go.work, or
-// services/ledger/cmd/init-network), walking up from the cwd. hint overrides.
+// services/ledger/cmd/genesis-ceremony), walking up from the cwd. hint overrides.
 func resolveRoot(hint string) (string, error) {
 	if hint != "" {
 		return filepath.Abs(hint)
@@ -80,12 +80,12 @@ func resolveRoot(hint string) (string, error) {
 		if _, err := os.Stat(filepath.Join(dir, "go.work")); err == nil {
 			return dir, nil
 		}
-		if _, err := os.Stat(filepath.Join(dir, "services", "ledger", "cmd", "init-network")); err == nil {
+		if _, err := os.Stat(filepath.Join(dir, "services", "ledger", "cmd", "genesis-ceremony")); err == nil {
 			return dir, nil
 		}
 		parent := filepath.Dir(dir)
 		if parent == dir {
-			return "", fmt.Errorf("could not find the tooling repo root (need go.work or services/ledger/cmd/init-network above %s); set Config.RepoRoot", wd)
+			return "", fmt.Errorf("could not find the tooling repo root (need go.work or services/ledger/cmd/genesis-ceremony above %s); set Config.RepoRoot", wd)
 		}
 		dir = parent
 	}

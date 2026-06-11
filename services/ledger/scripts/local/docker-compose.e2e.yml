@@ -20,7 +20,7 @@
 # KEY VOLUMES
 #
 #   The witness key + network bootstrap doc are generated on the
-#   HOST by scripts/run-e2e.sh (via go run ./cmd/init-network)
+#   HOST by scripts/run-e2e.sh (via go run ./cmd/genesis-ceremony dev)
 #   and bind-mounted READ-ONLY into the container. The host path
 #   is interpolated from the E2E_KEYS_DIR env var so the script
 #   can point at any directory (defaults to .run/e2e/).
@@ -58,7 +58,7 @@ services:
   # the published image from tooling (ghcr.io/<owner>/tooling/
   # witness) — the ledger builds no witness, and needs no witness source
   # checkout. Reads its PEM key + bootstrap doc (minted on the host by
-  # scripts/run-e2e.sh via cmd/init-network) from a read-only bind mount.
+  # scripts/run-e2e.sh via cmd/genesis-ceremony dev) from a read-only bind mount.
   # ─────────────────────────────────────────────────────────────────
   witness:
     image: ${WITNESS_IMAGE:-ghcr.io/baseproof/tooling/witness:latest}
@@ -71,7 +71,7 @@ services:
       - "127.0.0.1:8081:8081"
     volumes:
       # E2E_KEYS_DIR is set by scripts/run-e2e.sh to the host path
-      # where init-network wrote witness-1.pem + bootstrap json.
+      # where genesis-ceremony dev wrote witness-1.pem + bootstrap json.
       # Read-only bind so the witness can't accidentally mutate
       # the keys.
       - "${E2E_KEYS_DIR:-../../.run/e2e}:/keys:ro"
