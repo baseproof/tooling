@@ -64,7 +64,7 @@ func witnessGather(t *testing.T, srv *httptest.Server, bdoc *network.BootstrapDo
 	if err != nil {
 		t.Fatalf("NewLedgerClient: %v", err)
 	}
-	g, err := NewStandaloneLedgerGather(client, srv.URL, srv.Client(), bdoc, k, 7, [32]byte{0x9})
+	g, err := NewStandaloneLedgerGather(client, srv.URL, srv.Client(), bdoc, 7, [32]byte{0x9})
 	if err != nil {
 		t.Fatalf("NewStandaloneLedgerGather: %v", err)
 	}

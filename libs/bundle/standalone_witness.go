@@ -100,7 +100,7 @@ func (g *StandaloneLedgerGather) genesisWitnessSet() (*cosign.WitnessKeySet, err
 	if err != nil {
 		return nil, fmt.Errorf("bundle/standalone: KeysFromDIDs: %w", err)
 	}
-	return cosign.NewWitnessKeySet(keys, cosign.NetworkID(ids.NetworkID), g.quorumK, nil)
+	return cosign.NewWitnessKeySet(keys, cosign.NetworkID(ids.NetworkID), g.bootstrap.GenesisQuorumK, nil)
 }
 
 // networkLogDID is the network's own log DID (the walk's ordering key).
@@ -146,7 +146,7 @@ func (g *StandaloneLedgerGather) currentWitnessSet(ctx context.Context) (*cosign
 	if err != nil {
 		return nil, fmt.Errorf("bundle/standalone: bootstrap IDs: %w", err)
 	}
-	return cosign.NewWitnessKeySet(keys, cosign.NetworkID(ids.NetworkID), g.quorumK, nil)
+	return cosign.NewWitnessKeySet(keys, cosign.NetworkID(ids.NetworkID), g.bootstrap.GenesisQuorumK, nil)
 }
 
 // ledgerLogSource adapts the ledger read API to the Rebuilder's LogSource: the scan

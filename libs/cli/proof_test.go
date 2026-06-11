@@ -18,7 +18,7 @@ func TestProof_GenerateAndWriteV2(t *testing.T) {
 	ctx := context.Background()
 	doc := mustBootstrapDoc(t)
 
-	proof, err := generateProof(ctx, &fakeStandaloneGather{doc: doc, quorumK: 1}, 1)
+	proof, err := generateProof(ctx, &fakeStandaloneGather{doc: doc}, 1)
 	if err != nil {
 		t.Fatalf("generateProof: %v", err)
 	}

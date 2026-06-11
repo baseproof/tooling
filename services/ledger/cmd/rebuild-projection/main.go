@@ -46,12 +46,15 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/baseproof/baseproof/core/envelope"
+	"github.com/baseproof/baseproof/network"
 	"github.com/baseproof/baseproof/types"
 
 	"github.com/baseproof/tooling/services/ledger/bytestore"
 	"github.com/baseproof/tooling/services/ledger/recovery"
 	"github.com/baseproof/tooling/services/ledger/store"
 	optessera "github.com/baseproof/tooling/services/ledger/tessera"
+	"github.com/baseproof/tooling/services/ledger/witnessclient"
 )
 
 func main() {
@@ -70,6 +73,7 @@ func main() {
 		batchSize   = flag.Int("batch-size", 500, "entries processed per atomic commit; bounds memory + lock-hold time")
 		verbose     = flag.Bool("verbose", false, "log every batch commit at INFO level (default: warn-only)")
 		tilesFromBS = flag.Bool("tiles-from-bytestore", false, "read Tessera tiles from the object store the writer ships them to (rebuild-from-object-store / DR path) instead of --tile-dir; the published head is taken from the cosigned horizon")
+		bootstrap   = flag.String("bootstrap", "", "path to the network constitution (bootstrap.json). When set, the witness_sets genesis baseline is re-rooted from the log's seq-0 record after the tile walk — the trust root (NetworkID) for that re-root comes from THIS file, out-of-band, exactly as the ledger boots. When unset, witness_sets is left to the gossip-replay path (§E2) and a warning is logged.")
 	)
 	flag.Parse()
 	missing := []string{}
@@ -169,6 +173,75 @@ func main() {
 	fmt.Printf("  leaves_written: %d\n", stats.LeavesWritten)
 	fmt.Printf("  root:           %x\n", stats.Root)
 	fmt.Printf("  duration:       %s\n", stats.Duration.Round(time.Millisecond))
+
+	// Witness-set baseline re-root (#76 Part 2). The tile walk above rebuilds
+	// entry_index/smt_*; the witness_sets genesis baseline is a projection of
+	// the log's OWN seq-0 constitution record, so we reconstruct it from entry 0
+	// — no off-log seed. The trust root (NetworkID pin) comes from --bootstrap,
+	// out-of-band, so a tampered/wrong genesis record is refused by the same
+	// ceremony+hash door the ledger boots through.
+	if *bootstrap == "" {
+		logger.Warn("rebuild-projection: witness_sets baseline NOT rebuilt — pass --bootstrap to re-root it from the log's seq-0 record (without it, /v1/network/witnesses/* will 404 until the gossip-replay path repopulates)")
+		return
+	}
+	if err := rebuildWitnessBaseline(ctx, pool, bs, *logDID, *bootstrap, logger); err != nil {
+		logger.Error("rebuild-projection: witness baseline re-root", "err", err)
+		os.Exit(1)
+	}
+}
+
+// rebuildWitnessBaseline re-roots the witness_sets genesis baseline from the
+// log's seq-0 constitution record. The pin is derived from the operator-mounted
+// bootstrap file through LoadVerifiedBootstrap (the same fail-closed first-
+// contact door the ledger boots through), then entry 0's domain payload is fed
+// to witnessclient.RebuildGenesisBaselineFromLog, which re-verifies the embedded
+// constitution against that pin and seeds the byte-identical baseline row.
+func rebuildWitnessBaseline(
+	ctx context.Context,
+	pool *pgxpool.Pool,
+	bs bytestore.Backend,
+	logDID, bootstrapFile string,
+	logger *slog.Logger,
+) error {
+	raw, err := os.ReadFile(bootstrapFile)
+	if err != nil {
+		return fmt.Errorf("read bootstrap %s: %w", bootstrapFile, err)
+	}
+	// Fail-closed first contact with our own mounted file, through the SDK's
+	// self-pin door (baseproof#52): strict decode + the genesis ceremony whenever
+	// the policy requires it. A require constitution stripped of endorsements
+	// must not pass — the rebuilt baseline derives only from a verified trust root.
+	doc, err := network.LoadSelfVerifiedBootstrap(raw)
+	if err != nil {
+		return fmt.Errorf("bootstrap %s failed first-contact verification: %w", bootstrapFile, err)
+	}
+	ids, err := doc.IDs()
+	if err != nil {
+		return fmt.Errorf("bootstrap %s: %w", bootstrapFile, err)
+	}
+	pin := [32]byte(ids.NetworkID)
+
+	fetcher := store.NewPostgresEntryFetcher(pool, bs, logDID)
+	meta, err := fetcher.Fetch(ctx, types.LogPosition{LogDID: logDID, Sequence: 0})
+	if err != nil {
+		return fmt.Errorf("read sequence 0: %w", err)
+	}
+	if meta == nil {
+		return fmt.Errorf("sequence 0 not found in the rebuilt projection — the log has no genesis record to re-root from")
+	}
+	entry, err := envelope.Deserialize(meta.CanonicalBytes)
+	if err != nil {
+		return fmt.Errorf("deserialize sequence 0: %w", err)
+	}
+	recorded, err := witnessclient.RebuildGenesisBaselineFromLog(ctx, pool, entry.DomainPayload, pin)
+	if err != nil {
+		return err
+	}
+	logger.Info("rebuild-projection: witness_sets genesis baseline re-rooted from log",
+		"network_id", fmt.Sprintf("%x", pin[:8]),
+		"row_inserted", recorded,
+	)
+	return nil
 }
 
 // resolveTileSource builds the tile backend + the published head for the rebuild.

@@ -448,7 +448,8 @@ func startTestLedgerWithOpts(t *testing.T, opts testLedgerOpts) *testLedger {
 	op := &testLedger{
 		BaseURL: baseURL, Pool: pool, Cursor: sequenceCursor,
 		CreditStore: creditStore, EntryStore: entryStore,
-		EntryBytes: entryBytesMem,
+		EntryBytes:   entryBytesMem,
+		WALCommitter: walc,
 		// EntryReader is the SAME composite that fetcher (production
 		// read path) uses. Tests asserting against the EntryReader
 		// abstraction MUST go through this field — reading EntryBytes

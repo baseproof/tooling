@@ -778,29 +778,23 @@ func loadConfig() (*Config, error) {
 			return nil, fmt.Errorf("read network bootstrap %s: %w",
 				cfg.NetworkBootstrapFile, err)
 		}
-		var probe network.BootstrapDocument
-		if uErr := json.Unmarshal(raw, &probe); uErr != nil {
-			return nil, fmt.Errorf("parse network bootstrap %s: %w",
-				cfg.NetworkBootstrapFile, uErr)
-		}
-		ids, err := probe.IDs()
-		if err != nil {
-			return nil, fmt.Errorf("network bootstrap %s: %w",
-				cfg.NetworkBootstrapFile, err)
-		}
-		// #75 Phase B — fail-closed first contact with our OWN mounted file.
-		// Boot has no external pin, so the file is self-pinned to the NetworkID
-		// it derives and admitted through the SAME door every client uses:
-		// strict decode + canonical-subset hash + the genesis ceremony whenever
-		// the constitution's policy requires it. A require-network
-		// bootstrap.json stripped of its endorsements REFUSES BOOT here — it
-		// must never be loaded, re-served, or anchored quietly.
-		verified, err := network.LoadVerifiedBootstrap(raw, [32]byte(ids.NetworkID))
+		// #75 Phase B — fail-closed first contact with our OWN mounted file,
+		// through the SDK's self-pin door (strict decode + the genesis ceremony
+		// whenever the constitution's policy requires it; baseproof#52 owns the
+		// idiom and documents why the self-pin equality is vacuous). A
+		// require-network bootstrap.json stripped of its endorsements REFUSES
+		// BOOT here — it must never be loaded, re-served, or anchored quietly.
+		verified, err := network.LoadSelfVerifiedBootstrap(raw)
 		if err != nil {
 			return nil, fmt.Errorf("network bootstrap %s failed first-contact verification "+
 				"(stripped/incomplete genesis ceremony?): %w", cfg.NetworkBootstrapFile, err)
 		}
 		doc := *verified
+		ids, err := doc.IDs()
+		if err != nil {
+			return nil, fmt.Errorf("network bootstrap %s: %w",
+				cfg.NetworkBootstrapFile, err)
+		}
 		cfg.NetworkID = ids.NetworkID
 		cfg.GenesisWitnessSet = append([]string{}, doc.GenesisWitnessSet...)
 

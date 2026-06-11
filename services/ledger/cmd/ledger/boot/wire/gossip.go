@@ -246,37 +246,15 @@ func wireWitnessQuorum(ctx context.Context, cfg Config, d *deps.AppDeps) error {
 		"scheme_tag", schemeTag,
 	)
 
-	// Record the genesis baseline row in witness_sets. The witness HISTORY
-	// endpoints serve only rows; without this, a never-rotated network 404s
-	// on /v1/network/witnesses/{current,at} while cosigning heads with the
-	// genesis set, and the first rotation leaves the genesis era uncovered
-	// (its "retire prior" UPDATE matches nothing). The row is DERIVED from
-	// the trust root — bootstrap DIDs + NetworkID + quorum K — never
-	// operator-seeded, and the reconcile is idempotent (it also backfills
-	// the genesis-era hole on deployments that already rotated). Derived
-	// from genesis config regardless of which set is ACTIVE: the active set
-	// above may be a PG-persisted rotation; the baseline row is always the
-	// genesis set.
-	genesisKeys, err := quorum.LoadWitnessKeys(cfg.GenesisWitnessSet)
-	if err != nil {
-		return fmt.Errorf("witness quorum: resolve genesis keys for baseline: %w", err)
-	}
-	genesisSet, err := quorum.NewKeySet(genesisKeys, cfg.NetworkID, cfg.WitnessQuorumK,
-		cfg.GenesisBootstrapDocument.GenesisSignaturePolicy.AllowedCosignSchemeTags)
-	if err != nil {
-		return fmt.Errorf("witness quorum: build genesis baseline set: %w", err)
-	}
-	recorded, err := witnessclient.SeedGenesisBaseline(ctx, d.PgPool.DB, genesisSet, genesisKeys, 0x01)
-	if err != nil {
-		return fmt.Errorf("witness quorum: record genesis baseline: %w", err)
-	}
-	if recorded {
-		h := genesisSet.SetHash()
-		d.Logger.Info("witness history: genesis baseline recorded",
-			"set_hash", fmt.Sprintf("%x", h[:8]),
-			"witness_set_size", genesisSet.Size(),
-		)
-	}
+	// The witness_sets genesis BASELINE row is no longer seeded here. It is a
+	// projection of the log's seq-0 constitution record, so it is re-rooted
+	// AFTER that record is seated at sequence 0 — see
+	// reRootWitnessBaselineFromDeps (#76 Part 2), which derives the same row
+	// (byte-identical set_hash) from the log via
+	// witnessclient.RebuildGenesisBaselineFromLog rather than from config. This
+	// function still seeds d.QuorumManager above: that is the in-memory ACTIVE
+	// admission quorum, needed before serving and independent of the persisted
+	// history row.
 	return nil
 }
 

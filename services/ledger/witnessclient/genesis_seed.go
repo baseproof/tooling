@@ -44,7 +44,13 @@ import (
 
 	"github.com/baseproof/baseproof/crypto/cosign"
 	"github.com/baseproof/baseproof/types"
+	"github.com/baseproof/baseproof/verifier"
 )
+
+// GenesisCosignSchemeTag is the genesis cosign scheme: ECDSA (0x01). did:key
+// witness resolution is secp256k1-only (quorum.LoadWitnessKeys), so the genesis
+// roster never carries a BLS key — those join on-log via a verified rotation.
+const GenesisCosignSchemeTag byte = 0x01
 
 // SeedGenesisBaseline reconciles the genesis witness set into the
 // witness_sets history table (see the file header for the three
@@ -99,4 +105,35 @@ func SeedGenesisBaseline(
 		return false, fmt.Errorf("witness/genesis-baseline: persist: %w", err)
 	}
 	return tag.RowsAffected() == 1, nil
+}
+
+// RebuildGenesisBaselineFromLog reconciles the genesis baseline row by deriving
+// the witness set FROM THE LOG'S OWN seq-0 constitution record (#76 Part 2),
+// not from configuration. This is the projection-as-cache-of-the-log re-root:
+// verifier.GenesisSetFromRecord re-verifies the record against the TOFU pin
+// (strict decode → canonical-subset hash → genesis ceremony, via the
+// LoadVerifiedBootstrap chokepoint) and reads the constitutional quorum K from
+// it, so the resulting row is rebuildable from the log alone — no off-log trust
+// input, no caller-supplied K.
+//
+// One home: the ledger boot path (after the constitution is seated at sequence
+// 0) and rebuild-projection (after the tile walk repopulates entry_index) both
+// seed through here. The set_hash it produces is byte-identical to the
+// config-derived baseline (genesis DIDs + NetworkID + quorum K hash to the same
+// content-addressable identity); the parity test pins that they cannot diverge.
+//
+// record is the genesis entry's domain payload (the BP-ENTRY-NETWORK-GENESIS-V1
+// JSON); pin is the network's TOFU NetworkID. Returns true when a row was
+// inserted, false when the table already carried a genesis-era record.
+func RebuildGenesisBaselineFromLog(
+	ctx context.Context,
+	db *pgxpool.Pool,
+	record []byte,
+	pin [32]byte,
+) (bool, error) {
+	genesisSet, err := verifier.GenesisSetFromRecord(record, pin, nil)
+	if err != nil {
+		return false, fmt.Errorf("witness/genesis-baseline: re-root from log: %w", err)
+	}
+	return SeedGenesisBaseline(ctx, db, genesisSet, genesisSet.Keys(), GenesisCosignSchemeTag)
 }
