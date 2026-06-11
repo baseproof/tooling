@@ -16,7 +16,7 @@
 // (github.com/baseproof/tooling); it imports the same Baseproof SDK
 // but resolves its module graph independently and never imports the ledger.
 
-go 1.25.7
+go 1.25.11
 
 use (
 	.
