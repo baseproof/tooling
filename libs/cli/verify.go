@@ -126,6 +126,12 @@ func trustRootFromProof(proof *sdkbundle.StandaloneProof) (map[cosign.NetworkID]
 	// Self-pin: derive the IDs the document claims, then run the full
 	// first-contact verification (strict decode, canonical-subset hash equality,
 	// ceremony when the policy requires it) against that pin.
+	//
+	// The pin equality is VACUOUS here — it is derived from these very bytes —
+	// so what this gate actually enforces is the strict decode + the genesis
+	// ceremony, not the pin. The EXTERNAL pin (--pin/--network/--bundle, applied
+	// in verifyProofFile above) is where hash equality does real work; first
+	// contact has no external anchor, so it leans entirely on the ceremony.
 	var probe network.BootstrapDocument
 	if err := json.Unmarshal(gb.BootstrapDocument, &probe); err != nil {
 		return nil, fmt.Errorf("decode embedded bootstrap: %w", err)

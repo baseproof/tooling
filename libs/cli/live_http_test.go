@@ -128,7 +128,7 @@ func writeJSON(w http.ResponseWriter, v any) {
 // network id, and rejects a tampered copy.
 func TestProof_LiveGatherOverHTTP(t *testing.T) {
 	ctx := context.Background()
-	fx := buildRealFixture(t, 3, 2) // 3 witnesses, quorum 2
+	fx := buildRealFixture(t, 3, 2, false) // 3 witnesses, quorum 2
 	srv := fx.startFixtureServer(t)
 
 	bundlePath := writeBundle(t, ClientBundle{
@@ -204,7 +204,7 @@ func TestProof_LiveGatherOverHTTP(t *testing.T) {
 // SMT proofs (non-membership for random keys) bound to the witnessed smt_root.
 func TestInfoVerify_HorizonOverHTTP(t *testing.T) {
 	ctx := context.Background()
-	fx := buildRealFixture(t, 3, 2)
+	fx := buildRealFixture(t, 3, 2, false)
 	srv := fx.startFixtureServer(t)
 
 	// The witness set, built exactly as info.go does (info.go:199).

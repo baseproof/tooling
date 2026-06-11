@@ -794,7 +794,9 @@ func loadConfig() (*Config, error) {
 		// strict decode + canonical-subset hash + the genesis ceremony whenever
 		// the constitution's policy requires it. A require-network
 		// bootstrap.json stripped of its endorsements REFUSES BOOT here — it
-		// must never be loaded, re-served, or anchored quietly.
+		// must never be loaded, re-served, or anchored quietly. The self-pin
+		// equality is VACUOUS (the pin is derived from these very bytes); the
+		// enforcement is the strict decode + the genesis ceremony, not the pin.
 		verified, err := network.LoadVerifiedBootstrap(raw, [32]byte(ids.NetworkID))
 		if err != nil {
 			return nil, fmt.Errorf("network bootstrap %s failed first-contact verification "+

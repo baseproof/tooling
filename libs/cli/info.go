@@ -26,6 +26,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -470,8 +471,7 @@ func getJSON(ctx context.Context, httpClient *http.Client, u string, out any) er
 
 // httpStatusError reports a non-200 from getJSON. errors.As lets callers
 // branch on the status (the witnesses genesis fallback keys off 404) without
-// string-matching; Error() keeps the exact prior message, which
-// getJSONOptional's "HTTP 404" match still relies on.
+// string-matching.
 type httpStatusError struct {
 	Code int
 	URL  string
@@ -479,9 +479,13 @@ type httpStatusError struct {
 
 func (e *httpStatusError) Error() string { return fmt.Sprintf("HTTP %d from %s", e.Code, e.URL) }
 
+// getJSONOptional treats a 404 as "absent, no error" and surfaces every other
+// failure. It branches on the TYPED status (errors.As → httpStatusError.Code),
+// not the rendered message — a transport error or a 500 still propagates.
 func getJSONOptional(ctx context.Context, httpClient *http.Client, u string, out any) error {
 	err := getJSON(ctx, httpClient, u, out)
-	if err != nil && strings.Contains(err.Error(), "HTTP 404") {
+	var hs *httpStatusError
+	if errors.As(err, &hs) && hs.Code == http.StatusNotFound {
 		return nil
 	}
 	return err

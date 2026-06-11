@@ -399,7 +399,9 @@ func loadBootstrap(path string) (network.BootstrapDocument, error) {
 	// constitution: self-pinned to the NetworkID it derives and admitted through
 	// the same door every client uses (strict decode, canonical-subset hash, the
 	// genesis ceremony whenever the policy requires it). A witness must refuse
-	// to cosign FOR a require network whose constitution it cannot verify.
+	// to cosign FOR a require network whose constitution it cannot verify. The
+	// self-pin equality is VACUOUS (the pin is derived from these very bytes);
+	// the enforcement is the strict decode + the genesis ceremony, not the pin.
 	verified, err := network.LoadVerifiedBootstrap(data, [32]byte(ids.NetworkID))
 	if err != nil {
 		return network.BootstrapDocument{}, fmt.Errorf(

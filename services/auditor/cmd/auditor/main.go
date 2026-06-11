@@ -973,7 +973,9 @@ func loadBootstrap(path string) (nid cosign.NetworkID, exchangeDID string, witne
 	// constitution: self-pinned to the NetworkID it derives and admitted through
 	// the same door every client uses (strict decode, canonical-subset hash, the
 	// genesis ceremony whenever the policy requires it). An auditor must refuse
-	// to audit AGAINST a require constitution it cannot verify.
+	// to audit AGAINST a require constitution it cannot verify. The self-pin
+	// equality is VACUOUS (the pin is derived from these very bytes); the
+	// enforcement is the strict decode + the genesis ceremony, not the pin.
 	verified, err := sdknetwork.LoadVerifiedBootstrap(raw, [32]byte(ids.NetworkID))
 	if err != nil {
 		return nid, "", nil, sdknetwork.BootstrapDocument{}, fmt.Errorf(
