@@ -29,6 +29,28 @@ jobs:
   build:
     name: build + vet + test
     runs-on: ubuntu-latest
+    # The DSN-gated suites (witnessclient rotation invariants, store, the
+    # checkpoint capstone, the rotation-appender e2e) silently SKIPPED for as
+    # long as CI provisioned no Postgres — which is how two real schema bugs
+    # (the inert witness_sets_active index; a string hash_algo seed) shipped
+    # dark. This service + the verbatim `make test` invocation (which sets
+    # LEDGER_TEST_SERIAL=1 and -p 1 — the shared-DB serialization contract the
+    # requireDB guard enforces) make the DB suite run on every PR, not only
+    # on developers' laptops.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: ledger_test
+        ports:
+          - "5432:5432"
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - name: Checkout
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
@@ -47,8 +69,10 @@ jobs:
       - name: go vet
         run: go vet ./...
 
-      - name: go test (-short, all packages)
-        run: go test -short -count=1 ./...
+      - name: go test (full suite, serial — the Makefile contract)
+        env:
+          BASEPROOF_TEST_DSN: postgres://postgres:postgres@localhost:5432/ledger_test?sslmode=disable
+        run: make test
 
       - name: SDK mutation-gate audit (audit-sdk)
         run: make audit-sdk

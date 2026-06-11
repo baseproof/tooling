@@ -144,24 +144,28 @@ func TestReconstruct_DetectsTampering(t *testing.T) {
 	}
 }
 
-// TestReconstruct_EmptyTable returns Match=true when both
-// smt_leaves and smt_root_state describe a freshly-bootstrapped
-// log (zero leaves, zero root).
+// TestReconstruct_EmptyTable returns Match=true when both smt_leaves and
+// smt_root_state describe a freshly-bootstrapped log: zero leaves and the
+// CANONICAL empty-tree root smt.EmptyHash (sha256("") — the convention
+// migrations 0003/0012 seed and the builder maintains). The original fixture
+// seeded an all-zero root, which no migration and no production writer ever
+// persists — the reconstructor correctly computes EmptyHash for zero leaves,
+// so the test failed every time it actually reached a database (it was
+// DSN-gated and CI provisioned none).
 func TestReconstruct_EmptyTable(t *testing.T) {
 	pool, cleanup := openTestPG(t)
 	defer cleanup()
 
-	// Genesis state: zero-root + zero leaves + zero
-	// committed_through_seq.
-	var zero [32]byte
-	populateSMTState(t, pool, nil, zero, 0)
+	// Genesis state: the canonical empty-tree root + zero leaves + zero
+	// committed_through_seq — byte-identical to what RunMigrations seeds.
+	populateSMTState(t, pool, nil, smt.EmptyHash, 0)
 
 	result, err := Reconstruct(context.Background(), pool)
 	if err != nil {
 		t.Fatalf("Reconstruct on empty: %v", err)
 	}
 	if !result.Match {
-		t.Fatalf("empty-table Reconstruct should Match (both roots are zero):\n%s",
+		t.Fatalf("empty-table Reconstruct should Match (both roots are the empty-tree root):\n%s",
 			result.FormatMismatch())
 	}
 	if result.LeafCount != 0 {
