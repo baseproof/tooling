@@ -325,6 +325,37 @@ The `t.Skip` pattern is how integration tests advertise their
 gate (e.g., `requireDB(t)` returns `*pgxpool.Pool` or skips).
 Follow the existing pattern.
 
+### Rule 9: Test at your altitude — consumers prove delegation, not SDK rules
+
+The ledger consumes cryptographic rules (witness-rotation verification,
+genesis validation, cosign binding) from the baseproof SDK. Those rules
+have ONE home. Tests must respect the same boundary the code does:
+
+- **The SDK owns rule *semantics*** — branch ordering, rule interactions,
+  error taxonomy. These are locked by the SDK's own lock tests and mutation
+  audits (e.g., `VerifyRotation`'s 2K>N-before-dual-sign ordering is pinned
+  by the SDK's `TestQuorumRatio_DualSign_DiluteRejected`). The ledger does
+  not re-derive them.
+- **The consumer owns *delegation + fail-closed consequences*** — exactly
+  ONE rejection test per rule *class*, asserting (a) the SDK sentinel
+  surfaces through the boundary and (b) nothing half-applied: no
+  `witness_sets` row, no in-memory set swap, no gossip emit. The class
+  representatives live in `witnessclient/rotation_invariants_test.go`
+  (`RejectsDilution`, `RejectsJoinerWithoutConsent`,
+  `AcceptsKitMintedRotation`). A consumer suite never *tours* SDK branches.
+
+**The smell test:** if a consumer-level test requires fabricating inputs the
+boundary itself refuses (e.g. hand-forging a BLS new-set just to reach an
+SDK-internal branch that `ProcessRotation`'s encode step rejects first), the
+test belongs a layer down — in the SDK — or nowhere.
+
+> **Reviewer's one-line check:** *Does this consumer test prove delegation
+> and side-effect consequences for a rule class — or is it re-deriving a rule
+> the SDK already owns? If the latter, it belongs in the SDK or nowhere.*
+
+This is the testing analogue of the code law: one rule, one home; consumers
+prove they delegate and that the consequences are fail-closed.
+
 ## What to delete vs keep
 
 When refactoring, the following files should follow the project's
