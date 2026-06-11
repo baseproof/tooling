@@ -145,7 +145,6 @@ func networkCmd() *cobra.Command {
 	af.String("from", "", "import a client bundle from this file or URL")
 	af.String("from-ledger", "", "AUTHOR a bundle by introspecting this live ledger endpoint")
 	af.String("ca-cert", "", "CA cert to pin (for --from-ledger HTTPS + the bundle's transport)")
-	af.Int("quorum", 0, "witness quorum K (REQUIRED for --from-ledger)")
 	af.String("log-did", "", "log DID (--from-ledger; else taken from /v1/log-info)")
 	af.Bool("use", false, "set this network active after adding")
 	af.Duration("timeout", 30*time.Second, "per-request HTTP timeout")
