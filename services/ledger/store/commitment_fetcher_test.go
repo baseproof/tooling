@@ -83,31 +83,15 @@ const testLogDID = "did:web:test-ledger.example"
 // BASEPROOF_TEST_DSN to its Postgres; local developers point it at
 // any disposable database.
 //
-// LEDGER_TEST_SERIAL: the shared-DB serialization contract. These
-// requireDB tests share one Postgres (they are NOT per-test-schema
-// isolated like store.IsolatedDB), so running them concurrently with
-// other packages cross-contaminates state and produces flaky
-// "Count=18 want 16" failures that cost a debugging session each. The
-// Makefile's `test`/`test-chaos` targets set the var and run `-p 1`;
-// a bare `go test ./...` does not. This guard REFUSES the unsafe run
-// with a one-line pointer rather than letting it flake — promoted from
-// warn-only (which is precisely how a real contamination shipped
-// undiagnosed). IDE / single-package debugging: set LEDGER_TEST_SERIAL=1
-// yourself (you are asserting "nothing else touches this DB concurrently").
-// This guard is the tracked debt's tripwire; it is deleted when these
-// tests converge on store.IsolatedDB and the var is removed.
+// LEDGER_TEST_SERIAL: enforced by store.RequireSerial — the contract's
+// ONE home (see its doc; tracked exit: #79 IsolatedDB convergence).
 func requireDB(t *testing.T) *pgxpool.Pool {
 	t.Helper()
 	dsn := os.Getenv("BASEPROOF_TEST_DSN")
 	if dsn == "" {
 		t.Skip("BASEPROOF_TEST_DSN unset; skipping integration-style fetcher test")
 	}
-	if os.Getenv("LEDGER_TEST_SERIAL") != "1" {
-		t.Fatalf("LEDGER_TEST_SERIAL != 1: this shared-DB test must run serially. " +
-			"Use `make -C services/ledger test` (sets the var + `-p 1`), or set " +
-			"LEDGER_TEST_SERIAL=1 for a single-package/IDE run. Running it concurrently " +
-			"with other packages cross-contaminates the shared Postgres.")
-	}
+	RequireSerial(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	pool, err := pgxpool.New(ctx, dsn)

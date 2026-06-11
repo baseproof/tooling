@@ -19,6 +19,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/baseproof/baseproof/crypto/signatures"
+	sdkdid "github.com/baseproof/baseproof/did"
 	"github.com/baseproof/baseproof/network"
 )
 
@@ -68,8 +70,11 @@ func TestNetworkBootstrapHandler_ServesCanonicalBytes(t *testing.T) {
 	if got := rec.Body.Bytes(); !bytesEqual(got, canonical) {
 		t.Errorf("body bytes drift: got %d, want %d", len(got), len(canonical))
 	}
-	if cc := rec.Header().Get("Cache-Control"); cc != "public, max-age=31536000, immutable" {
-		t.Errorf("Cache-Control = %q", cc)
+	if cc := rec.Header().Get("Cache-Control"); cc != "public, max-age=3600" {
+		t.Errorf("Cache-Control = %q (immutable would be a cache lie: the served form is no longer content-addressed)", cc)
+	}
+	if et := rec.Header().Get("ETag"); et == "" {
+		t.Error("missing ETag (the validator that replaced immutable caching)")
 	}
 	// Bytes MUST hash to the NetworkID — the load-bearing identity
 	// invariant. A consumer recomputes this to confirm the network's
@@ -238,4 +243,91 @@ func bytesEqual(a, b []byte) bool {
 		}
 	}
 	return true
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// #75 Phase C — the served (endorsed) form
+// ─────────────────────────────────────────────────────────────────────
+
+// endorsedBootstrap mints a REQUIRE-policy constitution whose single witness
+// key this test holds, fully self-endorsed — the smallest document
+// EndorsedBootstrapBytes will emit.
+func endorsedBootstrap(t *testing.T) (network.BootstrapDocument, [32]byte) {
+	t.Helper()
+	priv, err := signatures.GenerateKey()
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+	compressed, err := signatures.CompressSecp256k1Pubkey(signatures.PubKeyBytes(&priv.PublicKey))
+	if err != nil {
+		t.Fatalf("compress: %v", err)
+	}
+	doc := validBootstrap(t)
+	doc.GenesisWitnessSet = []string{sdkdid.EncodeDIDKey(sdkdid.MulticodecSecp256k1, compressed)}
+	doc.GenesisEndorsementPolicy = network.GenesisEndorsementRequire
+	ids, err := doc.IDs()
+	if err != nil {
+		t.Fatalf("IDs: %v", err)
+	}
+	end, err := network.EndorseGenesis(doc, priv)
+	if err != nil {
+		t.Fatalf("EndorseGenesis: %v", err)
+	}
+	doc.GenesisEndorsements = []network.GenesisEndorsement{end}
+	return doc, [32]byte(ids.NetworkID)
+}
+
+// TestNetworkBootstrapHandler_ServedFormRoundTrips pins the #75 serve contract:
+// the handler serves EndorsedBootstrapBytes, whose raw SHA-256 deliberately
+// does NOT equal the NetworkID (endorsements sit outside the canonical subset)
+// — and a client admits it through LoadVerifiedBootstrap, which recomputes the
+// hash over the canonical subset and verifies the ceremony.
+func TestNetworkBootstrapHandler_ServedFormRoundTrips(t *testing.T) {
+	doc, pin := endorsedBootstrap(t)
+	served, err := network.EndorsedBootstrapBytes(doc)
+	if err != nil {
+		t.Fatalf("EndorsedBootstrapBytes: %v", err)
+	}
+	h := NewNetworkBootstrapHandler(served)
+	rec := httptest.NewRecorder()
+	h(rec, httptest.NewRequest(http.MethodGet, "/v1/network/bootstrap", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	body := rec.Body.Bytes()
+	if sha256.Sum256(body) == pin {
+		t.Fatal("served bytes raw-hash to the NetworkID — the fixture is not actually endorsed (test bug)")
+	}
+	got, err := network.LoadVerifiedBootstrap(body, pin)
+	if err != nil {
+		t.Fatalf("served form must round-trip the client first-contact door: %v", err)
+	}
+	if len(got.GenesisEndorsements) != 1 {
+		t.Fatalf("round-tripped doc carries %d endorsements, want 1", len(got.GenesisEndorsements))
+	}
+}
+
+// TestNetworkBootstrapHandler_ETag304 pins the cache contract that replaced
+// `immutable`: a strong ETag over the served bytes; If-None-Match revalidates
+// to 304 with no body.
+func TestNetworkBootstrapHandler_ETag304(t *testing.T) {
+	doc := validBootstrap(t)
+	served, _ := doc.CanonicalBytes()
+	h := NewNetworkBootstrapHandler(served)
+	rec := httptest.NewRecorder()
+	h(rec, httptest.NewRequest(http.MethodGet, "/v1/network/bootstrap", nil))
+	etag := rec.Header().Get("ETag")
+	if etag == "" {
+		t.Fatal("no ETag")
+	}
+	req := httptest.NewRequest(http.MethodGet, "/v1/network/bootstrap", nil)
+	req.Header.Set("If-None-Match", etag)
+	rec2 := httptest.NewRecorder()
+	h(rec2, req)
+	if rec2.Code != http.StatusNotModified {
+		t.Fatalf("revalidation status = %d, want 304", rec2.Code)
+	}
+	if rec2.Body.Len() != 0 {
+		t.Fatalf("304 carried a %d-byte body", rec2.Body.Len())
+	}
 }

@@ -245,9 +245,13 @@ func buildCrypto(n, k int) (*crypto, error) {
 	if err != nil {
 		return nil, fmt.Errorf("bootstrap ids: %w", err)
 	}
-	canonical, err := bdoc.CanonicalBytes()
+	// Serve the same form production serves (#75): the endorsed bytes. This
+	// fixture mints a legacy-policy doc (no ceremony demanded), so the emit is
+	// the full document with an empty endorsement set — clients verify it via
+	// LoadVerifiedBootstrap exactly as against a real ledger.
+	served, err := network.EndorsedBootstrapBytes(*bdoc)
 	if err != nil {
-		return nil, fmt.Errorf("canonical: %w", err)
+		return nil, fmt.Errorf("endorsed bootstrap bytes: %w", err)
 	}
 
 	authorKP, err := sdkdid.GenerateDIDKeySecp256k1()
@@ -321,7 +325,7 @@ func buildCrypto(n, k int) (*crypto, error) {
 	}
 
 	return &crypto{
-		canonical: canonical, nidHex: hex.EncodeToString(ids.NetworkID[:]), nid: ids.NetworkID,
+		canonical: served, nidHex: hex.EncodeToString(ids.NetworkID[:]), nid: ids.NetworkID,
 		networkDID: ids.DID, witnessKeyIDs: keyIDs, entryBytes: entryBytes, seq: pos,
 		smtKey: leafKey, smtTree: smtTree, head: head, inc: merkleProof,
 		logTime: time.Unix(1700000000, 0).UTC(),

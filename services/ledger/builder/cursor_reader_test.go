@@ -36,18 +36,17 @@ import (
 // behavior as store/commitment_fetcher_test.go's requireDB so the
 // suite is uniformly skip-friendly under `go test -short ./...`.
 //
-// LEDGER_TEST_SERIAL: warn-only guard. See the equivalent comment
-// in store/commitment_fetcher_test.go::requireDB.
+// LEDGER_TEST_SERIAL: enforced by store.RequireSerial — the contract's ONE
+// home (this was the warn-only twin of the store guard: same contract, two
+// enforcement levels, and the package the Makefile's own comment names as
+// the historical contaminator was the one still only warning).
 func requireDB(t *testing.T) *pgxpool.Pool {
 	t.Helper()
 	dsn := os.Getenv("BASEPROOF_TEST_DSN")
 	if dsn == "" {
 		t.Skip("BASEPROOF_TEST_DSN unset; skipping integration-style cursor reader test")
 	}
-	if os.Getenv("LEDGER_TEST_SERIAL") != "1" {
-		t.Logf("WARNING: LEDGER_TEST_SERIAL != 1; tests are running outside `make test`. " +
-			"Cross-package contamination is possible. Use `make test` for deterministic runs.")
-	}
+	store.RequireSerial(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	pool, err := pgxpool.New(ctx, dsn)

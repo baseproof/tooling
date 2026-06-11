@@ -184,3 +184,24 @@ func sanitizeForPGIdent(name string) string {
 	}
 	return b.String()
 }
+
+// RequireSerial is the ONE home of the shared-DB serialization contract: any
+// test that touches the shared Postgres WITHOUT per-test-schema isolation
+// (i.e. not via IsolatedDB) must run under `make -C services/ledger test`,
+// which sets LEDGER_TEST_SERIAL=1 and serializes packages with -p 1. Running
+// such a test concurrently with other packages cross-contaminates state and
+// produces flaky "Count=18 want 16" failures that cost a debugging session
+// each — which is exactly how a real contamination shipped while this guard
+// was warn-only in one of its two hand-mirrored copies. The guard REFUSES the
+// unsafe run; IDE / single-package debugging sets LEDGER_TEST_SERIAL=1 itself
+// (asserting "nothing else touches this DB concurrently"). Deleted when the
+// shared-DB tests converge on IsolatedDB (#79) and the var is removed.
+func RequireSerial(tb testing.TB) {
+	tb.Helper()
+	if os.Getenv("LEDGER_TEST_SERIAL") != "1" {
+		tb.Fatalf("LEDGER_TEST_SERIAL != 1: this shared-DB test must run serially. " +
+			"Use `make -C services/ledger test` (sets the var + `-p 1`), or set " +
+			"LEDGER_TEST_SERIAL=1 for a single-package/IDE run. Running it concurrently " +
+			"with other packages cross-contaminates the shared Postgres.")
+	}
+}

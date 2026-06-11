@@ -58,7 +58,9 @@ func (m *memCursor) SetScanCursor(_ context.Context, logDID string, until uint64
 }
 
 // memHeads is an in-memory VerifiedHeadSource.
-type memHeads struct{ h map[string]types.CosignedTreeHead }
+type memHeads struct {
+	h map[string]types.CosignedTreeHead
+}
 
 func (m *memHeads) LatestVerifiedHead(_ context.Context, logDID string) (types.CosignedTreeHead, bool, error) {
 	h, ok := m.h[logDID]

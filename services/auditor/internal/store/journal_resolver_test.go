@@ -258,4 +258,3 @@ func dualSignedRotation(t *testing.T, old, nw witnessSetKitHWS, sigCount int, ne
 	t.Helper()
 	return witnesstest.MintRotation(t, netID, old.ws, nw.ws, sigCount)
 }
-

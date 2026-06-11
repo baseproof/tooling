@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"errors"
 	"github.com/baseproof/baseproof/core/envelope"
 	"github.com/baseproof/baseproof/core/smt"
 	"github.com/baseproof/baseproof/crypto/cosign"
@@ -77,7 +78,7 @@ type realFixture struct {
 	seq           uint64   // the entry's chronological position
 	smtKey        [32]byte // the entry's SMT key (the witnessed presence key)
 	smtRoot       [32]byte
-	smtTree       *smt.Tree // the live tree, to serve membership/non-membership for ANY key
+	smtTree       *smt.Tree              // the live tree, to serve membership/non-membership for ANY key
 	head          types.CosignedTreeHead // cosigned by all n witnesses
 	inc           *types.MerkleProof
 	smtProof      *types.SMTProof
@@ -298,5 +299,29 @@ func TestProofVerify_RealCryptoPositive(t *testing.T) {
 	// Confirm the file we wrote is non-empty JCS bytes (the portable artifact).
 	if fi, _ := os.Stat(path); fi == nil || fi.Size() == 0 {
 		t.Fatal("proof file is empty")
+	}
+}
+
+// TestProofVerify_TrustRootKMismatch [E2]: the rc4+ constitution cross-check,
+// proven through a REAL generated proof rather than asserted at the SDK alone.
+// A trust root whose QuorumK disagrees with the constitution's NetworkID-bound
+// genesis_quorum_k must refuse verification with ErrGenesisBindFailed — a stale
+// or hostile trust root cannot lower (or raise) the quorum the proof verifies
+// under, because K's single source is the verified constitution.
+func TestProofVerify_TrustRootKMismatch(t *testing.T) {
+	ctx := context.Background()
+	g, trustRoots, seq := mustRealGather(t, 3, 2)
+
+	proof, err := generateProof(ctx, g, seq)
+	if err != nil {
+		t.Fatalf("generateProof: %v", err)
+	}
+	for nid, tr := range trustRoots {
+		tr.QuorumK++ // disagree with the constitutional K
+		trustRoots[nid] = tr
+	}
+	_, err = sdkbundle.VerifyStandalone(ctx, proof, trustRoots)
+	if !errors.Is(err, sdkbundle.ErrGenesisBindFailed) {
+		t.Fatalf("tampered trust-root K: want ErrGenesisBindFailed, got %v", err)
 	}
 }

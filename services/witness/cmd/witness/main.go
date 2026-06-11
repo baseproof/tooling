@@ -387,9 +387,23 @@ func loadBootstrap(path string) (network.BootstrapDocument, error) {
 	if err != nil {
 		return network.BootstrapDocument{}, fmt.Errorf("read: %w", err)
 	}
-	var doc network.BootstrapDocument
-	if err := json.Unmarshal(data, &doc); err != nil {
+	var probe network.BootstrapDocument
+	if err := json.Unmarshal(data, &probe); err != nil {
 		return network.BootstrapDocument{}, fmt.Errorf("unmarshal: %w", err)
 	}
-	return doc, nil
+	ids, err := probe.IDs()
+	if err != nil {
+		return network.BootstrapDocument{}, fmt.Errorf("derive network identity: %w", err)
+	}
+	// #75 Phase B — fail-closed first contact with the witness's OWN mounted
+	// constitution: self-pinned to the NetworkID it derives and admitted through
+	// the same door every client uses (strict decode, canonical-subset hash, the
+	// genesis ceremony whenever the policy requires it). A witness must refuse
+	// to cosign FOR a require network whose constitution it cannot verify.
+	verified, err := network.LoadVerifiedBootstrap(data, [32]byte(ids.NetworkID))
+	if err != nil {
+		return network.BootstrapDocument{}, fmt.Errorf(
+			"first-contact verification failed (stripped/incomplete genesis ceremony?): %w", err)
+	}
+	return *verified, nil
 }
