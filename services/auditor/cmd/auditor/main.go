@@ -969,6 +969,17 @@ func loadBootstrap(path string) (nid cosign.NetworkID, exchangeDID string, witne
 	if err != nil {
 		return nid, "", nil, sdknetwork.BootstrapDocument{}, fmt.Errorf("derive network identity from %s: %w", path, err)
 	}
+	// #75 Phase B — fail-closed first contact with the auditor's OWN mounted
+	// constitution: self-pinned to the NetworkID it derives and admitted through
+	// the same door every client uses (strict decode, canonical-subset hash, the
+	// genesis ceremony whenever the policy requires it). An auditor must refuse
+	// to audit AGAINST a require constitution it cannot verify.
+	verified, err := sdknetwork.LoadVerifiedBootstrap(raw, [32]byte(ids.NetworkID))
+	if err != nil {
+		return nid, "", nil, sdknetwork.BootstrapDocument{}, fmt.Errorf(
+			"bootstrap %s failed first-contact verification (stripped/incomplete genesis ceremony?): %w", path, err)
+	}
+	doc = *verified
 	if doc.ExchangeDID == "" || len(doc.GenesisWitnessSet) == 0 {
 		return nid, "", nil, sdknetwork.BootstrapDocument{}, fmt.Errorf("bootstrap %s missing exchange_did / genesis_witness_set", path)
 	}

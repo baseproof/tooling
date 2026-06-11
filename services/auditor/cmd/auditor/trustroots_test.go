@@ -20,6 +20,7 @@ import (
 
 	"github.com/baseproof/tooling/libs/auditing/peers"
 	"github.com/baseproof/tooling/services/auditor/internal/gossipfeed"
+	sdkdid "github.com/baseproof/baseproof/did"
 )
 
 // newDIDKey mints a fresh secp256k1 did:key (the shape of both witness DIDs and
@@ -317,5 +318,76 @@ func TestResolvePeers_BareDIDNoResolver(t *testing.T) {
 	feeds := []peers.PeerFeed{{LogDID: "did:web:x", BaseURL: ""}}
 	if _, err := resolvePeers(context.Background(), feeds, false, cosign.NetworkID{}, nil, testHTTPClient(), testLogger()); err == nil {
 		t.Fatal("expected failure when a bare did:web peer has no resolver")
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// #75 Phase B — fail-closed first contact with the mounted constitution
+// ─────────────────────────────────────────────────────────────────────
+
+// mintRequireBootstrapFiles writes a require-policy constitution (single
+// witness key held by the test) in BOTH forms: endorsed, and STRIPPED of its
+// endorsements (the canonical bytes keep the policy; the ceremony is gone).
+func mintRequireBootstrapFiles(t *testing.T) (endorsedPath, strippedPath string) {
+	t.Helper()
+	priv, err := signatures.GenerateKey()
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+	compressed, err := signatures.CompressSecp256k1Pubkey(signatures.PubKeyBytes(&priv.PublicKey))
+	if err != nil {
+		t.Fatalf("compress: %v", err)
+	}
+	doc := sdknetwork.BootstrapDocument{
+		ProtocolVersion:   "v1",
+		ExchangeDID:       "did:web:phaseb.example",
+		NetworkName:       "phaseb-require",
+		GenesisWitnessSet: []string{sdkdid.EncodeDIDKey(sdkdid.MulticodecSecp256k1, compressed)},
+		GenesisQuorumK:    1,
+		GenesisTreeHead: sdknetwork.GenesisTreeHead{
+			RootHash: "0000000000000000000000000000000000000000000000000000000000000000",
+		},
+		GenesisAdmissionPolicy:   sdknetwork.GenesisAdmissionPolicy{GatingRequired: false, CostMode: "uncharged"},
+		GenesisSignaturePolicy:   sdknetwork.SignaturePolicy{AllowedEntrySigSchemes: []uint16{1}, AllowedCosignSchemeTags: []uint8{1}, MinSignaturesPerEntry: 1},
+		GenesisEndorsementPolicy: sdknetwork.GenesisEndorsementRequire,
+	}
+	end, err := sdknetwork.EndorseGenesis(doc, priv)
+	if err != nil {
+		t.Fatalf("EndorseGenesis: %v", err)
+	}
+	doc.GenesisEndorsements = []sdknetwork.GenesisEndorsement{end}
+
+	dir := t.TempDir()
+	served, err := sdknetwork.EndorsedBootstrapBytes(doc)
+	if err != nil {
+		t.Fatalf("EndorsedBootstrapBytes: %v", err)
+	}
+	endorsedPath = filepath.Join(dir, "endorsed.json")
+	if err := os.WriteFile(endorsedPath, served, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stripped, err := doc.CanonicalBytes()
+	if err != nil {
+		t.Fatalf("CanonicalBytes: %v", err)
+	}
+	strippedPath = filepath.Join(dir, "stripped.json")
+	if err := os.WriteFile(strippedPath, stripped, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return endorsedPath, strippedPath
+}
+
+// TestLoadBootstrap_RequireCeremonyVerified [#75-B]: the auditor refuses to
+// audit against a require constitution whose ceremony does not verify — a
+// stripped bootstrap.json fails at load, not after evidence has been judged
+// against an unverified trust root.
+func TestLoadBootstrap_RequireCeremonyVerified(t *testing.T) {
+	endorsed, stripped := mintRequireBootstrapFiles(t)
+
+	if _, _, _, _, err := loadBootstrap(endorsed); err != nil {
+		t.Fatalf("endorsed require constitution must load: %v", err)
+	}
+	if _, _, _, _, err := loadBootstrap(stripped); err == nil {
+		t.Fatal("STRIPPED require constitution loaded — the strip attack boots an auditor silently")
 	}
 }

@@ -107,18 +107,42 @@ func verifyProofFile(ctx context.Context, path, pin string) (*sdkbundle.Standalo
 // trust-on-first-use: it proves the proof is internally consistent and
 // cryptographically sound for the network it names; --pin binds that name to one
 // you already trust.
+//
+// The embedded constitution is admitted through the SAME first-contact door the
+// online clients use — network.LoadVerifiedBootstrap, self-pinned to the IDs the
+// document itself derives — so OFFLINE verification enforces the genesis
+// ceremony too: a require-network proof whose embedded constitution was stripped
+// of its endorsements is refused, not silently trusted. (Today the SDK's v2
+// builder embeds the canonical form, which carries no endorsements; once it
+// embeds the endorsed form this gate verifies them with no change here.)
+//
+// K comes from the VERIFIED constitution (GenesisQuorumK — the NetworkID-bound
+// single source); the section's QuorumK is demoted to a cross-check.
 func trustRootFromProof(proof *sdkbundle.StandaloneProof) (map[cosign.NetworkID]protocol.GenesisTrustRoot, error) {
 	gb := proof.SelfAnchor.GenesisBootstrap
 	if len(gb.BootstrapDocument) == 0 {
 		return nil, fmt.Errorf("proof carries no embedded bootstrap — cannot self-verify (supply trust externally)")
 	}
-	var doc network.BootstrapDocument
-	if err := json.Unmarshal(gb.BootstrapDocument, &doc); err != nil {
+	// Self-pin: derive the IDs the document claims, then run the full
+	// first-contact verification (strict decode, canonical-subset hash equality,
+	// ceremony when the policy requires it) against that pin.
+	var probe network.BootstrapDocument
+	if err := json.Unmarshal(gb.BootstrapDocument, &probe); err != nil {
 		return nil, fmt.Errorf("decode embedded bootstrap: %w", err)
 	}
-	ids, err := doc.IDs()
+	ids, err := probe.IDs()
 	if err != nil {
 		return nil, fmt.Errorf("embedded bootstrap ids: %w", err)
+	}
+	doc, err := network.LoadVerifiedBootstrap(gb.BootstrapDocument, [32]byte(ids.NetworkID))
+	if err != nil {
+		return nil, fmt.Errorf("embedded bootstrap failed first-contact verification: %w", err)
+	}
+	// One source for K: the constitution. A section that disagrees is a
+	// malformed proof, not an alternative authority.
+	if gb.QuorumK != 0 && gb.QuorumK != doc.GenesisQuorumK {
+		return nil, fmt.Errorf("proof section quorum_k=%d disagrees with the constitutional genesis_quorum_k=%d (NetworkID-bound)",
+			gb.QuorumK, doc.GenesisQuorumK)
 	}
 	canonical, err := doc.CanonicalBytes()
 	if err != nil {
@@ -129,7 +153,7 @@ func trustRootFromProof(proof *sdkbundle.StandaloneProof) (map[cosign.NetworkID]
 		nid: {
 			NetworkID:             nid,
 			GenesisWitnessDIDs:    append([]string(nil), doc.GenesisWitnessSet...),
-			QuorumK:               gb.QuorumK,
+			QuorumK:               doc.GenesisQuorumK,
 			BootstrapDocumentHash: sha256.Sum256(canonical),
 		},
 	}, nil

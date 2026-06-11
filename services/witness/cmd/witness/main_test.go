@@ -21,6 +21,8 @@ import (
 	"github.com/baseproof/baseproof/network"
 
 	"github.com/baseproof/tooling/services/witness/internal/witkey"
+	"github.com/baseproof/baseproof/crypto/signatures"
+	sdkdid "github.com/baseproof/baseproof/did"
 )
 
 // writePEMKey writes a fresh secp256k1 witness key (witkey PEM) to path —
@@ -188,5 +190,91 @@ func TestLoadBootstrap_DerivesNonZeroNetworkID(t *testing.T) {
 	var zero [32]byte
 	if identity.NetworkID == zero {
 		t.Fatal("derived NetworkID is zero — SDK contract broken")
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// #75 Phase B — fail-closed first contact with the mounted constitution
+// ─────────────────────────────────────────────────────────────────────
+
+// mintRequireBootstrap writes a require-policy constitution (single witness key
+// held by the test) to disk in BOTH forms: fully endorsed, and STRIPPED of its
+// endorsements (the canonical-only strip-attack shape — the policy survives
+// inside the canonical bytes; the endorsements do not).
+func mintRequireBootstrap(t *testing.T) (endorsedPath, strippedPath string) {
+	t.Helper()
+	priv, err := signatures.GenerateKey()
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+	compressed, err := signatures.CompressSecp256k1Pubkey(signatures.PubKeyBytes(&priv.PublicKey))
+	if err != nil {
+		t.Fatalf("compress: %v", err)
+	}
+	doc := network.BootstrapDocument{
+		ProtocolVersion:   "v1",
+		ExchangeDID:       "did:web:phaseb.example",
+		NetworkName:       "phaseb-require",
+		GenesisWitnessSet: []string{sdkdid.EncodeDIDKey(sdkdid.MulticodecSecp256k1, compressed)},
+		GenesisQuorumK:    1,
+		GenesisTreeHead: network.GenesisTreeHead{
+			RootHash: "0000000000000000000000000000000000000000000000000000000000000000",
+		},
+		GenesisAdmissionPolicy:   network.GenesisAdmissionPolicy{GatingRequired: false, CostMode: "uncharged"},
+		GenesisSignaturePolicy:   network.SignaturePolicy{AllowedEntrySigSchemes: []uint16{1}, AllowedCosignSchemeTags: []uint8{1}, MinSignaturesPerEntry: 1},
+		GenesisEndorsementPolicy: network.GenesisEndorsementRequire,
+	}
+	end, err := network.EndorseGenesis(doc, priv)
+	if err != nil {
+		t.Fatalf("EndorseGenesis: %v", err)
+	}
+	doc.GenesisEndorsements = []network.GenesisEndorsement{end}
+
+	dir := t.TempDir()
+	served, err := network.EndorsedBootstrapBytes(doc)
+	if err != nil {
+		t.Fatalf("EndorsedBootstrapBytes: %v", err)
+	}
+	endorsedPath = filepath.Join(dir, "endorsed.json")
+	if err := os.WriteFile(endorsedPath, served, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stripped, err := doc.CanonicalBytes() // policy inside, endorsements gone
+	if err != nil {
+		t.Fatalf("CanonicalBytes: %v", err)
+	}
+	strippedPath = filepath.Join(dir, "stripped.json")
+	if err := os.WriteFile(strippedPath, stripped, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return endorsedPath, strippedPath
+}
+
+// TestLoadBootstrap_RequireCeremonyVerified [#75-B]: the witness boots a
+// require constitution whose ceremony verifies — and REFUSES the same
+// constitution stripped of its endorsements (a witness must not cosign for a
+// network whose constitution it cannot verify).
+func TestLoadBootstrap_RequireCeremonyVerified(t *testing.T) {
+	endorsed, stripped := mintRequireBootstrap(t)
+
+	if _, err := loadBootstrap(endorsed); err != nil {
+		t.Fatalf("endorsed require constitution must load: %v", err)
+	}
+	if _, err := loadBootstrap(stripped); err == nil {
+		t.Fatal("STRIPPED require constitution loaded — the strip attack boots a witness silently")
+	}
+}
+
+// TestLoadBootstrap_LegacyPolicyBootsWithoutCeremony [#75-B]: a constitution
+// with no endorsement policy keeps booting with no endorsements — the opt-out
+// stays honest.
+func TestLoadBootstrap_LegacyPolicyBootsWithoutCeremony(t *testing.T) {
+	raw := validBootstrapJSON(t)
+	path := filepath.Join(t.TempDir(), "legacy.json")
+	if err := os.WriteFile(path, raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadBootstrap(path); err != nil {
+		t.Fatalf("legacy (no-policy) constitution must keep booting: %v", err)
 	}
 }

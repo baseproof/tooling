@@ -17,16 +17,16 @@ vocabulary the governance + signer chains discover by.
     existing WithGovernanceSchemas / WithSignerRotationSchema options.
 
 The genesis bootstrap itself is NOT carried in the bundle — it is fetched from
-GET /v1/network/bootstrap (served as JCS-canonical bytes) and verified against the
-bundle's hash. So protocol.NetworkBundle stays decoupled from network.Bootstrap­
+GET /v1/network/bootstrap and verified against the bundle's hash through
+network.LoadVerifiedBootstrap (hash over the canonical subset, so the served
+form may be canonical or endorsed; the ceremony is enforced when the policy
+requires it). So protocol.NetworkBundle stays decoupled from network.Bootstrap­
 Document, and the bundle is a small, static, authored-once artifact.
 */
 package bundle
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -89,11 +89,15 @@ func gatherOptionsFromBundle(b *protocol.NetworkBundle) []GatherOption {
 }
 
 // fetchBootstrapDocument GETs the network's genesis bootstrap from
-// {baseURL}/v1/network/bootstrap, verifies its SHA-256 equals expectedHash (the
+// {baseURL}/v1/network/bootstrap and admits it through the SDK's single
+// first-contact door, network.LoadVerifiedBootstrap: strict decode, NetworkID
+// recomputed over the CANONICAL SUBSET and compared to expectedHash (the
 // bundle's pin — a mismatch means the endpoint is not serving the bundle's
-// network, fail closed), and parses the JCS-canonical bytes into a
-// BootstrapDocument. The endpoint serves exactly BootstrapDocument.CanonicalBytes,
-// so SHA-256(body) == TrustRoot.BootstrapDocumentHash by construction.
+// network, fail closed), and the genesis ceremony verified whenever the
+// constitution's policy requires it. The served body is FORM-AGNOSTIC: the
+// endpoint may serve the canonical bytes or the endorsed form (endorsements
+// live outside the canonical subset, so both hash to the same NetworkID) — and
+// a require-network constitution stripped of its endorsements is refused here.
 func fetchBootstrapDocument(ctx context.Context, baseURL string, httpClient *http.Client, expectedHash [32]byte) (*network.BootstrapDocument, error) {
 	url := strings.TrimRight(baseURL, "/") + "/v1/network/bootstrap"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
@@ -116,13 +120,9 @@ func fetchBootstrapDocument(ctx context.Context, baseURL string, httpClient *htt
 	if len(raw) > MaxProofSectionBytes {
 		return nil, fmt.Errorf("bundle/standalone: bootstrap from %s exceeds %d bytes (DoS guard)", url, MaxProofSectionBytes)
 	}
-	if got := sha256.Sum256(raw); got != expectedHash {
-		return nil, fmt.Errorf("bundle/standalone: bootstrap hash mismatch — endpoint %s serves a different network than the bundle pins (got %x, want %x)",
-			baseURL, got[:8], expectedHash[:8])
+	doc, err := network.LoadVerifiedBootstrap(raw, expectedHash)
+	if err != nil {
+		return nil, fmt.Errorf("bundle/standalone: bootstrap from %s failed first-contact verification: %w", baseURL, err)
 	}
-	var doc network.BootstrapDocument
-	if err := json.Unmarshal(raw, &doc); err != nil {
-		return nil, fmt.Errorf("bundle/standalone: decode bootstrap: %w", err)
-	}
-	return &doc, nil
+	return doc, nil
 }

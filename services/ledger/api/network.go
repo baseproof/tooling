@@ -25,11 +25,16 @@ KEY ARCHITECTURAL DECISIONS:
     cryptographically content-addressed; serving them publicly is
     REQUIRED for the SDK's TOFU pin-on-first-contact discipline
     (log/discover/tofu.go).
-  - IMMUTABLE caching on bootstrap + identity. The bytes BIND the
-    NetworkID at genesis (T-9 cryptographic domain separation);
-    mutating them would change the NetworkID, which is the whole
-    point of network identity. max-age=31536000 (1 year),
-    immutable.
+  - Bootstrap caching is ETag-validated, not immutable. The served
+    form is the ENDORSED document (#75): its canonical SUBSET binds
+    the NetworkID, but the endorsement set lives outside the
+    canonical bytes, so the served bytes are no longer
+    content-addressed by the NetworkID (a re-mint that gathers more
+    endorsements keeps the NetworkID and changes the bytes). A
+    strong ETag over the served bytes + If-None-Match keeps caching
+    cheap without claiming an immutability the format no longer
+    guarantees. Identity stays long-lived (its fields derive from
+    the canonical subset only).
   - mirrors uses max-age=300 — mirror operators come and go on
     operational timescales (a CDN being added, a community mirror
     rotating); five minutes is the staleness floor a consumer
@@ -38,6 +43,7 @@ KEY ARCHITECTURAL DECISIONS:
 package api
 
 import (
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"net/http"
@@ -50,34 +56,44 @@ import (
 // ─────────────────────────────────────────────────────────────────────
 
 // NewNetworkBootstrapHandler returns the GET /v1/network/bootstrap
-// handler. The captured canonicalBytes are the JCS-canonical bytes
-// produced by network.BootstrapDocument.CanonicalBytes — the SAME
-// bytes that hashed to produce the NetworkID. A consumer holding
-// these bytes can recompute the NetworkID via SHA-256 and confirm
-// it matches the network's identity. The shape is the wire form;
-// json.Decoder consumes it directly.
+// handler. The captured servedBytes are the network's constitution in
+// its SERVED form — network.EndorsedBootstrapBytes: the full document
+// including its genesis endorsements, which the emitter refuses to
+// produce for a require-policy constitution whose ceremony does not
+// verify. A consumer recomputes the NetworkID over the CANONICAL
+// SUBSET (parse → IDs(), i.e. network.LoadVerifiedBootstrap — never a
+// raw SHA-256 of the body: endorsements live outside the canonical
+// bytes) and verifies the ceremony when the policy requires it.
 //
 // Empty bytes (no bootstrap document loaded — test / dev paths)
 // trigger a 404 "not configured" — the network is not in
 // bootstrap-document mode and the endpoint is structurally
 // unavailable.
 //
-// Cache-Control: public, max-age=31536000, immutable. The bytes
-// are content-addressed (a change would change the NetworkID,
-// i.e., the network's identity); aggressive caching is safe.
-func NewNetworkBootstrapHandler(canonicalBytes []byte) http.HandlerFunc {
-	configured := len(canonicalBytes) > 0
+// Caching: strong ETag over the served bytes + If-None-Match → 304.
+// NOT immutable — the served form is no longer content-addressed by
+// the NetworkID (the endorsement set sits outside the canonical
+// subset), so claiming immutability would be a cache lie.
+func NewNetworkBootstrapHandler(servedBytes []byte) http.HandlerFunc {
+	configured := len(servedBytes) > 0
 	// Defensive copy — the captured slice's bytes MUST NOT be mutated
-	// across requests (a Cache-Control: immutable lie would be a
-	// trust violation). The closure owns the only reference.
-	buf := append([]byte(nil), canonicalBytes...)
+	// across requests (a stale-ETag lie would be a trust violation).
+	// The closure owns the only reference.
+	buf := append([]byte(nil), servedBytes...)
+	sum := sha256.Sum256(buf)
+	etag := `"` + hex.EncodeToString(sum[:]) + `"`
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !configured {
 			http.Error(w, "bootstrap document not configured", http.StatusNotFound)
 			return
 		}
+		w.Header().Set("ETag", etag)
+		w.Header().Set("Cache-Control", "public, max-age=3600")
+		if r.Header.Get("If-None-Match") == etag {
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
-		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write(buf)
 	}

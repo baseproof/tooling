@@ -2,9 +2,7 @@ package cli
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -202,10 +200,29 @@ func governanceSchemas(b *ClientBundle, logDID string) map[string]types.LogPosit
 	return out
 }
 
-// fetchBootstrap GETs the network's genesis bootstrap (JCS-canonical bytes) and,
-// when expectHashHex is set, fails closed unless SHA-256(bytes) matches it — the
-// Zero-Trust confirmation that the endpoint serves the network the bundle pins.
+// fetchBootstrap GETs the network's genesis bootstrap and admits it through the
+// SDK's ONE first-contact door, network.LoadVerifiedBootstrap: strict decode,
+// NetworkID recomputed over the CANONICAL SUBSET (so the served form may be the
+// endorsed one — endorsements live outside the canonical bytes), pin equality,
+// and the genesis ceremony verified whenever the constitution's policy requires
+// it. A require-network constitution stripped of its endorsements is refused
+// HERE, at the client, regardless of what the server chose to serve.
+//
+// The pin is REQUIRED. The pre-#75 behaviour skipped verification when the
+// bundle carried no bootstrap pin — a lenient first contact that trusted
+// whatever the endpoint served. A pinless bundle now refuses first contact
+// (fail closed; re-author it with `baseproof network add`, which always pins).
 func fetchBootstrap(ctx context.Context, httpClient *http.Client, endpoint, expectHashHex string) (*network.BootstrapDocument, error) {
+	if expectHashHex == "" {
+		return nil, fmt.Errorf("bundle carries no bootstrap pin — refusing unverified first contact with %s (re-author the bundle: `baseproof network add` always pins)", endpoint)
+	}
+	pinBytes, err := hex.DecodeString(strings.ToLower(expectHashHex))
+	if err != nil || len(pinBytes) != 32 {
+		return nil, fmt.Errorf("bundle bootstrap pin %q is not a 32-byte hex digest", expectHashHex)
+	}
+	var pin [32]byte
+	copy(pin[:], pinBytes)
+
 	u := strings.TrimRight(endpoint, "/") + "/v1/network/bootstrap"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
@@ -223,15 +240,9 @@ func fetchBootstrap(ctx context.Context, httpClient *http.Client, endpoint, expe
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("bootstrap HTTP %d from %s", resp.StatusCode, u)
 	}
-	if expectHashHex != "" {
-		got := sha256.Sum256(raw)
-		if hex.EncodeToString(got[:]) != strings.ToLower(expectHashHex) {
-			return nil, fmt.Errorf("bootstrap hash mismatch: endpoint %s serves a different network than the bundle pins (fail-closed)", endpoint)
-		}
+	doc, err := network.LoadVerifiedBootstrap(raw, pin)
+	if err != nil {
+		return nil, fmt.Errorf("bootstrap from %s failed first-contact verification: %w", endpoint, err)
 	}
-	var doc network.BootstrapDocument
-	if err := json.Unmarshal(raw, &doc); err != nil {
-		return nil, fmt.Errorf("decode bootstrap: %w", err)
-	}
-	return &doc, nil
+	return doc, nil
 }

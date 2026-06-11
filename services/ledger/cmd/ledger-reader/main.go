@@ -428,19 +428,24 @@ func loadReaderBootstrap(path string, logger *slog.Logger) network.BootstrapDocu
 	return doc
 }
 
-// readerNetworkBootstrapHandler serves GET /v1/network/bootstrap as the JCS-canonical
-// bytes the proof gather SHA-256-checks against the trust root — the SAME bytes the
-// writer serves (buildNetworkBootstrapHandler). A zero/invalid doc → 404 handler.
+// readerNetworkBootstrapHandler serves GET /v1/network/bootstrap in the SAME
+// served form as the writer (#75 Phase C): network.EndorsedBootstrapBytes —
+// the full constitution including its genesis endorsements, whose emitter
+// refuses a require-policy document with an unverifiable ceremony. Two servers
+// of one surface must never serve two forms. A zero doc (no file mounted)
+// stays the 404 handler; a PRESENT-but-unverifiable constitution is fatal —
+// a read front must not quietly serve a stripped require constitution.
 func readerNetworkBootstrapHandler(doc network.BootstrapDocument, logger *slog.Logger) http.HandlerFunc {
 	if doc.NetworkName == "" {
 		return api.NewNetworkBootstrapHandler(nil)
 	}
-	canonical, err := doc.CanonicalBytes()
+	served, err := network.EndorsedBootstrapBytes(doc)
 	if err != nil {
-		logger.Error("bootstrap CanonicalBytes failed — /v1/network/bootstrap will 404", "error", err)
-		return api.NewNetworkBootstrapHandler(nil)
+		logger.Error("mounted bootstrap cannot emit its served (endorsed) form — refusing to serve a stripped constitution",
+			"error", err)
+		os.Exit(1)
 	}
-	return api.NewNetworkBootstrapHandler(canonical)
+	return api.NewNetworkBootstrapHandler(served)
 }
 
 // readerNetworkIdentityHandler serves GET /v1/network/identity from the same doc.

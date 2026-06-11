@@ -1065,6 +1065,13 @@ func composeHandlers(
 		}
 	}
 
+	// #75 Phase C: the serve form is computed (and ceremony-checked) at boot —
+	// a require constitution that cannot emit its endorsed form FAILS BOOT.
+	networkBootstrapHandler, err := buildNetworkBootstrapHandler(cfg.GenesisBootstrapDocument)
+	if err != nil {
+		return api.Handlers{}, err
+	}
+
 	return api.Handlers{
 		Submission:      submitHandler,
 		BatchSubmission: batchSubmitHandler,
@@ -1118,7 +1125,7 @@ func composeHandlers(
 			SDKVersion: cfg.SDKVersion,
 		}),
 		NetworkPeers:       api.NewNetworkPeersHandler(cfg.NetworkPeers),
-		NetworkBootstrap:   buildNetworkBootstrapHandler(cfg.GenesisBootstrapDocument, d.Logger),
+		NetworkBootstrap:   networkBootstrapHandler,
 		NetworkIdentity:    buildNetworkIdentityHandler(cfg.GenesisBootstrapDocument, d.Logger),
 		NetworkMirrors:     api.NewNetworkMirrorsHandler(cfg.NetworkMirrors),
 		WitnessesCurrent:   api.NewWitnessesCurrentHandler(witnessHistoryFetcher),
@@ -1143,17 +1150,22 @@ func composeHandlers(
 	}, nil
 }
 
-func buildNetworkBootstrapHandler(doc network.BootstrapDocument, logger *slog.Logger) http.HandlerFunc {
+// buildNetworkBootstrapHandler serves the constitution in its SERVED form —
+// network.EndorsedBootstrapBytes (#75 Phase C): the full document including its
+// genesis endorsements. The emitter itself refuses a require-policy
+// constitution whose ceremony does not verify, and that refusal is a BOOT
+// FAILURE here — a network that demands endorsements must never quietly serve
+// a stripped constitution (the strip attack would otherwise be indistinguishable
+// from an honest legacy network at first contact).
+func buildNetworkBootstrapHandler(doc network.BootstrapDocument) (http.HandlerFunc, error) {
 	if doc.NetworkName == "" {
-		return api.NewNetworkBootstrapHandler(nil)
+		return api.NewNetworkBootstrapHandler(nil), nil
 	}
-	canonical, err := doc.CanonicalBytes()
+	served, err := network.EndorsedBootstrapBytes(doc)
 	if err != nil {
-		logger.Error("Part II.1: BootstrapDocument.CanonicalBytes failed; "+
-			"/v1/network/bootstrap will 404", "error", err)
-		return api.NewNetworkBootstrapHandler(nil)
+		return nil, fmt.Errorf("/v1/network/bootstrap serve form (endorsed bootstrap bytes): %w", err)
 	}
-	return api.NewNetworkBootstrapHandler(canonical)
+	return api.NewNetworkBootstrapHandler(served), nil
 }
 
 func buildNetworkIdentityHandler(doc network.BootstrapDocument, logger *slog.Logger) http.HandlerFunc {
