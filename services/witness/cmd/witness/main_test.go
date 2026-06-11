@@ -20,9 +20,9 @@ import (
 
 	"github.com/baseproof/baseproof/network"
 
-	"github.com/baseproof/tooling/services/witness/internal/witkey"
 	"github.com/baseproof/baseproof/crypto/signatures"
 	sdkdid "github.com/baseproof/baseproof/did"
+	"github.com/baseproof/tooling/services/witness/internal/witkey"
 )
 
 // writePEMKey writes a fresh secp256k1 witness key (witkey PEM) to path —

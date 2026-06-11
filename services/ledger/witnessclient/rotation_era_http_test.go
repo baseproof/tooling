@@ -7,10 +7,10 @@ genesis-baseline work (SeedGenesisBaseline, #71) to the rc4+ rotation rules
 handlers (tier T2: real Postgres, real HistoryFetcher, real api handlers; no
 daemon). After a genesis baseline and one consented rotation effective at E:
 
-    /v1/network/witnesses/at/{E-1} → the GENESIS set
-    /v1/network/witnesses/at/{E}   → the NEW set (effective_seq inclusive)
-    /v1/network/witnesses/current  → the NEW set
-    the genesis row's retired_seq == E (the era boundary is recorded)
+	/v1/network/witnesses/at/{E-1} → the GENESIS set
+	/v1/network/witnesses/at/{E}   → the NEW set (effective_seq inclusive)
+	/v1/network/witnesses/current  → the NEW set
+	the genesis row's retired_seq == E (the era boundary is recorded)
 */
 package witnessclient_test
 

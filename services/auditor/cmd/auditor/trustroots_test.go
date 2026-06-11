@@ -18,9 +18,9 @@ import (
 	"github.com/baseproof/baseproof/crypto/signatures"
 	sdknetwork "github.com/baseproof/baseproof/network"
 
+	sdkdid "github.com/baseproof/baseproof/did"
 	"github.com/baseproof/tooling/libs/auditing/peers"
 	"github.com/baseproof/tooling/services/auditor/internal/gossipfeed"
-	sdkdid "github.com/baseproof/baseproof/did"
 )
 
 // newDIDKey mints a fresh secp256k1 did:key (the shape of both witness DIDs and

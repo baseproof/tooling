@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"errors"
 	"github.com/baseproof/baseproof/core/envelope"
 	"github.com/baseproof/baseproof/core/smt"
 	"github.com/baseproof/baseproof/crypto/cosign"
@@ -26,7 +27,6 @@ import (
 	"github.com/baseproof/baseproof/network"
 	"github.com/baseproof/baseproof/protocol"
 	"github.com/baseproof/baseproof/types"
-	"errors"
 )
 
 // realGather returns REAL proof sections (no canned hashes), so BuildStandalone
@@ -78,7 +78,7 @@ type realFixture struct {
 	seq           uint64   // the entry's chronological position
 	smtKey        [32]byte // the entry's SMT key (the witnessed presence key)
 	smtRoot       [32]byte
-	smtTree       *smt.Tree // the live tree, to serve membership/non-membership for ANY key
+	smtTree       *smt.Tree              // the live tree, to serve membership/non-membership for ANY key
 	head          types.CosignedTreeHead // cosigned by all n witnesses
 	inc           *types.MerkleProof
 	smtProof      *types.SMTProof
