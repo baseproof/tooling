@@ -32,11 +32,15 @@ type Vocabulary struct {
 }
 
 // Build assembles a validated protocol.NetworkBundle from a genesis bootstrap
-// document, the network's read endpoint, its witness quorum K, and its
-// vocabulary. The witness key set is derived from the bootstrap's genesis witness
-// DIDs (witness.KeysFromDIDs); the trust root's BootstrapDocumentHash is the
-// SHA-256 of the JCS-canonical bootstrap bytes (== the NetworkID).
-func Build(doc *network.BootstrapDocument, endpoint string, quorumK int, v Vocabulary) (*protocol.NetworkBundle, error) {
+// document, the network's read endpoint, and its vocabulary. The witness quorum K
+// is doc.GenesisQuorumK — the constitutional, NetworkID-bound value (REQUIRED
+// since SDK rc4) is the single source of K; a caller-supplied K could disagree
+// with it, so Build takes none. doc.IDs() validates the document (including the
+// quorum invariants 1<=K<=N and 2K>N) before K is read. The witness key set is
+// derived from the bootstrap's genesis witness DIDs (witness.KeysFromDIDs); the
+// trust root's BootstrapDocumentHash is the SHA-256 of the JCS-canonical
+// bootstrap bytes (== the NetworkID).
+func Build(doc *network.BootstrapDocument, endpoint string, v Vocabulary) (*protocol.NetworkBundle, error) {
 	if doc == nil {
 		return nil, fmt.Errorf("networkbundle: nil bootstrap document")
 	}
@@ -52,7 +56,7 @@ func Build(doc *network.BootstrapDocument, endpoint string, quorumK int, v Vocab
 	if err != nil {
 		return nil, fmt.Errorf("networkbundle: witness keys from genesis DIDs: %w", err)
 	}
-	set, err := cosign.NewWitnessKeySet(keys, cosign.NetworkID(ids.NetworkID), quorumK, nil)
+	set, err := cosign.NewWitnessKeySet(keys, cosign.NetworkID(ids.NetworkID), doc.GenesisQuorumK, nil)
 	if err != nil {
 		return nil, fmt.Errorf("networkbundle: witness key set: %w", err)
 	}
@@ -60,7 +64,7 @@ func Build(doc *network.BootstrapDocument, endpoint string, quorumK int, v Vocab
 		TrustRoot: protocol.GenesisTrustRoot{
 			NetworkID:             cosign.NetworkID(ids.NetworkID),
 			GenesisWitnessDIDs:    append([]string(nil), doc.GenesisWitnessSet...),
-			QuorumK:               quorumK,
+			QuorumK:               doc.GenesisQuorumK,
 			BootstrapDocumentHash: sha256.Sum256(canonical),
 		},
 		Witnesses:            set,

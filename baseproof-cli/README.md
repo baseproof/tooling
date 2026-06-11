@@ -19,7 +19,7 @@ go build -o baseproof .
 | `baseproof verify <file>` | Verify a v2 proof **fully offline** (zero network): recompute witness K-of-N, inclusion, SMT membership — fail-closed. Network-agnostic; `--pin`/`--network`/`--bundle` binds it to a network you trust. |
 | `baseproof info` | Understand a network in one view: identity (recomputed), trust root, witnesses + K-of-N, auditors (live + in-sync), horizon, admission, accepted messages, anchors/labels/endpoints, mirrors, federation. `--verify` recomputes the crypto; `--federation [--depth N]` walks + verifies the cited peers (bounded, cycle-guarded). |
 | `baseproof witnesses` | The witness set — current, or as-of a historical tree size (`--at N`, time-travel); labels overlaid. |
-| `baseproof network` | gcloud-style network store: `add` (author a bundle from a live ledger — `--from-ledger <url> --quorum K [--ca-cert]` — or import `--from <file\|url>`), `list`, `use`, `show`. |
+| `baseproof network` | gcloud-style network store: `add` (author a bundle from a live ledger — `--from-ledger <url> [--ca-cert]`; the quorum K comes from the verified constitution — or import `--from <file\|url>`), `list`, `use`, `show`. |
 | `baseproof config` | `config set network <name>` / `config list` — the active-network default (`~/.config/baseproof/`). |
 | `baseproof load` | Drive the memory-bounded loadgen engine (`-n`, `--amend-ratio`, `--delegate-ratio`, `--workers`, `--batch-size`, `--seed`) and optionally stream the expected-state oracle (`--manifest oracle.jsonl`). |
 

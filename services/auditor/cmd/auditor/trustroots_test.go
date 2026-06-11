@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -92,12 +93,14 @@ func logInfoServer(t *testing.T, body map[string]any) *httptest.Server {
 }
 
 // TestLoadBootstrap proves the auditor parses NetworkID + exchange_did + the
-// genesis witness DIDs and validates K-of-N — WITHOUT prematurely keying the
-// witness set (the key is the per-peer gossip originator, resolved later).
+// genesis witness DIDs — WITHOUT prematurely keying the witness set (the key is
+// the per-peer gossip originator, resolved later). K validation lives in
+// doc.IDs() (the constitutional quorum) + reconcileWitnessQuorumK (the env
+// cross-check, tested below).
 func TestLoadBootstrap(t *testing.T) {
 	path, exchangeDID := writeBootstrap(t, 5)
 
-	nid, gotExchange, witnessDIDs, _, err := loadBootstrap(path, 3)
+	nid, gotExchange, witnessDIDs, _, err := loadBootstrap(path)
 	if err != nil {
 		t.Fatalf("loadBootstrap: %v", err)
 	}
@@ -113,16 +116,39 @@ func TestLoadBootstrap(t *testing.T) {
 }
 
 func TestLoadBootstrap_FailClosed(t *testing.T) {
-	path, _ := writeBootstrap(t, 3)
-
-	if _, _, _, _, err := loadBootstrap(path, 0); err == nil {
-		t.Error("K=0 must fail")
-	}
-	if _, _, _, _, err := loadBootstrap(path, 4); err == nil {
-		t.Error("K>N must fail")
-	}
-	if _, _, _, _, err := loadBootstrap(filepath.Join(t.TempDir(), "nope.json"), 2); err == nil {
+	if _, _, _, _, err := loadBootstrap(filepath.Join(t.TempDir(), "nope.json")); err == nil {
 		t.Error("missing bootstrap file must fail")
+	}
+}
+
+// TestReconcileWitnessQuorumK pins the three arms of the AUDITOR_WITNESS_QUORUM_K
+// demotion rule. The constitution is the single source of truth; the env is a
+// cross-check only — unset adopts it, an equal value is honoured, a different
+// value is fatal (an off-log knob can't override the NetworkID-bound quorum).
+func TestReconcileWitnessQuorumK(t *testing.T) {
+	path, _ := writeBootstrap(t, 5) // constitutional K = 3 (majority of 5)
+	_, _, _, doc, err := loadBootstrap(path)
+	if err != nil {
+		t.Fatalf("loadBootstrap: %v", err)
+	}
+
+	// Arm 1: unset (0) → adopt the constitutional value.
+	if k, err := reconcileWitnessQuorumK(doc, 0, path); err != nil || k != 3 {
+		t.Fatalf("unset arm: got K=%d err=%v, want K=3 (constitutional)", k, err)
+	}
+	// Arm 2: set and equal → honoured.
+	if k, err := reconcileWitnessQuorumK(doc, 3, path); err != nil || k != 3 {
+		t.Fatalf("set==doc arm: got K=%d err=%v, want K=3", k, err)
+	}
+	// Arm 3: set and different → fatal, naming the env var + both values.
+	_, err = reconcileWitnessQuorumK(doc, 2, path)
+	if err == nil {
+		t.Fatal("set!=doc arm: an env K disagreeing with the constitution must be fatal")
+	}
+	for _, want := range []string{"AUDITOR_WITNESS_QUORUM_K=2", "genesis_quorum_k=3"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("mismatch message missing %q: %v", want, err)
+		}
 	}
 }
 
@@ -131,7 +157,7 @@ func TestLoadBootstrap_FailClosed(t *testing.T) {
 // be keyed by THAT, discovered from the peer's /v1/log-info — not by exchange_did.
 func TestResolveAndBind_Discovery(t *testing.T) {
 	path, exchangeDID := writeBootstrap(t, 5)
-	nid, _, witnessDIDs, bootstrapDoc, err := loadBootstrap(path, 3)
+	nid, _, witnessDIDs, bootstrapDoc, err := loadBootstrap(path)
 	if err != nil {
 		t.Fatalf("loadBootstrap: %v", err)
 	}
@@ -173,7 +199,7 @@ func TestResolveAndBind_Discovery(t *testing.T) {
 // off, the DID configured in AUDITOR_PEERS is the originator verbatim.
 func TestResolveAndBind_ExplicitPin(t *testing.T) {
 	path, _ := writeBootstrap(t, 3)
-	nid, _, witnessDIDs, bootstrapDoc, err := loadBootstrap(path, 2)
+	nid, _, witnessDIDs, bootstrapDoc, err := loadBootstrap(path)
 	if err != nil {
 		t.Fatalf("loadBootstrap: %v", err)
 	}
@@ -202,7 +228,7 @@ func TestResolveAndBind_ExplicitPin(t *testing.T) {
 // witness cosignatures, but binding across networks is operator error).
 func TestResolvePeers_NetworkGuard(t *testing.T) {
 	path, exchangeDID := writeBootstrap(t, 3)
-	nid, _, _, _, err := loadBootstrap(path, 2)
+	nid, _, _, _, err := loadBootstrap(path)
 	if err != nil {
 		t.Fatalf("loadBootstrap: %v", err)
 	}
@@ -221,7 +247,7 @@ func TestResolvePeers_NetworkGuard(t *testing.T) {
 // never serves /v1/log-info; a short context bounds the retry loop.
 func TestResolvePeers_DiscoveryUnreachable(t *testing.T) {
 	path, exchangeDID := writeBootstrap(t, 3)
-	nid, _, _, _, err := loadBootstrap(path, 2)
+	nid, _, _, _, err := loadBootstrap(path)
 	if err != nil {
 		t.Fatalf("loadBootstrap: %v", err)
 	}

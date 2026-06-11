@@ -328,7 +328,12 @@ func startTestLedgerWithOpts(t *testing.T, opts testLedgerOpts) *testLedger {
 	})
 	seqDone := make(chan struct{})
 	go func() {
-		_ = seq.Run(ctx)
+		// A discarded error here is how the sequencer died SILENTLY for the
+		// HTTP round-trip trio (#82): Run fail-fasts (nil Tessera seam /
+		// committer-state init) and nothing downstream ever sequences.
+		if err := seq.Run(ctx); err != nil {
+			logger.Error("test harness: sequencer.Run exited", "error", err)
+		}
 		close(seqDone)
 	}()
 
@@ -344,7 +349,9 @@ func startTestLedgerWithOpts(t *testing.T, opts testLedgerOpts) *testLedger {
 	})
 	shipDone := make(chan struct{})
 	go func() {
-		_ = ship.Run(ctx)
+		if err := ship.Run(ctx); err != nil {
+			logger.Error("test harness: shipper.Run exited", "error", err)
+		}
 		close(shipDone)
 	}()
 

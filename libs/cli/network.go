@@ -55,7 +55,6 @@ func networkAdd(ctx context.Context, args []string) error {
 		from       = fs.String("from", "", "import a client bundle from this file or URL")
 		fromLedger = fs.String("from-ledger", "", "AUTHOR a bundle by introspecting this live ledger endpoint")
 		caFile     = fs.String("ca-cert", "", "CA cert to pin (for --from-ledger HTTPS + the bundle's transport)")
-		quorum     = fs.Int("quorum", 0, "witness quorum K (REQUIRED for --from-ledger)")
 		logDID     = fs.String("log-did", "", "log DID (--from-ledger; else taken from /v1/log-info)")
 		use        = fs.Bool("use", false, "set this network active after adding")
 		timeout    = fs.Duration("timeout", 30*time.Second, "per-request HTTP timeout")
@@ -65,7 +64,7 @@ func networkAdd(ctx context.Context, args []string) error {
 	}
 	rest := fs.Args()
 	if len(rest) != 1 {
-		return fmt.Errorf("usage: baseproof network add <name> [--from <file|url> | --from-ledger <endpoint> --quorum K]")
+		return fmt.Errorf("usage: baseproof network add <name> [--from <file|url> | --from-ledger <endpoint>]")
 	}
 	name := rest[0]
 
@@ -75,10 +74,7 @@ func networkAdd(ctx context.Context, args []string) error {
 	)
 	switch {
 	case *fromLedger != "":
-		if *quorum <= 0 {
-			return fmt.Errorf("--from-ledger requires --quorum K (the network's witness quorum)")
-		}
-		b, err = authorBundleFromLedger(ctx, *fromLedger, *caFile, *logDID, *quorum, *timeout)
+		b, err = authorBundleFromLedger(ctx, *fromLedger, *caFile, *logDID, *timeout)
 	case *from != "":
 		b, err = importBundle(ctx, *from, *timeout)
 	default:
@@ -117,7 +113,7 @@ func networkList() error {
 		return err
 	}
 	if len(names) == 0 {
-		fmt.Println("no networks — add one: baseproof network add <name> --from-ledger <url> --quorum K")
+		fmt.Println("no networks — add one: baseproof network add <name> --from-ledger <url>")
 		return nil
 	}
 	cfg, _ := loadConfig()
@@ -186,9 +182,10 @@ func importBundle(ctx context.Context, from string, timeout time.Duration) (*Cli
 // authorBundleFromLedger builds a client bundle by introspecting a live ledger:
 // it reads the network identity, CONFIRMS the served bootstrap hashes to the
 // network id (the Zero-Trust "this endpoint is the network it claims" check), and
-// records the log DID + federation peers. The operator supplies the witness
-// quorum K (not a ledger-published value) and the transport CA.
-func authorBundleFromLedger(ctx context.Context, endpoint, caFile, logDID string, quorum int, timeout time.Duration) (*ClientBundle, error) {
+// records the log DID + federation peers. The witness quorum K comes from that
+// verified constitution (doc.GenesisQuorumK, NetworkID-bound) — never from the
+// operator, who could disagree with it. The operator supplies only the transport CA.
+func authorBundleFromLedger(ctx context.Context, endpoint, caFile, logDID string, timeout time.Duration) (*ClientBundle, error) {
 	endpoint = strings.TrimRight(endpoint, "/")
 	f := clienttls.Flags{CAFile: caFile, AllowSelfSigned: caFile != ""}
 	hc, _, err := f.Client(timeout)
@@ -207,8 +204,10 @@ func authorBundleFromLedger(ctx context.Context, endpoint, caFile, logDID string
 	if id.NetworkID == "" {
 		return nil, fmt.Errorf("ledger %s returned no network id (not bootstrap-configured?)", endpoint)
 	}
-	// ZT: the served bootstrap MUST hash to the network id.
-	if _, err := fetchBootstrap(ctx, hc, endpoint, id.NetworkID); err != nil {
+	// ZT: the served bootstrap MUST hash to the network id. The verified doc is
+	// also the single source of the witness quorum K (GenesisQuorumK, rc4).
+	doc, err := fetchBootstrap(ctx, hc, endpoint, id.NetworkID)
+	if err != nil {
 		return nil, err
 	}
 
@@ -232,7 +231,7 @@ func authorBundleFromLedger(ctx context.Context, endpoint, caFile, logDID string
 		NetworkID:     id.NetworkID,
 		Endpoint:      endpoint,
 		LogDID:        logDID,
-		QuorumK:       quorum,
+		QuorumK:       doc.GenesisQuorumK,
 		BootstrapHash: id.NetworkID, // = SHA-256(canonical bootstrap)
 		Transport:     Transport{CAFile: caFile, AllowSelfSigned: caFile != ""},
 		Federation:    federation,

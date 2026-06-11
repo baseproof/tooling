@@ -26,7 +26,6 @@ func TestReadStages_AgainstFixture(t *testing.T) {
 		LedgerURL: fx.Ledger.URL,
 		CAFile:    fx.CAPath,
 		LogDID:    fx.LogDID,
-		QuorumK:   2,
 		WorkDir:   t.TempDir(),
 	}
 	res, err := ReadStages(context.Background(), cfg, fx.Seq, fx.SMTKeyHex)

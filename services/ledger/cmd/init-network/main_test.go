@@ -1,7 +1,10 @@
 package main
 
 import (
+	"crypto/ecdsa"
 	"encoding/hex"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -160,7 +163,7 @@ func TestBuildBootstrapDoc_PassesGenesisValidation(t *testing.T) {
 	}
 
 	for _, gating := range []string{"off", "require"} {
-		doc := buildBootstrapDoc("did:web:state:tn:davidson", "clarity-test", gating, []string{did}, 1, addr, 1)
+		doc := buildBootstrapDoc("did:web:state:tn:davidson", "clarity-test", gating, "require", []string{did}, 1, addr, 1)
 		// doc.IDs() runs the SDK's validate() — exactly init-network's gate. A
 		// missing genesis_signature_policy fails here, which is the regression.
 		if _, err := doc.IDs(); err != nil {
@@ -196,7 +199,7 @@ func TestBuildBootstrapDoc_MinSignaturesConfigurable(t *testing.T) {
 	}
 
 	// A configured non-default floor threads through and validates.
-	doc := buildBootstrapDoc("did:web:state:tn:davidson", "clarity-test", "require", []string{did}, 1, addr, 3)
+	doc := buildBootstrapDoc("did:web:state:tn:davidson", "clarity-test", "require", "require", []string{did}, 1, addr, 3)
 	if got := doc.GenesisSignaturePolicy.MinSignaturesPerEntry; got != 3 {
 		t.Fatalf("MinSignaturesPerEntry = %d, want 3 (flag did not thread)", got)
 	}
@@ -206,7 +209,7 @@ func TestBuildBootstrapDoc_MinSignaturesConfigurable(t *testing.T) {
 
 	// A 0 floor is rejected by the SDK at NetworkID derivation, regardless of
 	// the CLI guard — this is the genesis half of the "always > 0" invariant.
-	zero := buildBootstrapDoc("did:web:state:tn:davidson", "clarity-test", "require", []string{did}, 1, addr, 0)
+	zero := buildBootstrapDoc("did:web:state:tn:davidson", "clarity-test", "require", "require", []string{did}, 1, addr, 0)
 	if _, err := zero.IDs(); err == nil {
 		t.Fatal("min-signatures=0 must be rejected by doc.IDs() (admit-unsigned floor)")
 	}
@@ -254,7 +257,7 @@ func TestInitNetwork_EmitsConstitutionalK(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolve K: %v", err)
 	}
-	doc := buildBootstrapDoc("did:web:state:tn:davidson", "clarity-test", "require", dids, k, addr, 1)
+	doc := buildBootstrapDoc("did:web:state:tn:davidson", "clarity-test", "require", "require", dids, k, addr, 1)
 	if doc.GenesisQuorumK != 2 {
 		t.Fatalf("emitted GenesisQuorumK = %d, want 2 for N=3", doc.GenesisQuorumK)
 	}
@@ -263,12 +266,145 @@ func TestInitNetwork_EmitsConstitutionalK(t *testing.T) {
 	}
 }
 
+// mintWitnessFixture generates n witness keys + the admission authority — the
+// shared setup for the minting/ceremony tests. Keys come from the SAME
+// generator main uses (loadOrGenerateWitnessKey), so the fixture is the
+// tool's own material, not a stand-in.
+func mintWitnessFixture(t *testing.T, n int) (dids []string, privs []*ecdsa.PrivateKey, addr string) {
+	t.Helper()
+	dir := t.TempDir()
+	for i := 1; i <= n; i++ {
+		priv, _, err := loadOrGenerateWitnessKey(filepath.Join(dir, "witnesses", fmt.Sprintf("witness-%d.pem", i)))
+		if err != nil {
+			t.Fatalf("witness %d: %v", i, err)
+		}
+		did, err := secp256k1DIDKey(priv)
+		if err != nil {
+			t.Fatalf("witness DID %d: %v", i, err)
+		}
+		dids = append(dids, did)
+		privs = append(privs, priv)
+	}
+	addr, _, err := loadOrGenerateAdmissionAuthority(filepath.Join(dir, "admission.key"))
+	if err != nil {
+		t.Fatalf("admission authority: %v", err)
+	}
+	return dids, privs, addr
+}
+
+// TestMintServedBootstrap_RequireSelfEndorses is the #77 fail-closed-minting
+// pin, by evidence: with -endorsement-policy=require the served bytes (the
+// EXACT bytes main writes) pass network.LoadVerifiedBootstrap — the single
+// first-contact gate every consumer runs — against the doc's own NetworkID;
+// the ceremony is N-of-N (endorsement count == N, every endorser a generated
+// witness); and stripping ONE endorsement fails first contact (genesis has no
+// quorum slack). No auditor policy is set, so witness endorsements alone must
+// satisfy the gate.
+func TestMintServedBootstrap_RequireSelfEndorses(t *testing.T) {
+	const n = 3
+	dids, privs, addr := mintWitnessFixture(t, n)
+	doc := buildBootstrapDoc("did:web:state:tn:davidson", "clarity-test", "require", "require", dids, 2, addr, 1)
+	ids, err := doc.IDs()
+	if err != nil {
+		t.Fatalf("IDs: %v", err)
+	}
+
+	body, minted, err := mintServedBootstrap(doc, privs)
+	if err != nil {
+		t.Fatalf("require-mode mint must succeed: %v", err)
+	}
+	if got := len(minted.GenesisEndorsements); got != n {
+		t.Fatalf("endorsement count = %d, want %d (EVERY generated key must endorse)", got, n)
+	}
+
+	// First contact on the written bytes, pinned to the doc's own NetworkID.
+	loaded, err := network.LoadVerifiedBootstrap(body, [32]byte(ids.NetworkID))
+	if err != nil {
+		t.Fatalf("served bytes failed LoadVerifiedBootstrap: %v", err)
+	}
+	if got := len(loaded.GenesisEndorsements); got != n {
+		t.Fatalf("written form carries %d endorsements, want %d (the served shape includes the ceremony)", got, n)
+	}
+	if !loaded.RequiresEndorsement() {
+		t.Fatal("written form must carry genesis_endorsement_policy=require")
+	}
+
+	// The fail-closed pin: drop ONE endorsement. The NetworkID is unchanged
+	// (endorsements live outside the canonical bytes), so only the N-of-N
+	// ceremony check can — and must — reject.
+	var stripped network.BootstrapDocument
+	if err := json.Unmarshal(body, &stripped); err != nil {
+		t.Fatalf("unmarshal served bytes: %v", err)
+	}
+	stripped.GenesisEndorsements = stripped.GenesisEndorsements[:n-1]
+	rawStripped, err := json.Marshal(stripped)
+	if err != nil {
+		t.Fatalf("marshal stripped doc: %v", err)
+	}
+	if _, err := network.LoadVerifiedBootstrap(rawStripped, [32]byte(ids.NetworkID)); !errors.Is(err, network.ErrGenesisEndorsement) {
+		t.Fatalf("stripping one endorsement must fail the ceremony (N-of-N, no quorum slack), got err=%v", err)
+	}
+}
+
+// TestMintServedBootstrap_OffPolicy pins the legacy/dev escape hatch: with
+// -endorsement-policy=off the doc carries no policy key and no endorsements,
+// and the served bytes still pass LoadVerifiedBootstrap (a no-policy doc
+// demands no ceremony) — the pre-write round-trip gate applies in BOTH modes.
+func TestMintServedBootstrap_OffPolicy(t *testing.T) {
+	dids, privs, addr := mintWitnessFixture(t, 3)
+	doc := buildBootstrapDoc("did:web:state:tn:davidson", "clarity-test", "require", "off", dids, 2, addr, 1)
+	ids, err := doc.IDs()
+	if err != nil {
+		t.Fatalf("IDs: %v", err)
+	}
+
+	body, minted, err := mintServedBootstrap(doc, privs)
+	if err != nil {
+		t.Fatalf("off-mode mint must succeed: %v", err)
+	}
+	if len(minted.GenesisEndorsements) != 0 {
+		t.Fatalf("off mode must not endorse, got %d endorsements", len(minted.GenesisEndorsements))
+	}
+
+	loaded, err := network.LoadVerifiedBootstrap(body, [32]byte(ids.NetworkID))
+	if err != nil {
+		t.Fatalf("off-mode served bytes failed LoadVerifiedBootstrap: %v", err)
+	}
+	if loaded.RequiresEndorsement() || len(loaded.GenesisEndorsements) != 0 {
+		t.Fatalf("off-mode form must carry no policy and no endorsements (policy=%q count=%d)",
+			loaded.GenesisEndorsementPolicy, len(loaded.GenesisEndorsements))
+	}
+}
+
+// TestEndorsementPolicy_BoundIntoNetworkID: the policy lives INSIDE the
+// canonical bytes, so identical inputs with require vs off mint DIFFERENT
+// NetworkIDs. This is what makes the policy fail-closed — "require" cannot be
+// stripped post-mint without becoming a different network and breaking every
+// consumer's TOFU pin.
+func TestEndorsementPolicy_BoundIntoNetworkID(t *testing.T) {
+	dids, _, addr := mintWitnessFixture(t, 3)
+	reqDoc := buildBootstrapDoc("did:web:state:tn:davidson", "clarity-test", "require", "require", dids, 2, addr, 1)
+	offDoc := buildBootstrapDoc("did:web:state:tn:davidson", "clarity-test", "require", "off", dids, 2, addr, 1)
+
+	reqIDs, err := reqDoc.IDs()
+	if err != nil {
+		t.Fatalf("require IDs: %v", err)
+	}
+	offIDs, err := offDoc.IDs()
+	if err != nil {
+		t.Fatalf("off IDs: %v", err)
+	}
+	if [32]byte(reqIDs.NetworkID) == [32]byte(offIDs.NetworkID) {
+		t.Fatal("policy require vs off must derive different NetworkIDs (the policy is canonical-bytes material)")
+	}
+}
+
 // TestInitNetwork_RefusesDilutingK: asking the tool for a diluting or
 // out-of-range K fails at mint (resolveGenesisQuorumK), not at first boot.
 func TestInitNetwork_RefusesDilutingK(t *testing.T) {
 	for _, tc := range []struct {
-		name    string
-		k, n    int
+		name string
+		k, n int
 	}{
 		{"diluting 1-of-3", 1, 3},
 		{"diluting 2-of-4", 2, 4},
@@ -311,7 +447,7 @@ func TestBuildBootstrapDoc_GenesisQuorumK(t *testing.T) {
 		t.Fatalf("admission authority: %v", err)
 	}
 	build := func(k int) (network.BootstrapDocument, error) {
-		doc := buildBootstrapDoc("did:web:state:tn:davidson", "clarity-test", "require", dids, k, addr, 1)
+		doc := buildBootstrapDoc("did:web:state:tn:davidson", "clarity-test", "require", "require", dids, k, addr, 1)
 		_, idErr := doc.IDs()
 		return doc, idErr
 	}
