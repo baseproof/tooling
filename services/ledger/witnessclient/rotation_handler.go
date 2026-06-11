@@ -404,10 +404,16 @@ func LoadCurrentSetRow(ctx context.Context, db *pgxpool.Pool) (*WitnessSetRow, e
 	row := &WitnessSetRow{}
 	var setHash []byte
 	var schemeTag int16
+	// The witness_sets_active partial unique index (migration 0019) guarantees
+	// at most one row with retired_seq IS NULL, so this resolves the current
+	// trust root deterministically. ORDER BY effective_seq DESC is belt-and-
+	// braces: should a regression ever leave two active rows, the newest set
+	// (greatest effective_seq) wins, never an arbitrary heap order.
 	err := db.QueryRow(ctx,
 		`SELECT set_hash, keys_json, scheme_tag, effective_seq, retired_seq
 		   FROM witness_sets
 		  WHERE retired_seq IS NULL
+		  ORDER BY effective_seq DESC
 		  LIMIT 1`,
 	).Scan(&setHash, &row.KeysJSON, &schemeTag, &row.EffectiveSeq, &row.RetiredSeq)
 	if err != nil {
