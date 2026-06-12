@@ -8,9 +8,10 @@ name: ledger-publish-image
 # auditor/witness): ghcr.io/baseproof/tooling/ledger.
 #
 # Relocated from the standalone ledger repo when the ledger moved into
-# services/ledger. The build context is the module dir (the Dockerfile is
-# context-relative — COPY go.mod/go.sum, COPY . ., go build ./cmd/...), and the
-# checkout pulls the third_party/tessera submodule for the default fork build.
+# services/ledger. The build context is the MONOREPO ROOT so the Dockerfile can
+# COPY the sibling libs/ module (ledger's `replace => ../../libs` target) — the
+# same cross-module shape as services/witness — then COPY services/ledger/ and
+# build ./cmd/...; the checkout pulls third_party/tessera for the default fork.
 
 on:
   push:
@@ -32,9 +33,9 @@ env:
   # Publish under the tooling fleet namespace (consistent with the
   # auditor/witness images): ghcr.io/baseproof/tooling/ledger.
   IMAGE_NAME: ${{ github.repository }}/ledger
-  # ── Paths into the relocated module (build context = the module dir). ──
+  # ── Repo-root build context so the cross-module libs/ COPY resolves. ──
   DOCKERFILE: services/ledger/scripts/local/Dockerfile
-  BUILD_CONTEXT: services/ledger
+  BUILD_CONTEXT: .
   PLATFORMS: linux/amd64,linux/arm64
 
 jobs:

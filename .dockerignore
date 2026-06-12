@@ -1,0 +1,23 @@
+# Build-context hygiene for the repo-root-context image builds (services/ledger
+# and services/witness both build with the monorepo root as the Docker context
+# so their `replace => ../../libs` resolves). The images COPY only libs/ +
+# services/<svc>/ source, but keep local-only artifacts — and CRITICALLY any
+# secrets — out of the build context regardless of what a COPY might widen to.
+.git
+**/.git
+**/node_modules
+**/.venv
+**/__pycache__
+**/*.pyc
+**/.mypy_cache
+**/.pytest_cache
+**/.ruff_cache
+**/*.egg-info
+.run
+**/.run
+
+# Secrets — never enter an image build context.
+**/.env
+**/.env.*
+**/age-key.txt
+**/keys.txt

@@ -28,8 +28,10 @@ services:
 
   ledger:
     build:
-      context: ../../
-      dockerfile: scripts/local/Dockerfile
+      # Repo-root context so the Dockerfile can COPY the sibling libs/ module
+      # (ledger's `replace => ../../libs` target). Same shape as services/witness.
+      context: ../../../../
+      dockerfile: services/ledger/scripts/local/Dockerfile
     environment:
       # Canonical LEDGER_* contract (cmd/ledger/config.go).
       - LEDGER_LOG_DID=did:baseproof:ledger:local:001

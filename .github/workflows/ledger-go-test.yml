@@ -114,14 +114,17 @@ jobs:
           persist-credentials: false
           submodules: recursive
 
-      # Proves the production image builds from the new context (services/ledger,
-      # via the inherited working-directory) including the third_party/tessera
+      # Proves the production image builds, including the third_party/tessera
       # submodule that the default fork variant links — so a Dockerfile/context/
-      # submodule regression is caught per-PR, not at release-tag time.
+      # submodule regression is caught per-PR, not at release-tag time. The
+      # context is the REPO ROOT (override the job's services/ledger working-
+      # directory) so the sibling libs/ module — ledger's `replace => ../../libs`
+      # target — is in scope, the same cross-module shape services/witness uses.
       - name: docker build (fork — default variant)
+        working-directory: ${{ github.workspace }}
         run: |
           docker build \
-            -f scripts/local/Dockerfile \
+            -f services/ledger/scripts/local/Dockerfile \
             --build-arg VERSION=ci \
             --build-arg TESSERA_VARIANT=fork \
             -t ledger:ci .

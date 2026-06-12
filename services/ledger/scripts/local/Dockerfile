@@ -3,12 +3,14 @@
 # so the SAME image runs under the local dev scripts, docker-compose, or k8s —
 # configured only by env + mounted Secret/ConfigMap files. No config is baked in.
 #
-# Build from the repo root:
-#   docker build -f scripts/local/Dockerfile .
+# Build from the MONOREPO ROOT — the context must include the sibling libs/
+# module (ledger's `replace => ../../libs` target), the same cross-module shape
+# as services/witness/Dockerfile:
+#   docker build -f services/ledger/scripts/local/Dockerfile .
 #
 # Behind a TLS-inspecting egress proxy (CI sandbox / corporate net), pass the
 # trust bundle so module + package fetches verify (no-op when absent):
-#   docker build -f scripts/local/Dockerfile \
+#   docker build -f services/ledger/scripts/local/Dockerfile \
 #     --secret id=ca_bundle,src=/etc/ssl/certs/ca-certificates.crt .
 FROM --platform=$BUILDPLATFORM golang:1.25-alpine AS builder
 # Cross-compile from the native build platform to TARGETOS/TARGETARCH (set by
@@ -18,7 +20,15 @@ ARG TARGETOS TARGETARCH
 
 WORKDIR /src
 
-COPY go.mod go.sum ./
+# Cross-module build (mirrors services/witness/Dockerfile): the build CONTEXT is
+# the REPO ROOT so the sibling libs module — ledger's `replace => ../../libs`
+# target — is in scope. Copy libs/ first so the cross-module require resolves,
+# then the ledger module (with its committed go.work + third_party/tessera
+# submodule that the default fork variant links).
+COPY libs/ ./libs/
+COPY services/ledger/ ./services/ledger/
+
+WORKDIR /src/services/ledger
 
 # All deps are public (baseproof SDK + the AWS/badger/etc. modules), so no VCS auth
 # is needed. The optional ca_bundle secret trusts a TLS-inspecting proxy's CA;
@@ -30,8 +40,6 @@ RUN --mount=type=secret,id=ca_bundle \
       cat /run/secrets/ca_bundle >> /etc/ssl/certs/ca-certificates.crt; \
     fi; \
     go mod download
-
-COPY . .
 
 # VERSION is stamped into main.Version; defaults to "docker" for unstamped
 # (local) builds. Build the daemon PLUS the ops CLIs (submit-stamp seeds an
