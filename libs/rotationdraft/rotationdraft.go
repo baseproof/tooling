@@ -3,38 +3,49 @@ FILE PATH: libs/rotationdraft/rotationdraft.go
 
 DESCRIPTION:
 
-	The witness-rotation ceremony's file-relay artifacts (PRE-6b/6c) — the
-	SEAM both consumers import (the witness host's one-shot consent signer
-	and the operator's rotation driver), so the ceremony has exactly one
-	wire shape and one digest recipe.
+	The witness-rotation ceremony's FILE-RELAY layer (PRE-6b/6c) — and ONLY
+	that. Assembly belongs to the SDK: witness.NewRotationDraft routes,
+	deduplicates, conflict-rejects, and Finalize() SELF-VERIFIES the
+	assembled rotation through the full VerifyRotation recipe before it can
+	be minted ("assembly shares the verifier"). This package carries the
+	ceremony across air gaps:
 
-	  Draft   — the proposed rotation: network binding, the CURRENT set
-	            hash (fetched from the live witness history, never
-	            asserted), and the NEW set's keys. Carried host to host.
-	  Consent — ONE witness's cosignature over the SDK's canonical
-	            rotation message: cosign.SignECDSA(
-	              NewRotationPayloadSHA256(ComputeSetHash(newSet)),
-	              networkID, …) — the IDENTICAL bytes the online
-	            /v1/cosign purpose=rotation flow signs, so offline and
-	            online consents are interchangeable under
-	            witness.VerifyRotation.
+	  Draft   — the NewRotationDraft constructor inputs as a relayable file:
+	            network binding, the constitutional quorum K, the CURRENT
+	            set's keys (fetched from the live witness history, never
+	            asserted), and the proposed NEW set's keys. Scheme tags are
+	            NOT stored — they are DERIVED from the key material per side
+	            (uniform-or-refuse), so a wrong tag is unconstructible.
+	  Consent — ONE witness's ceremony.Endorsement over the draft's rotation
+	            payload (ceremony.Endorse — the SAME primitive that signs a
+	            genesis endorsement, producing the IDENTICAL bytes the online
+	            purpose=rotation flow signs), wrapped in the relay bindings
+	            the air gap needs: network id + new-set hash, so a consent
+	            for a DIFFERENT proposal is a named refusal, never a generic
+	            crypto failure. The signing host REFUSES to consent with a
+	            key outside the current∪next sets — the same membership
+	            discipline the SDK's Attach enforces, applied where the
+	            mistake would enter (the guard genesis-endorse models for
+	            constitutions).
 
-	The artifacts are convenience, never authority: the finalized
-	types.WitnessRotation is verified by the SDK's full recipe (set-hash
-	rebind, scheme enforcement, OLD K-of-N quorum) at ProcessRotation —
-	and nowhere else mints trust.
+	Finalize takes ONE consent list: each endorsement enters the SDK through
+	AttachEndorsement, whose membership routing buckets it to its side(s) —
+	the operator never sorts consents — and the SDK's Finalize is the only
+	minter. Binding cross-checks here are relay integrity (a consent for a
+	different proposal never even reaches the SDK); trust is the SDK's, end
+	to end.
 */
 package rotationdraft
 
 import (
 	"crypto/ecdsa"
-	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
 
+	"github.com/baseproof/baseproof/ceremony"
 	"github.com/baseproof/baseproof/crypto/cosign"
 	"github.com/baseproof/baseproof/types"
 	"github.com/baseproof/baseproof/witness"
@@ -53,91 +64,190 @@ type Key struct {
 	SchemeTag uint8  `json:"scheme_tag"`
 }
 
-// Draft is the proposed rotation, relayed for consent collection.
+// Draft is the proposed rotation, relayed for consent collection — the SDK
+// RotationDraft's constructor inputs, as a file.
 type Draft struct {
-	SchemaVersion  string `json:"schema_version"`
-	NetworkIDHex   string `json:"network_id"`       // 64-hex; consents bind to it
-	CurrentSetHash string `json:"current_set_hash"` // 64-hex; from the LIVE history
-	NewSet         []Key  `json:"new_set"`
-}
-
-// Consent is one witness's signature over the canonical rotation message.
-type Consent struct {
 	SchemaVersion string `json:"schema_version"`
-	NetworkIDHex  string `json:"network_id"`
-	NewSetHashHex string `json:"new_set_hash"` // binds the consent to ONE proposal
-	PubKeyIDHex   string `json:"pub_key_id"`
-	SchemeTag     uint8  `json:"scheme_tag"`
-	SignatureB64  string `json:"signature"`
+	NetworkIDHex  string `json:"network_id"` // 64-hex; consents bind to it
+	QuorumK       int    `json:"quorum_k"`   // the constitutional K (predecessor threshold)
+	CurrentSet    []Key  `json:"current_set"`
+	NewSet        []Key  `json:"new_set"`
 }
 
-// ─── draft mechanics ─────────────────────────────────────────────────
+// Consent is one witness's ceremony.Endorsement over the draft's rotation
+// payload — the SAME artifact shape a genesis endorsement is (the SDK's one
+// signature-relay shape) — wrapped in the bindings the air-gapped relay
+// needs to refuse by NAME instead of by crypto failure.
+type Consent struct {
+	SchemaVersion string               `json:"schema_version"`
+	NetworkIDHex  string               `json:"network_id"`
+	NewSetHashHex string               `json:"new_set_hash"` // binds the consent to ONE proposal
+	Endorsement   ceremony.Endorsement `json:"endorsement"`
+}
 
-// NewSetKeys decodes the draft's new set into SDK keys.
-func (d *Draft) NewSetKeys() ([]types.WitnessPublicKey, error) {
-	out := make([]types.WitnessPublicKey, 0, len(d.NewSet))
-	for i, k := range d.NewSet {
+// ─── key decoding + scheme derivation ───────────────────────────────
+
+func decodeKeys(side string, in []Key) ([]types.WitnessPublicKey, error) {
+	out := make([]types.WitnessPublicKey, 0, len(in))
+	for i, k := range in {
 		id, err := hex32(k.IDHex)
 		if err != nil {
-			return nil, fmt.Errorf("rotationdraft: new_set[%d].id: %w", i, err)
+			return nil, fmt.Errorf("rotationdraft: %s[%d].id: %w", side, i, err)
 		}
 		pub, err := hex.DecodeString(strings.TrimSpace(k.PublicKey))
 		if err != nil {
-			return nil, fmt.Errorf("rotationdraft: new_set[%d].public_key: %w", i, err)
+			return nil, fmt.Errorf("rotationdraft: %s[%d].public_key: %w", side, i, err)
 		}
 		out = append(out, types.WitnessPublicKey{ID: id, PublicKey: pub, SchemeTag: k.SchemeTag})
 	}
 	return out, nil
 }
 
+// deriveScheme returns the side's ONE scheme tag, derived from the key
+// material — a mixed or zero tag is a NAMED refusal, never a guess. The
+// on-log rotation carries one tag per side; a wrong tag must be
+// unconstructible from this path.
+func deriveScheme(side string, keys []types.WitnessPublicKey) (byte, error) {
+	if len(keys) == 0 {
+		return 0, fmt.Errorf("rotationdraft: empty %s set", side)
+	}
+	tag := keys[0].SchemeTag
+	if tag == 0 {
+		return 0, fmt.Errorf("rotationdraft: %s set carries an unknown (zero) scheme tag — refusing to derive", side)
+	}
+	for i, k := range keys {
+		if k.SchemeTag != tag {
+			return 0, fmt.Errorf("rotationdraft: mixed signature schemes in the %s set (0x%02x at [0], 0x%02x at [%d]) — the on-log rotation carries ONE tag per side; refusing to derive",
+				side, tag, k.SchemeTag, i)
+		}
+	}
+	return tag, nil
+}
+
+// CurrentKeys / NewKeys decode the draft's sets into SDK keys.
+func (d *Draft) CurrentKeys() ([]types.WitnessPublicKey, error) {
+	return decodeKeys("current_set", d.CurrentSet)
+}
+func (d *Draft) NewKeys() ([]types.WitnessPublicKey, error) {
+	return decodeKeys("new_set", d.NewSet)
+}
+
 // NewSetHash computes the canonical new-set hash via the SDK's ONE recipe.
 func (d *Draft) NewSetHash() ([32]byte, error) {
-	keys, err := d.NewSetKeys()
+	keys, err := d.NewKeys()
 	if err != nil {
 		return [32]byte{}, err
 	}
 	return witness.ComputeSetHash(keys), nil
 }
 
-// SignConsent produces this witness's consent: the SDK cosign signature over
-// the canonical rotation message — byte-identical to the online
-// purpose=rotation flow.
-func (d *Draft) SignConsent(pubKeyID [32]byte, schemeTag uint8, key *ecdsa.PrivateKey) (*Consent, error) {
+// SDKDraft constructs the SDK coordinator from the file — the ONE path to
+// assembly. Schemes are derived per side; the SDK constructor re-validates
+// everything (quorum range, 2K>N, duplicates). blsVerifier is nil: the
+// offline ceremony's v1 transport signs ECDSA consents; a BLS-schemed set
+// derives its CORRECT tag here and the SDK's self-verify then refuses
+// loudly without a verifier — correct tags or a named refusal, never
+// silently-wrong tags.
+func (d *Draft) SDKDraft() (*witness.RotationDraft, error) {
 	nid, err := hex32(d.NetworkIDHex)
 	if err != nil {
 		return nil, fmt.Errorf("rotationdraft: network_id: %w", err)
 	}
-	nsh, err := d.NewSetHash()
+	current, err := d.CurrentKeys()
 	if err != nil {
 		return nil, err
 	}
-	payload := cosign.NewRotationPayloadSHA256(nsh)
-	sig, err := cosign.SignECDSA(payload, cosign.NetworkID(nid), cosign.HashAlgoSHA256, key)
+	next, err := d.NewKeys()
+	if err != nil {
+		return nil, err
+	}
+	schemeOld, err := deriveScheme("current_set", current)
+	if err != nil {
+		return nil, err
+	}
+	schemeNew, err := deriveScheme("new_set", next)
+	if err != nil {
+		return nil, err
+	}
+	sdk, err := witness.NewRotationDraft(cosign.NetworkID(nid), current, next, schemeOld, schemeNew, d.QuorumK, nil)
+	if err != nil {
+		return nil, fmt.Errorf("rotationdraft: %w", err)
+	}
+	return sdk, nil
+}
+
+// ─── consent signing (the witness host's leg) ────────────────────────
+
+// SignConsent produces this witness's consent: ceremony.Endorse over the SDK
+// draft's Payload() — the identity, the scheme tag, and the signed bytes are
+// all DERIVED from the key material and the draft, never stated by the
+// caller. Constructing the SDK draft first means a malformed proposal is
+// refused BEFORE any signature exists (the same order genesis-endorse keeps:
+// validate, then sign). A key outside the current∪next sets is REFUSED here,
+// where the mistake would enter (the SDK's Attach enforces the same rule at
+// assembly; this host-side door saves a wasted relay round).
+func (d *Draft) SignConsent(key *ecdsa.PrivateKey) (*Consent, error) {
+	nid, err := hex32(d.NetworkIDHex)
+	if err != nil {
+		return nil, fmt.Errorf("rotationdraft: network_id: %w", err)
+	}
+	sdk, err := d.SDKDraft()
+	if err != nil {
+		return nil, err
+	}
+	e, err := ceremony.Endorse(sdk.Payload(), cosign.NetworkID(nid), cosign.HashAlgoSHA256, key)
 	if err != nil {
 		return nil, fmt.Errorf("rotationdraft: sign consent: %w", err)
+	}
+
+	// Membership, derived through the SDK's ONE endorsement→signature recipe
+	// (the same conversion AttachEndorsement applies at assembly).
+	sig, err := witness.SignatureFromEndorsement(e)
+	if err != nil {
+		return nil, fmt.Errorf("rotationdraft: %w", err)
+	}
+	current, err := d.CurrentKeys()
+	if err != nil {
+		return nil, err
+	}
+	next, err := d.NewKeys()
+	if err != nil {
+		return nil, err
+	}
+	member := false
+	for _, k := range append(current, next...) {
+		if k.ID == sig.PubKeyID {
+			member = true
+			break
+		}
+	}
+	if !member {
+		return nil, fmt.Errorf("rotationdraft: this key (%s) is in neither the current nor the next witness set — refusing to consent to a rotation it has no part in",
+			e.SignerDID)
+	}
+
+	nsh, err := d.NewSetHash()
+	if err != nil {
+		return nil, err
 	}
 	return &Consent{
 		SchemaVersion: ConsentFormat,
 		NetworkIDHex:  d.NetworkIDHex,
 		NewSetHashHex: hex.EncodeToString(nsh[:]),
-		PubKeyIDHex:   hex.EncodeToString(pubKeyID[:]),
-		SchemeTag:     schemeTag,
-		SignatureB64:  base64.StdEncoding.EncodeToString(sig),
+		Endorsement:   e,
 	}, nil
 }
 
-// Finalize assembles the on-log types.WitnessRotation from the draft + the
-// collected consents: the CURRENT set's (the OLD K-of-N authority) and the
-// NEW set's (the dual-sign attestation the on-log structural door requires).
-// Every consent's binding (network id + new-set hash) is cross-checked
-// FATALLY — a consent for a different proposal never rides. Trust stays with
-// witness.VerifyRotation; this is assembly, not authority.
-func (d *Draft) Finalize(currentConsents, newConsents []*Consent) (types.WitnessRotation, error) {
-	cur, err := hex32(d.CurrentSetHash)
-	if err != nil {
-		return types.WitnessRotation{}, fmt.Errorf("rotationdraft: current_set_hash: %w", err)
-	}
-	newSet, err := d.NewSetKeys()
+// ─── finalize: SDK assembly, one consent list ────────────────────────
+
+// Finalize cross-checks each consent's relay binding (a consent for a
+// different proposal or network never reaches assembly), then delegates to
+// the SDK coordinator through AttachEndorsement: membership routing buckets
+// each endorsement to its side(s) (the operator never sorts), idempotent
+// re-deliveries dedupe, conflicting signatures reject — and the SDK's
+// Finalize MINTS only a rotation the full VerifyRotation recipe accepts.
+func (d *Draft) Finalize(consents []*Consent) (types.WitnessRotation, error) {
+	sdk, err := d.SDKDraft()
 	if err != nil {
 		return types.WitnessRotation{}, err
 	}
@@ -147,47 +257,25 @@ func (d *Draft) Finalize(currentConsents, newConsents []*Consent) (types.Witness
 	}
 	wantNSH := hex.EncodeToString(nsh[:])
 
-	r := types.WitnessRotation{
-		CurrentSetHash: cur,
-		NewSet:         newSet,
-		SchemeTagOld:   1, // ECDSA consents (v1 ceremony scheme)
-		SchemeTagNew:   1,
-	}
-	appendSide := func(consents []*Consent, side string, dst *[]types.WitnessSignature) error {
-		for i, c := range consents {
-			if c.SchemaVersion != ConsentFormat {
-				return fmt.Errorf("rotationdraft: %s consents[%d]: schema %q, want %q", side, i, c.SchemaVersion, ConsentFormat)
-			}
-			if !strings.EqualFold(c.NetworkIDHex, d.NetworkIDHex) {
-				return fmt.Errorf("rotationdraft: %s consents[%d] binds network %s, draft is %s", side, i, short(c.NetworkIDHex), short(d.NetworkIDHex))
-			}
-			if !strings.EqualFold(c.NewSetHashHex, wantNSH) {
-				return fmt.Errorf("rotationdraft: %s consents[%d] binds new_set_hash %s, draft computes %s — a consent for a DIFFERENT proposal", side, i, short(c.NewSetHashHex), short(wantNSH))
-			}
-			kid, err := hex32(c.PubKeyIDHex)
-			if err != nil {
-				return fmt.Errorf("rotationdraft: %s consents[%d].pub_key_id: %w", side, i, err)
-			}
-			sig, err := base64.StdEncoding.DecodeString(c.SignatureB64)
-			if err != nil {
-				return fmt.Errorf("rotationdraft: %s consents[%d].signature: %w", side, i, err)
-			}
-			*dst = append(*dst, types.WitnessSignature{
-				PubKeyID: kid, SchemeTag: c.SchemeTag, SigBytes: sig,
-			})
+	for i, c := range consents {
+		if c.SchemaVersion != ConsentFormat {
+			return types.WitnessRotation{}, fmt.Errorf("rotationdraft: consents[%d]: schema %q, want %q", i, c.SchemaVersion, ConsentFormat)
 		}
-		return nil
+		if !strings.EqualFold(c.NetworkIDHex, d.NetworkIDHex) {
+			return types.WitnessRotation{}, fmt.Errorf("rotationdraft: consents[%d] binds network %s, draft is %s", i, short(c.NetworkIDHex), short(d.NetworkIDHex))
+		}
+		if !strings.EqualFold(c.NewSetHashHex, wantNSH) {
+			return types.WitnessRotation{}, fmt.Errorf("rotationdraft: consents[%d] binds new_set_hash %s, draft computes %s — a consent for a DIFFERENT proposal", i, short(c.NewSetHashHex), short(wantNSH))
+		}
+		if err := sdk.AttachEndorsement(c.Endorsement); err != nil {
+			return types.WitnessRotation{}, fmt.Errorf("rotationdraft: consents[%d] (%s): %w", i, c.Endorsement.SignerDID, err)
+		}
 	}
-	if err := appendSide(currentConsents, "current", &r.CurrentSignatures); err != nil {
-		return types.WitnessRotation{}, err
+	rot, err := sdk.Finalize()
+	if err != nil {
+		return types.WitnessRotation{}, fmt.Errorf("rotationdraft: %w", err)
 	}
-	if err := appendSide(newConsents, "new", &r.NewSignatures); err != nil {
-		return types.WitnessRotation{}, err
-	}
-	if err := witness.ValidateWitnessRotation(r); err != nil {
-		return types.WitnessRotation{}, fmt.Errorf("rotationdraft: finalized rotation: %w", err)
-	}
-	return r, nil
+	return rot, nil
 }
 
 // ─── file IO (atomic) ────────────────────────────────────────────────

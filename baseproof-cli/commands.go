@@ -232,8 +232,7 @@ Step 2:  baseproof network bundle publish --manifest m.json --anchor <log@seq> -
 	rFin := &cobra.Command{Use: "finalize", Short: "Merge a draft + collected consents into the on-log rotation", Args: cobra.NoArgs, RunE: forward(cli.RunNetwork, "rotation", "finalize")}
 	rff := rFin.Flags()
 	rff.String("draft", "", "the rotation-draft — REQUIRED")
-	rff.String("current-consents", "", "comma-separated CURRENT-set consent files")
-	rff.String("new-consents", "", "comma-separated NEW-set consent files")
+	rff.String("consents", "", "comma-separated consent files, ANY order (membership routing buckets them) — REQUIRED")
 	rff.String("out", "", "write the finalized rotation here — REQUIRED")
 	rff.StringP("output", "o", "table", "output format: table|json")
 	rSub := &cobra.Command{Use: "submit <finalized-rotation.json>", Short: "Submit the finalized rotation to the network's rotation door", Args: cobra.ExactArgs(1), RunE: forward(cli.RunNetwork, "rotation", "submit")}
