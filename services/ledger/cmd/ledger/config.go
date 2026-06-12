@@ -235,6 +235,24 @@ type Config struct {
 	// NetworkMirrorsFile at boot. Zero LogDID → handler 404s.
 	NetworkMirrors api.WireMirrorManifest
 
+	// PublicURL is the ledger's advertised base URL
+	// (LEDGER_PUBLIC_URL), used by the GET /v1/network/bundle
+	// composer as the declared ledger endpoint + bootstrap
+	// endpoint. Empty ⇒ the served manifest declares no endpoint
+	// addresses (consumers already know the URL they fetched it
+	// from); the transport posture is derived from the scheme
+	// (https ⇒ server-verify, http ⇒ plaintext).
+	PublicURL string
+
+	// ManifestAnchor optionally names the on-log network-manifest
+	// anchor "<log-did>@<seq>" (LEDGER_MANIFEST_ANCHOR). When set,
+	// GET /v1/network/bundle resolves the PUBLISHED manifest from
+	// this ledger's own surface and reports drift against the
+	// boot-composed projection. Requires PublicURL — a configured
+	// anchor with nowhere to resolve it from is boot-fatal, never
+	// a silent downgrade.
+	ManifestAnchor string
+
 	// II.1 — anchor chain file. Operator-supplied JSON file
 	// matching api.WireAnchorChain (log_did + hops with
 	// per-parent witness_set_hash + latest_anchor_seq +
@@ -722,6 +740,11 @@ func loadConfig() (*Config, error) {
 		// Part II.1 — mirror manifest file. Operator-supplied
 		// JSON file matching api.WireMirrorManifest.
 		NetworkMirrorsFile: os.Getenv("LEDGER_NETWORK_MIRRORS_FILE"),
+
+		// API-1 T3b — the network-bundle composer's advertised
+		// base URL + optional on-log manifest anchor.
+		PublicURL:      os.Getenv("LEDGER_PUBLIC_URL"),
+		ManifestAnchor: os.Getenv("LEDGER_MANIFEST_ANCHOR"),
 
 		// Part II.1 — anchor chain file. Operator-supplied JSON
 		// matching api.WireAnchorChain.
