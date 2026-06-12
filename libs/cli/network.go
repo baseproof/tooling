@@ -35,8 +35,10 @@ func RunNetwork(ctx context.Context, args []string) error {
 		return networkShow(rest)
 	case "remove":
 		return networkRemove(rest)
+	case "bundle":
+		return runNetworkBundle(ctx, rest)
 	default:
-		return fmt.Errorf("network: unknown subcommand %q (add|list|use|show|remove)", sub)
+		return fmt.Errorf("network: unknown subcommand %q (add|list|use|show|remove|bundle)", sub)
 	}
 }
 

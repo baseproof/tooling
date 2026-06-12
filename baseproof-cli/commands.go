@@ -168,7 +168,59 @@ func networkCmd() *cobra.Command {
 		RunE:  forward(cli.RunNetwork, "remove"),
 	}
 
-	n.AddCommand(add, list, use, show, remove)
+	bundle := &cobra.Command{Use: "bundle", Short: "The network bundle (the manifest/v1 discovery document)"}
+	bGet := &cobra.Command{
+		Use:   "get",
+		Short: "Fetch the network's bundle and VERIFY it through the door (discovery is never authority)",
+		Args:  cobra.NoArgs,
+		RunE:  forward(cli.RunNetwork, "bundle", "get"),
+	}
+	bgf := bGet.Flags()
+	bgf.String("bundle", "", "client bundle JSON (else --network or the active network)")
+	bgf.StringP("network", "n", "", "stored network name (else $BASEPROOF_NETWORK, else the active network)")
+	bgf.String("destination", "", "exchange/destination DID (default: the single destination served)")
+	bgf.String("out", "", "also write the verified canonical bytes to this file")
+	bgf.StringP("output", "o", "table", "output format: table|json (json = the versioned machine envelope)")
+	bgf.Duration("timeout", 15*time.Second, "per-request HTTP timeout")
+	bVerify := &cobra.Command{
+		Use:   "verify <manifest.json>",
+		Short: "Verify a manifest FILE against the network's hash-verified constitution",
+		Args:  cobra.ExactArgs(1),
+		RunE:  forward(cli.RunNetwork, "bundle", "verify"),
+	}
+	bvf := bVerify.Flags()
+	bvf.String("bundle", "", "client bundle JSON (else --network or the active network)")
+	bvf.StringP("network", "n", "", "stored network name (else $BASEPROOF_NETWORK, else the active network)")
+	bvf.StringP("output", "o", "table", "output format: table|json (json = the versioned machine envelope)")
+	bvf.Duration("timeout", 15*time.Second, "per-request HTTP timeout")
+	bPublish := &cobra.Command{
+		Use:   "publish",
+		Short: "Publish a composed manifest on-log (two-step: --publish-anchor, then --manifest + --anchor)",
+		Long: `Publish the network bundle on-log — the producer half of the manifest contract.
+
+Step 1:  baseproof network bundle publish --publish-anchor --signer-key k.hex
+         (publishes the anchor schema entry, waits, prints the exact --anchor)
+Step 2:  baseproof network bundle publish --manifest m.json --anchor <log@seq> --signer-key k.hex
+         (verifies the composed manifest through the door — an unverifiable
+          manifest is NEVER signed — then publishes it citing the anchor;
+          the LATEST citing entry is the current manifest)`,
+		Args: cobra.NoArgs,
+		RunE: forward(cli.RunNetwork, "bundle", "publish"),
+	}
+	bpf := bPublish.Flags()
+	bpf.String("bundle", "", "client bundle JSON (else --network or the active network)")
+	bpf.StringP("network", "n", "", "stored network name (else $BASEPROOF_NETWORK, else the active network)")
+	bpf.String("manifest", "", "composed manifest JSON to publish (step 2)")
+	bpf.String("anchor", "", "manifest anchor position <log-did>@<seq> (step 2)")
+	bpf.Bool("publish-anchor", false, "publish the manifest ANCHOR schema entry (step 1 of 2)")
+	bpf.String("destination", "", "destination DID for the anchor entry (step 1; default: the bundle's log DID)")
+	bpf.String("signer-key", "", "32-byte hex secp256k1 signer key — REQUIRED")
+	bpf.String("token", "", "Mode A credit token; empty ⇒ the network's posture decides")
+	bpf.StringP("output", "o", "table", "output format: table|json (json = the versioned machine envelope)")
+	bpf.Duration("timeout", 30*time.Second, "per-request HTTP timeout")
+	bundle.AddCommand(bGet, bVerify, bPublish)
+
+	n.AddCommand(add, list, use, show, remove, bundle)
 	return n
 }
 
