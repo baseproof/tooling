@@ -364,10 +364,12 @@ func pollSequence(ctx context.Context, hc *http.Client, url string, timeout time
 // The agnostic dumb-write transport (J7). The protocol "POST already-signed
 // canonical bytes → poll /v1/entries-hash until sequenced" was reimplemented in
 // every direct-to-ledger tool (judicial-cli submit/wait, the ledger's
-// submit-stamp, declare-anchor-target). It lives here ONCE, as two composable
-// halves plus a one-shot — all operating only on (http client, ledger URL,
-// bytes, token): NO bundle, no network identity, no domain type, so it sits
-// BENEATH the network bundle (a bundle-driven caller resolves URL+client from
+// submit-stamp, declare-anchor-target). It lives here ONCE: the POST half
+// (SubmitWire → canonical_hash, or PostEntry → the raw SCT body for callers that
+// verify it), the poll half (WaitForSequence), and the one-shot
+// (SubmitWireAndWait) — all operating only on (http client, ledger URL, bytes,
+// token): NO bundle, no network identity, no domain type, so it sits BENEATH the
+// network bundle (a bundle-driven caller resolves URL+client from
 // b.Endpoint/b.HTTPClient; a bundle-free tool passes a raw URL).
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -400,26 +402,24 @@ func SubmitWireAndWait(ctx context.Context, hc *http.Client, ledgerBaseURL, toke
 	return WaitForSequence(ctx, hc, ledgerBaseURL, hash, timeout)
 }
 
+// PostEntry POSTs already-signed canonical entry bytes to a ledger's
+// POST /v1/entries and returns the RAW 202 SCT response body — the transport
+// every direct-to-ledger writer shares. SubmitWire is the convenience that
+// extracts canonical_hash from this body; a tool that needs the whole SCT reads
+// the body itself (submit-stamp verifies the SCT's own signature against the
+// ledger's did:key; declare-anchor-target just needs the 202). token, when
+// non-empty, is a Bearer credential; a non-202 surfaces the ledger's verdict.
+func PostEntry(ctx context.Context, hc *http.Client, ledgerBaseURL, token string, wire []byte) ([]byte, error) {
+	return postRaw(ctx, hc, strings.TrimRight(ledgerBaseURL, "/")+"/v1/entries", token, wire)
+}
+
 // postDirect POSTs wire bytes to a ledger's /v1/entries (the dumb-write surface,
 // no submit gate) and returns the canonical_hash from the 202 SCT — the direct
 // sibling of postThroughJN.
 func postDirect(ctx context.Context, hc *http.Client, url, token string, wire []byte) (string, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(wire))
+	body, err := postRaw(ctx, hc, url, token, wire)
 	if err != nil {
-		return "", fmt.Errorf("new request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/octet-stream")
-	if token != "" {
-		req.Header.Set("Authorization", "Bearer "+token)
-	}
-	resp, err := hc.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("POST %s: %w", url, err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
-	if resp.StatusCode != http.StatusAccepted {
-		return "", fmt.Errorf("ledger /v1/entries HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		return "", err
 	}
 	var sct struct {
 		CanonicalHash string `json:"canonical_hash"`
@@ -428,4 +428,28 @@ func postDirect(ctx context.Context, hc *http.Client, url, token string, wire []
 		return "", fmt.Errorf("parse SCT canonical_hash: %v (body=%s)", jErr, body)
 	}
 	return sct.CanonicalHash, nil
+}
+
+// postRaw POSTs octet-stream wire bytes (Bearer token when set) to url and
+// returns the 202 body; a non-202 surfaces the ledger's verdict verbatim. The
+// single POST implementation behind SubmitWire and PostEntry.
+func postRaw(ctx context.Context, hc *http.Client, url, token string, wire []byte) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(wire))
+	if err != nil {
+		return nil, fmt.Errorf("new request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/octet-stream")
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	resp, err := hc.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("POST %s: %w", url, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
+	if resp.StatusCode != http.StatusAccepted {
+		return nil, fmt.Errorf("ledger /v1/entries HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	return body, nil
 }
