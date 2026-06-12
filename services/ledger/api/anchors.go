@@ -43,6 +43,8 @@ package api
 import (
 	"encoding/json"
 	"net/http"
+
+	"github.com/baseproof/tooling/services/ledger/apitypes"
 )
 
 // WireAnchorChainEntry mirrors log/discover.AnchorChainEntry with
@@ -94,5 +96,44 @@ func NewNetworkAnchorsHandler(chain WireAnchorChain) http.HandlerFunc {
 		w.Header().Set("Cache-Control", "public, max-age=300")
 		w.WriteHeader(http.StatusOK)
 		_ = json.NewEncoder(w).Encode(chain)
+	}
+}
+
+// NewAnchorsBySourceHandler — GET /v1/network/anchors/by-source/{log_did}.
+//
+// One read-page of the cosigned-anchor entries (the only ANCHOR entry kind)
+// whose projected SourceLogDID equals {log_did}: how a CHILD finds its own
+// anchors here (the publisher read-back) and how an auditor's forensic feed
+// enumerates them. Same page params as /v1/query/* (?start_seq, ?count;
+// count clamped server-side to the hard ceiling).
+//
+// CONTRACT — DISCOVERY, NOT AUTHORITY. The page is served from the 0020
+// source_log_did projection, which is extracted from the publisher's own
+// payload at sequencing. Nothing trust-bearing rides on it: a consumer
+// re-establishes inclusion (this log's tree), this log's K-of-N quorum, and
+// the child-lineage binding from the returned entry bytes. An anchor the
+// projection misses is therefore an OMISSION that fails toward alarm — the
+// child's read-back records no confirmation and the auditor's monitor
+// degrades toward stale/Critical — never toward false compliance. An empty
+// page is a valid answer (a child that has never anchored here), not an
+// error.
+func NewAnchorsBySourceHandler(deps *QueryDeps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
+		logDID := r.PathValue("log_did")
+		if logDID == "" {
+			writeTypedError(ctx, w, apitypes.ErrorClassMissingPathParam,
+				http.StatusBadRequest, "source log DID required")
+			return
+		}
+		startSeq, count := parsePageParams(r)
+		entries, err := deps.QueryAPI.QueryAnchorsBySource(logDID, startSeq, count)
+		if err != nil {
+			deps.Logger.Error("query anchors by-source", "error", err)
+			writeTypedError(ctx, w, apitypes.ErrorClassDBQueryFailed,
+				http.StatusInternalServerError, "query failed")
+			return
+		}
+		writeEntriesJSON(w, entries)
 	}
 }

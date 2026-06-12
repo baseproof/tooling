@@ -415,6 +415,7 @@ func entryRowFor(seq uint64, hash [32]byte, entry *envelope.Entry) store.EntryRo
 		TargetRoot:     targetRoot,
 		CosignatureOf:  cosigOf,
 		SchemaRef:      schemaRef,
+		SourceLogDID:   store.AnchorSourceLogDID(entry),
 	}
 }
 

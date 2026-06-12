@@ -1132,6 +1132,7 @@ func composeHandlers(
 		WitnessesBySetHash: api.NewWitnessesBySetHashHandler(witnessHistoryFetcher),
 		WitnessesAtSeq:     api.NewWitnessesAtSeqHandler(witnessHistoryFetcher),
 		NetworkAnchors:     api.NewNetworkAnchorsHandler(cfg.NetworkAnchors),
+		AnchorsBySource:    api.NewAnchorsBySourceHandler(queryDeps),
 
 		// v1.32.0 L3 — materialized walker-projection endpoints.
 		NetworkLabels:           api.NewNetworkLabelsHandler(d.WitnessLabelsFetcher),

@@ -48,6 +48,10 @@ func (s *stubQueryAPI) QueryByTargetRoot(_ types.LogPosition, _ uint64, _ int) (
 	return nil, nil
 }
 
+func (s *stubQueryAPI) QueryAnchorsBySource(_ string, _ uint64, _ int) ([]types.EntryWithMetadata, error) {
+	return nil, nil
+}
+
 func (s *stubQueryAPI) QueryBySignerDID(_ string, _ uint64, _ int) ([]types.EntryWithMetadata, error) {
 	return nil, nil
 }

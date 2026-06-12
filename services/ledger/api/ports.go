@@ -177,6 +177,13 @@ type QueryAPI interface {
 	// projections per the matrix-of-consumers design (each
 	// consumer caches independently).
 	QueryByDelegateDID(did string) ([]types.EntryWithMetadata, error)
+
+	// QueryAnchorsBySource returns one read-page of the cosigned-anchor
+	// entries (BP-ENTRY-ANCHOR-COSIGNED-HEAD-V1) a given CHILD log has
+	// anchored into THIS log, by the 0020 source_log_did discovery
+	// projection. Same keyset-page contract as the other control-header
+	// queries; ALWAYS clamped (no unbounded by-source scan exists).
+	QueryAnchorsBySource(sourceLogDID string, startSeq uint64, count int) ([]types.EntryWithMetadata, error)
 }
 
 // EscrowOverrideProcessor is the api/ → escrow-override flow

@@ -472,7 +472,11 @@ func (s *Sequencer) buildLiveStagedEntry(
 			CosignatureOf:  cosigOf,
 			SchemaRef:      schemaRef,
 			DelegateDID:    delegateDID,
-			Status:         store.StatusLive,
+			// PR-4c: by-source discovery projection for cosigned-anchor
+			// entries (one extraction home, shared with recovery's
+			// entryRowFor — drift breaks the bit-exact rebuild test).
+			SourceLogDID: store.AnchorSourceLogDID(entry),
+			Status:       store.StatusLive,
 		},
 	}
 	if extractedSplitID != nil {
