@@ -236,3 +236,40 @@ func configCmd() *cobra.Command {
 	c.AddCommand(set, list)
 	return c
 }
+
+func cosignCmd() *cobra.Command {
+	c := &cobra.Command{
+		Use:   "cosign",
+		Short: "The file-based cosign-request relay (multi-host in-band multi-sig)",
+		Long: `Offline assembly of the in-band multi-sig the write gate verifies:
+draft on one host, relay the file, render+countersign on others, submit.
+The relay is convenience, never authority — the gate re-verifies everything.`,
+	}
+	flags := func(cmd *cobra.Command, withNet bool) *cobra.Command {
+		f := cmd.Flags()
+		if withNet {
+			f.String("bundle", "", "client bundle JSON (else --network or the active network)")
+			f.StringP("network", "n", "", "stored network name (else $BASEPROOF_NETWORK, else the active network)")
+		}
+		f.StringP("output", "o", "table", "output format: table|json (json = the versioned machine envelope)")
+		return cmd
+	}
+	draft := flags(&cobra.Command{Use: "draft", Short: "Draft + primary-sign a cosign request (rule from the door-verified manifest)", Args: cobra.NoArgs, RunE: forward(cli.RunCosign, "draft")}, true)
+	df := draft.Flags()
+	df.String("operation", "", "manifest event_type — REQUIRED")
+	df.String("payload", "", "entry payload (UTF-8; or --payload-file)")
+	df.String("payload-file", "", "entry payload file")
+	df.String("signer-key", "", "32-byte hex secp256k1 PRIMARY key — REQUIRED")
+	df.String("role", "", "the primary's role label (default: the operation's primary_role)")
+	df.String("out", "", "write the cosign-request here — REQUIRED")
+	df.Duration("timeout", 15*time.Second, "per-request HTTP timeout")
+	show := flags(&cobra.Command{Use: "show <request-file>", Short: "Render a request: digest-pinned, every signature verified", Args: cobra.ExactArgs(1), RunE: forward(cli.RunCosign, "show")}, false)
+	sign := flags(&cobra.Command{Use: "sign <request-file>", Short: "Render-then-countersign (no blind signing)", Args: cobra.ExactArgs(1), RunE: forward(cli.RunCosign, "sign")}, false)
+	sf := sign.Flags()
+	sf.String("signer-key", "", "32-byte hex secp256k1 countersigner key — REQUIRED")
+	sf.String("role", "", "the role this countersignature satisfies — REQUIRED")
+	submit := flags(&cobra.Command{Use: "submit <request-file>", Short: "Assemble + submit through the write gate (refuses an incomplete mix)", Args: cobra.ExactArgs(1), RunE: forward(cli.RunCosign, "submit")}, true)
+	submit.Flags().Duration("timeout", 30*time.Second, "per-request HTTP timeout")
+	c.AddCommand(draft, show, sign, submit)
+	return c
+}

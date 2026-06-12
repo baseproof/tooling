@@ -56,6 +56,7 @@ check and fails closed. A v2 proof is standalone — 'verify' needs no network.`
 	r.AddCommand(
 		submitCmd(), loadCmd(), proofCmd(), verifyCmd(),
 		infoCmd(), witnessesCmd(), networkCmd(), configCmd(),
+		cosignCmd(),
 	)
 	return r
 }
