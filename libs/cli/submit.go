@@ -359,3 +359,73 @@ func pollSequence(ctx context.Context, hc *http.Client, url string, timeout time
 	}
 	return 0, fmt.Errorf("the JN accepted the write, but the ledger did not sequence it within %s", timeout)
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The agnostic dumb-write transport (J7). The protocol "POST already-signed
+// canonical bytes → poll /v1/entries-hash until sequenced" was reimplemented in
+// every direct-to-ledger tool (judicial-cli submit/wait, the ledger's
+// submit-stamp, declare-anchor-target). It lives here ONCE, as two composable
+// halves plus a one-shot — all operating only on (http client, ledger URL,
+// bytes, token): NO bundle, no network identity, no domain type, so it sits
+// BENEATH the network bundle (a bundle-driven caller resolves URL+client from
+// b.Endpoint/b.HTTPClient; a bundle-free tool passes a raw URL).
+// ─────────────────────────────────────────────────────────────────────────────
+
+// SubmitWire POSTs already-signed canonical entry bytes to a ledger's
+// POST /v1/entries and returns the canonical_hash from the 202 SCT (no poll) —
+// the POST half. token, when non-empty, is a Bearer credential (gated/Mode-A);
+// a non-202 surfaces the ledger's admission verdict verbatim.
+func SubmitWire(ctx context.Context, hc *http.Client, ledgerBaseURL, token string, wire []byte) (string, error) {
+	return postDirect(ctx, hc, strings.TrimRight(ledgerBaseURL, "/")+"/v1/entries", token, wire)
+}
+
+// WaitForSequence polls a ledger's GET /v1/entries-hash/{hash} until the entry
+// is sequenced, returning its assigned sequence — the poll half. The terminal
+// response is the entry record carrying sequence_number (pollSequence); the
+// pending/manual interim {"state":…} keeps polling. timeout (<=0 ⇒ 120s) bounds it.
+func WaitForSequence(ctx context.Context, hc *http.Client, ledgerBaseURL, hash string, timeout time.Duration) (uint64, error) {
+	if timeout <= 0 {
+		timeout = 120 * time.Second
+	}
+	return pollSequence(ctx, hc, strings.TrimRight(ledgerBaseURL, "/")+"/v1/entries-hash/"+hash, timeout)
+}
+
+// SubmitWireAndWait is SubmitWire then WaitForSequence — the one-shot
+// submit-and-confirm a tool uses when it wants the sequence in one call.
+func SubmitWireAndWait(ctx context.Context, hc *http.Client, ledgerBaseURL, token string, wire []byte, timeout time.Duration) (uint64, error) {
+	hash, err := SubmitWire(ctx, hc, ledgerBaseURL, token, wire)
+	if err != nil {
+		return 0, err
+	}
+	return WaitForSequence(ctx, hc, ledgerBaseURL, hash, timeout)
+}
+
+// postDirect POSTs wire bytes to a ledger's /v1/entries (the dumb-write surface,
+// no submit gate) and returns the canonical_hash from the 202 SCT — the direct
+// sibling of postThroughJN.
+func postDirect(ctx context.Context, hc *http.Client, url, token string, wire []byte) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(wire))
+	if err != nil {
+		return "", fmt.Errorf("new request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/octet-stream")
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	resp, err := hc.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("POST %s: %w", url, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
+	if resp.StatusCode != http.StatusAccepted {
+		return "", fmt.Errorf("ledger /v1/entries HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	var sct struct {
+		CanonicalHash string `json:"canonical_hash"`
+	}
+	if jErr := json.Unmarshal(body, &sct); jErr != nil || sct.CanonicalHash == "" {
+		return "", fmt.Errorf("parse SCT canonical_hash: %v (body=%s)", jErr, body)
+	}
+	return sct.CanonicalHash, nil
+}
