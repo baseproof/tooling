@@ -1,11 +1,12 @@
 package cli
 
-// via_jn_test.go — the gated write path (model #1 in-band cosigners over the
-// through-JN submit). submitViaJN multi-signs the entry, POSTs it to the JN's
-// /v1/entries/submit, and resolves the sequence from the LEDGER's /v1/entries-hash.
-// The JN stub captures the posted wire so we assert it carried the primary PLUS
-// every inline cosigner signature — the exact bundle the JN's cosignature policy
-// then gates. No docker: httptest stands in for the JN + ledger read surface.
+// via_gate_test.go — the gated write path (model #1 in-band cosigners over the
+// through-gate submit). submitViaGate multi-signs the entry, POSTs it to the
+// write gate's /v1/entries/submit, and resolves the sequence from the LEDGER's
+// /v1/entries-hash. The gate stub captures the posted wire so we assert it
+// carried the primary PLUS every inline cosigner signature — the exact bundle
+// the gate's cosignature policy then gates. No docker: httptest stands in for
+// the gate + ledger read surface.
 
 import (
 	"context"
@@ -26,7 +27,7 @@ import (
 	"github.com/baseproof/tooling/libs/loadgen"
 )
 
-func TestSubmitViaJN(t *testing.T) {
+func TestSubmitViaGate(t *testing.T) {
 	var gotWire []byte
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
@@ -65,16 +66,16 @@ func TestSubmitViaJN(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	seq, err := submitViaJN(context.Background(), srv.Client(), b, entry, primary, cosigners, 5*time.Second)
+	seq, err := submitViaGate(context.Background(), srv.Client(), b, entry, primary, cosigners, 5*time.Second)
 	if err != nil {
-		t.Fatalf("submitViaJN: %v", err)
+		t.Fatalf("submitViaGate: %v", err)
 	}
 	if seq != 42 {
 		t.Fatalf("seq = %d, want 42 (resolved from the ledger read surface)", seq)
 	}
 
-	// The wire the JN received MUST carry the primary + the inline cosigner sig —
-	// that is exactly the multi-sig bundle the JN's cosignature policy gates.
+	// The wire the gate received MUST carry the primary + the inline cosigner sig —
+	// that is exactly the multi-sig bundle the gate's cosignature policy gates.
 	got, err := envelope.Deserialize(gotWire)
 	if err != nil {
 		t.Fatalf("deserialize posted wire: %v", err)

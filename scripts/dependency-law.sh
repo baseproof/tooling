@@ -88,5 +88,19 @@ for d in $MODDIRS; do
   if [ -n "$hits" ]; then violate "$d links the custodial store"; fi
 done
 
+# LAW 5 extends LAW 1 from imports to VOCABULARY: the agnostic layer must not
+# speak a domain's language even when it links no domain module. Forbids domain
+# lexemes (judicial|court|judge|case_|JN) in libs/ EXPORTED IDENTIFIERS and
+# STRING LITERALS (user- and wire-visible bytes; comments exempt). AST-based —
+# scripts/law5 — so comments never false-positive. Its allowlist is the
+# explicit 3B burn-down (clitools split, monitoring IDs, the prereq rename);
+# anything NEW fails here.
+echo "== LAW 5: no domain vocabulary in the agnostic layer (libs exported identifiers + strings) =="
+if law5_out=$( cd "$(dirname "${BASH_SOURCE[0]}")/law5" && go run . ../../libs 2>&1 ); then
+  note "ok  ${law5_out}"
+else
+  while IFS= read -r line; do [ -n "$line" ] && violate "$line"; done <<<"$law5_out"
+fi
+
 echo
 if [ "$fail" -eq 0 ]; then echo "dependency law: PASS"; else echo "dependency law: FAIL"; exit 1; fi
