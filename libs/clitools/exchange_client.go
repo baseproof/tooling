@@ -19,6 +19,14 @@ type ExchangeClient struct {
 	client  *http.Client
 }
 
+// SubmitResult is the exchange's response after build-sign-submit — the wire
+// contract this client consumes, so it lives beside its verifier.
+type SubmitResult struct {
+	Position      uint64 `json:"position"`
+	CanonicalHash string `json:"canonical_hash,omitempty"`
+	LogTime       string `json:"log_time,omitempty"`
+}
+
 // NewExchangeClient creates a non-mTLS client pointing at the exchange.
 //
 // HTTP transport: sdklog.DefaultClient — same SDK-tuned client the

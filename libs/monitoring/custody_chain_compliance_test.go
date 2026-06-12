@@ -17,7 +17,7 @@ func ccpos(seq uint64) types.LogPosition {
 	return types.LogPosition{LogDID: "did:web:ledger", Sequence: seq}
 }
 func ccGenesis(cd storage.CID) storage.ArtifactCustodyRecord {
-	return storage.ArtifactCustodyRecord{ContentDigest: cd, Owner: "did:court:a", Custodian: "did:court:a", EffectivePos: ccpos(1)}
+	return storage.ArtifactCustodyRecord{ContentDigest: cd, Owner: "did:org:a", Custodian: "did:org:a", EffectivePos: ccpos(1)}
 }
 
 func runCustody(chains map[string]*crosslog.CustodyChain, asOf types.LogPosition) []sdkmon.Alert {
@@ -31,8 +31,8 @@ func TestCustody_CleanChain_NoAlert(t *testing.T) {
 	chains := map[string]*crosslog.CustodyChain{cd.String(): {
 		Genesis: ccGenesis(cd),
 		Transfers: []storage.ArtifactCustodyTransfer{
-			{ContentDigest: cd, FromOwner: "did:court:a", ToOwner: "did:court:b", ToCustodian: "did:cust:b", EffectivePos: ccpos(5)},
-			{ContentDigest: cd, FromOwner: "did:court:b", ToOwner: "did:court:c", ToCustodian: "did:cust:c", EffectivePos: ccpos(9)},
+			{ContentDigest: cd, FromOwner: "did:org:a", ToOwner: "did:org:b", ToCustodian: "did:cust:b", EffectivePos: ccpos(5)},
+			{ContentDigest: cd, FromOwner: "did:org:b", ToOwner: "did:org:c", ToCustodian: "did:cust:c", EffectivePos: ccpos(9)},
 		},
 	}}
 	if a := runCustody(chains, ccpos(100)); len(a) != 0 {
@@ -52,7 +52,7 @@ func TestCustody_DestroyedChain_NoAlert(t *testing.T) {
 	cd := ccd("A")
 	chains := map[string]*crosslog.CustodyChain{cd.String(): {
 		Genesis:     ccGenesis(cd),
-		Destruction: &storage.ArtifactDestruction{ContentDigest: cd, AuthorizingPrincipal: "did:court:a", EffectivePos: ccpos(10)},
+		Destruction: &storage.ArtifactDestruction{ContentDigest: cd, AuthorizingPrincipal: "did:org:a", EffectivePos: ccpos(10)},
 	}}
 	// Destruction is legitimate; the chain still walks cleanly.
 	if a := runCustody(chains, ccpos(100)); len(a) != 0 {
@@ -64,9 +64,9 @@ func TestCustody_DestroyedChain_NoAlert(t *testing.T) {
 func TestCustody_ForgedFromOwner_Critical(t *testing.T) {
 	cd := ccd("A")
 	chains := map[string]*crosslog.CustodyChain{cd.String(): {
-		Genesis: ccGenesis(cd), // owner is did:court:a
+		Genesis: ccGenesis(cd), // owner is did:org:a
 		Transfers: []storage.ArtifactCustodyTransfer{
-			{ContentDigest: cd, FromOwner: "did:forged", ToOwner: "did:court:z", ToCustodian: "did:cust:z", EffectivePos: ccpos(5)},
+			{ContentDigest: cd, FromOwner: "did:forged", ToOwner: "did:org:z", ToCustodian: "did:cust:z", EffectivePos: ccpos(5)},
 		},
 	}}
 	a := runCustody(chains, ccpos(100))
@@ -81,7 +81,7 @@ func TestCustody_CrossContentSplice_Critical(t *testing.T) {
 		Genesis: ccGenesis(cd),
 		Transfers: []storage.ArtifactCustodyTransfer{
 			// References a DIFFERENT artifact's ContentDigest.
-			{ContentDigest: other, FromOwner: "did:court:a", ToOwner: "did:court:b", ToCustodian: "did:cust:b", EffectivePos: ccpos(5)},
+			{ContentDigest: other, FromOwner: "did:org:a", ToOwner: "did:org:b", ToCustodian: "did:cust:b", EffectivePos: ccpos(5)},
 		},
 	}}
 	if countSeverity(runCustody(chains, ccpos(100)), sdkmon.Critical) != 1 {
@@ -95,7 +95,7 @@ func TestCustody_OrphanTransfersNoGenesis_Warning(t *testing.T) {
 	chains := map[string]*crosslog.CustodyChain{cd.String(): {
 		// No Genesis set (zero record).
 		Transfers: []storage.ArtifactCustodyTransfer{
-			{ContentDigest: cd, FromOwner: "did:court:a", ToOwner: "did:court:b", EffectivePos: ccpos(5)},
+			{ContentDigest: cd, FromOwner: "did:org:a", ToOwner: "did:org:b", EffectivePos: ccpos(5)},
 		},
 	}}
 	a := runCustody(chains, ccpos(100))
@@ -110,7 +110,7 @@ func TestCustody_NullEffectivePos_Warning(t *testing.T) {
 	chains := map[string]*crosslog.CustodyChain{cd.String(): {
 		Genesis: ccGenesis(cd),
 		Transfers: []storage.ArtifactCustodyTransfer{
-			{ContentDigest: cd, FromOwner: "did:court:a", ToOwner: "did:court:b", EffectivePos: types.LogPosition{}},
+			{ContentDigest: cd, FromOwner: "did:org:a", ToOwner: "did:org:b", EffectivePos: types.LogPosition{}},
 		},
 	}}
 	a := runCustody(chains, ccpos(100))
@@ -126,8 +126,8 @@ func TestCustody_UnsortedButValid_SortedThenClean(t *testing.T) {
 	chains := map[string]*crosslog.CustodyChain{cd.String(): {
 		Genesis: ccGenesis(cd),
 		Transfers: []storage.ArtifactCustodyTransfer{
-			{ContentDigest: cd, FromOwner: "did:court:b", ToOwner: "did:court:c", ToCustodian: "did:cust:c", EffectivePos: ccpos(9)},
-			{ContentDigest: cd, FromOwner: "did:court:a", ToOwner: "did:court:b", ToCustodian: "did:cust:b", EffectivePos: ccpos(5)},
+			{ContentDigest: cd, FromOwner: "did:org:b", ToOwner: "did:org:c", ToCustodian: "did:cust:c", EffectivePos: ccpos(9)},
+			{ContentDigest: cd, FromOwner: "did:org:a", ToOwner: "did:org:b", ToCustodian: "did:cust:b", EffectivePos: ccpos(5)},
 		},
 	}}
 	if a := runCustody(chains, ccpos(100)); len(a) != 0 {

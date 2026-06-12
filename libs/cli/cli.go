@@ -33,6 +33,8 @@ func Main(argv []string) int {
 		err = RunNetwork(ctx, args)
 	case "config":
 		err = RunConfig(ctx, args)
+	case "cosign":
+		err = RunCosign(ctx, args)
 	case "load":
 		err = RunLoad(ctx, args)
 	case "-h", "--help", "help":

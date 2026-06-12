@@ -39,7 +39,7 @@ func policyWith(eventRules map[string][]Prereq) *InMemoryPolicy {
 
 func TestWalker_UnknownEventTypeRejected(t *testing.T) {
 	w := &Walker{Policy: policyWith(map[string][]Prereq{"a": {}})}
-	v := w.Check("wizard", CaseContext{})
+	v := w.Check("wizard", EvalContext{})
 	if v.OK {
 		t.Fatal("must reject unknown event_type")
 	}
@@ -51,8 +51,8 @@ func TestWalker_UnknownEventTypeRejected(t *testing.T) {
 func TestWalker_KnownEventNoRules_OK(t *testing.T) {
 	// Event registered with empty rule list — vocabulary covers it
 	// and there's nothing to check.
-	w := &Walker{Policy: policyWith(map[string][]Prereq{"case_initiated": {}})}
-	v := w.Check("case_initiated", CaseContext{})
+	w := &Walker{Policy: policyWith(map[string][]Prereq{"record_opened": {}})}
+	v := w.Check("record_opened", EvalContext{})
 	if !v.OK {
 		t.Errorf("known event with no rules must be OK: %+v", v)
 	}
@@ -73,10 +73,10 @@ func ancestorRule(modes PrereqMode, ancestors ...string) Prereq {
 
 func TestWalker_HardAncestor_Present_OK(t *testing.T) {
 	w := &Walker{Policy: policyWith(map[string][]Prereq{
-		"motion_continuance": {ancestorRule(PrereqModeHard, "case_initiated")},
+		"amendment": {ancestorRule(PrereqModeHard, "record_opened")},
 	})}
-	v := w.Check("motion_continuance", CaseContext{
-		ObservedEvents: []string{"case_initiated"},
+	v := w.Check("amendment", EvalContext{
+		ObservedEvents: []string{"record_opened"},
 	})
 	if !v.OK {
 		t.Errorf("ancestor present but not OK: %+v", v)
@@ -85,10 +85,10 @@ func TestWalker_HardAncestor_Present_OK(t *testing.T) {
 
 func TestWalker_HardAncestor_Missing_Rejected(t *testing.T) {
 	w := &Walker{Policy: policyWith(map[string][]Prereq{
-		"motion_continuance": {ancestorRule(PrereqModeHard, "case_initiated")},
+		"amendment": {ancestorRule(PrereqModeHard, "record_opened")},
 	})}
-	v := w.Check("motion_continuance", CaseContext{
-		ObservedEvents: []string{"hearing"}, // wrong event
+	v := w.Check("amendment", EvalContext{
+		ObservedEvents: []string{"review"}, // wrong event
 	})
 	if v.OK {
 		t.Fatal("must reject when ancestor missing")
@@ -103,14 +103,14 @@ func TestWalker_HardAncestor_Missing_Rejected(t *testing.T) {
 
 func TestWalker_AncestorOR_AnyMatchSatisfies(t *testing.T) {
 	w := &Walker{Policy: policyWith(map[string][]Prereq{
-		"verdict": {ancestorRule(PrereqModeHard,
-			"responsive_pleading", "motion_state_dismissal")},
+		"decision": {ancestorRule(PrereqModeHard,
+			"response_filed", "withdrawal_filed")},
 	})}
-	v := w.Check("verdict", CaseContext{
-		ObservedEvents: []string{"motion_state_dismissal"},
+	v := w.Check("decision", EvalContext{
+		ObservedEvents: []string{"withdrawal_filed"},
 	})
 	if !v.OK {
-		t.Errorf("OR-semantics: motion_state_dismissal should satisfy: %+v", v)
+		t.Errorf("OR-semantics: withdrawal_filed should satisfy: %+v", v)
 	}
 }
 
@@ -126,10 +126,10 @@ func authorityRule(scope string) Prereq {
 
 func TestWalker_HardAuthority_Present_OK(t *testing.T) {
 	w := &Walker{Policy: policyWith(map[string][]Prereq{
-		"judicial_appointment": {authorityRule("judicial_appointment_authority")},
+		"appointment": {authorityRule("appointment_authority")},
 	})}
-	v := w.Check("judicial_appointment", CaseContext{
-		PrimaryAuthorityScopes: []string{"judicial_appointment_authority"},
+	v := w.Check("appointment", EvalContext{
+		PrimaryAuthorityScopes: []string{"appointment_authority"},
 	})
 	if !v.OK {
 		t.Errorf("authority present but not OK: %+v", v)
@@ -138,9 +138,9 @@ func TestWalker_HardAuthority_Present_OK(t *testing.T) {
 
 func TestWalker_HardAuthority_Missing_Rejected(t *testing.T) {
 	w := &Walker{Policy: policyWith(map[string][]Prereq{
-		"judicial_appointment": {authorityRule("judicial_appointment_authority")},
+		"appointment": {authorityRule("appointment_authority")},
 	})}
-	v := w.Check("judicial_appointment", CaseContext{
+	v := w.Check("appointment", EvalContext{
 		PrimaryAuthorityScopes: []string{"filing_authority"}, // wrong scope
 	})
 	if v.OK {
@@ -155,13 +155,13 @@ func TestWalker_HardAuthority_Missing_Rejected(t *testing.T) {
 
 func TestWalker_AdvisoryViolation_DoesNotBlock(t *testing.T) {
 	w := &Walker{Policy: policyWith(map[string][]Prereq{
-		"transcript_publication": {
-			ancestorRule(PrereqModeHard, "case_initiated"),
-			ancestorRule(PrereqModeAdvisory, "hearing"),
+		"publication": {
+			ancestorRule(PrereqModeHard, "record_opened"),
+			ancestorRule(PrereqModeAdvisory, "review"),
 		},
 	})}
-	v := w.Check("transcript_publication", CaseContext{
-		ObservedEvents: []string{"case_initiated"}, // hearing missing
+	v := w.Check("publication", EvalContext{
+		ObservedEvents: []string{"record_opened"}, // review missing
 	})
 	if !v.OK {
 		t.Errorf("advisory violation must NOT block: %+v", v)
@@ -176,12 +176,12 @@ func TestWalker_AdvisoryViolation_DoesNotBlock(t *testing.T) {
 
 func TestWalker_MultipleHardRules_FirstFailureDecides(t *testing.T) {
 	w := &Walker{Policy: policyWith(map[string][]Prereq{
-		"verdict": {
-			ancestorRule(PrereqModeHard, "case_initiated"),
-			ancestorRule(PrereqModeHard, "responsive_pleading"),
+		"decision": {
+			ancestorRule(PrereqModeHard, "record_opened"),
+			ancestorRule(PrereqModeHard, "response_filed"),
 		},
 	})}
-	v := w.Check("verdict", CaseContext{
+	v := w.Check("decision", EvalContext{
 		ObservedEvents: []string{}, // both fail
 	})
 	if v.OK {
@@ -198,12 +198,12 @@ func TestWalker_MultipleHardRules_FirstFailureDecides(t *testing.T) {
 
 func TestWalker_HardAndAdvisory_BothViolated_HardDecides(t *testing.T) {
 	w := &Walker{Policy: policyWith(map[string][]Prereq{
-		"transcript_publication": {
-			ancestorRule(PrereqModeHard, "case_initiated"),
-			ancestorRule(PrereqModeAdvisory, "hearing"),
+		"publication": {
+			ancestorRule(PrereqModeHard, "record_opened"),
+			ancestorRule(PrereqModeAdvisory, "review"),
 		},
 	})}
-	v := w.Check("transcript_publication", CaseContext{
+	v := w.Check("publication", EvalContext{
 		ObservedEvents: []string{}, // both fail
 	})
 	if v.OK {
@@ -218,20 +218,20 @@ func TestWalker_HardAndAdvisory_BothViolated_HardDecides(t *testing.T) {
 // ─── helpers ────────────────────────────────────────────────────────
 
 func TestHasObservedEvent(t *testing.T) {
-	ctx := CaseContext{ObservedEvents: []string{"a", "b"}}
+	ctx := EvalContext{ObservedEvents: []string{"a", "b"}}
 	if !HasObservedEvent(ctx, "a") {
 		t.Error("a should be observed")
 	}
 	if HasObservedEvent(ctx, "c") {
 		t.Error("c should NOT be observed")
 	}
-	if HasObservedEvent(CaseContext{}, "any") {
+	if HasObservedEvent(EvalContext{}, "any") {
 		t.Error("empty ctx should observe nothing")
 	}
 }
 
 func TestHasAuthorityScope(t *testing.T) {
-	ctx := CaseContext{PrimaryAuthorityScopes: []string{"a", "b"}}
+	ctx := EvalContext{PrimaryAuthorityScopes: []string{"a", "b"}}
 	if !HasAuthorityScope(ctx, "a") {
 		t.Error("a should be a held scope")
 	}
@@ -244,7 +244,7 @@ func TestHasAuthorityScope(t *testing.T) {
 
 func TestWalker_NilWalker(t *testing.T) {
 	var w *Walker
-	v := w.Check("evt", CaseContext{})
+	v := w.Check("evt", EvalContext{})
 	if v.Rejection != WalkPolicyError {
 		t.Errorf("nil walker: Rejection=%s", v.Rejection)
 	}
@@ -252,7 +252,7 @@ func TestWalker_NilWalker(t *testing.T) {
 
 func TestWalker_NilPolicy(t *testing.T) {
 	w := &Walker{}
-	v := w.Check("evt", CaseContext{})
+	v := w.Check("evt", EvalContext{})
 	if v.Rejection != WalkPolicyError {
 		t.Errorf("nil policy: Rejection=%s", v.Rejection)
 	}
@@ -261,7 +261,7 @@ func TestWalker_NilPolicy(t *testing.T) {
 // Verdict.EventType always echoed.
 func TestWalker_VerdictEchoesEventType(t *testing.T) {
 	w := &Walker{Policy: policyWith(map[string][]Prereq{"a": {}})}
-	v := w.Check("anything", CaseContext{})
+	v := w.Check("anything", EvalContext{})
 	if v.EventType != "anything" {
 		t.Errorf("EventType drift: %q", v.EventType)
 	}

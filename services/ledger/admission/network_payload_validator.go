@@ -52,6 +52,7 @@ import (
 
 	"github.com/baseproof/baseproof/core/envelope"
 	"github.com/baseproof/baseproof/network"
+	"github.com/baseproof/baseproof/witness"
 )
 
 // ErrNetworkPayloadInvalid is the typed sentinel for structural
@@ -107,6 +108,22 @@ func VerifyNetworkPayloadEntry(entry *envelope.Entry) error {
 	case network.AuditorScopeAmendmentKindV1:
 		if _, err := network.DecodeAuditorScopeAmendmentPayload(entry.DomainPayload); err != nil {
 			return fmt.Errorf("%w: AuditorScopeAmendmentV1: %s", ErrNetworkPayloadInvalid, err)
+		}
+	case witness.WitnessRotationPayloadKindV1:
+		// PRE-6: an externally-submitted witness-rotation entry is held to the
+		// SDK's structural doors BEFORE sequencing — a sequenced-but-invalid
+		// rotation is log pollution (the fail-closed-sequencing precedent the
+		// signer-rotation gate set). Decode + ValidateWitnessRotation are
+		// structure-only; the FULL cryptographic recipe (set-hash rebind, OLD
+		// K-of-N quorum, optional NEW dual-sign) remains ProcessRotation's job
+		// at projection time — admission stays a malformed-payload firewall,
+		// never a trust gate. Non-rotation entries pay exactly the kind probe.
+		r, err := witness.DecodeWitnessRotationPayload(entry.DomainPayload)
+		if err != nil {
+			return fmt.Errorf("%w: WitnessRotationV1: %s", ErrNetworkPayloadInvalid, err)
+		}
+		if err := witness.ValidateWitnessRotation(r); err != nil {
+			return fmt.Errorf("%w: WitnessRotationV1: %s", ErrNetworkPayloadInvalid, err)
 		}
 	}
 	return nil

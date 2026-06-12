@@ -8,19 +8,29 @@
 // args those functions parse, so all defaults + logic live in libs/cli (untouched)
 // and the platform e2e drives exactly what ships. cli.Main (the stdlib-flag
 // dispatch) remains in libs for callers that embed it; this binary is the Cobra
-// front end, staged for extraction to its own repository.
+// front end. It lives in this monorepo until the post-launch move to its own
+// repository (the monorepo is the delivery unit — one binary, one version).
 package main
 
 import (
 	"context"
+	"errors"
 	"os"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
+
+	"github.com/baseproof/tooling/libs/cli"
 )
 
 func main() {
 	if err := root().Execute(); err != nil {
+		// The verify exit-code contract (PRE-1): 1 = the proof FAILED
+		// verification; 2 = verification could not run (usage/IO). Every
+		// other verb keeps the generic failure code 1.
+		if errors.Is(err, cli.ErrVerifyUsage) {
+			os.Exit(2)
+		}
 		os.Exit(1)
 	}
 }
@@ -46,6 +56,7 @@ check and fails closed. A v2 proof is standalone — 'verify' needs no network.`
 	r.AddCommand(
 		submitCmd(), loadCmd(), proofCmd(), verifyCmd(),
 		infoCmd(), witnessesCmd(), networkCmd(), configCmd(),
+		cosignCmd(),
 	)
 	return r
 }
@@ -67,8 +78,10 @@ func forward(run func(context.Context, []string) error, prefix ...string) func(*
 	}
 }
 
-// bundleFlags adds the network-selection flags every act-on-a-network command takes.
+// bundleFlags adds the network-selection flags every act-on-a-network command
+// takes. Resolution order (libs/cli resolveBundle): --bundle, then
+// --network/-n, then $BASEPROOF_NETWORK, then the active network.
 func bundleFlags(c *cobra.Command) {
 	c.Flags().String("bundle", "", "client bundle JSON (else --network or the active network)")
-	c.Flags().String("network", "", "stored network name (else the active network)")
+	c.Flags().StringP("network", "n", "", "stored network name (else $BASEPROOF_NETWORK, else the active network)")
 }

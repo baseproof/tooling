@@ -186,6 +186,11 @@ type Config struct {
 
 	NetworkPeers   api.WireFederationGraph
 	NetworkMirrors api.WireMirrorManifest
+
+	// PublicURL + ManifestAnchor feed the GET /v1/network/bundle composer
+	// (see cmd/ledger Config for the operator contract).
+	PublicURL      string
+	ManifestAnchor string
 }
 
 // walEntryTrace adapts the WAL committer to builder.EntryTraceReader: it resolves
@@ -1164,6 +1169,11 @@ func composeHandlers(
 		return api.Handlers{}, err
 	}
 
+	networkBundleHandler, err := buildNetworkBundleHandler(cfg, d.Logger)
+	if err != nil {
+		return api.Handlers{}, err
+	}
+
 	return api.Handlers{
 		Submission:      submitHandler,
 		BatchSubmission: batchSubmitHandler,
@@ -1220,6 +1230,7 @@ func composeHandlers(
 		NetworkBootstrap:   networkBootstrapHandler,
 		NetworkIdentity:    buildNetworkIdentityHandler(cfg.GenesisBootstrapDocument, d.Logger),
 		NetworkMirrors:     api.NewNetworkMirrorsHandler(cfg.NetworkMirrors),
+		NetworkBundle:      networkBundleHandler,
 		WitnessesCurrent:   api.NewWitnessesCurrentHandler(witnessHistoryFetcher),
 		WitnessesBySetHash: api.NewWitnessesBySetHashHandler(witnessHistoryFetcher),
 		WitnessesAtSeq:     api.NewWitnessesAtSeqHandler(witnessHistoryFetcher),
@@ -1263,6 +1274,36 @@ func buildNetworkBootstrapHandler(doc network.BootstrapDocument) (http.HandlerFu
 		return nil, fmt.Errorf("/v1/network/bootstrap serve form (endorsed bootstrap bytes): %w", err)
 	}
 	return api.NewNetworkBootstrapHandler(served), nil
+}
+
+// buildNetworkBundleHandler composes GET /v1/network/bundle from the SAME
+// boot sources the sibling /v1/network/* handlers serve: identity + quorum +
+// name from the bootstrap document, the destination log DID, the federation
+// graph's siblings, and the admission posture. nil on a pre-bootstrap node
+// (route unmounted); a compose/validate failure — including a ManifestAnchor
+// configured without a PublicURL to resolve it from — is boot-fatal.
+func buildNetworkBundleHandler(cfg Config, logger *slog.Logger) (http.Handler, error) {
+	epoch := uint64(0)
+	if cfg.EpochWindowSeconds > 0 {
+		epoch = uint64(cfg.EpochWindowSeconds)
+	}
+	h, err := api.NewNetworkBundleHandler(api.NetworkBundleSources{
+		Doc:       cfg.GenesisBootstrapDocument,
+		LogDID:    cfg.LogDID,
+		PublicURL: cfg.PublicURL,
+		// Both admission payment modes the /v1/entries forward supports
+		// (Mode A credit token, Mode B PoW).
+		Payment:        []string{"credit", "pow"},
+		EpochWindowSec: epoch,
+		Federation:     cfg.NetworkPeers,
+		Anchor:         cfg.ManifestAnchor,
+		LedgerBaseURL:  cfg.PublicURL,
+		Logger:         logger,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("/v1/network/bundle composer: %w", err)
+	}
+	return h, nil
 }
 
 func buildNetworkIdentityHandler(doc network.BootstrapDocument, logger *slog.Logger) http.HandlerFunc {

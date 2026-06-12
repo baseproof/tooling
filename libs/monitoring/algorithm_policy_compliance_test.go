@@ -28,7 +28,7 @@ func runAlgoPolicy(cfg AlgorithmPolicyComplianceConfig) []sdkmon.Alert {
 func TestAlgorithmPolicy_Compliant_NoAlerts(t *testing.T) {
 	cfg := AlgorithmPolicyComplianceConfig{
 		Records: authz.AlgorithmPolicyByPosition{algoRec(0, ar(envelope.SigAlgoECDSA, authz.AlgorithmActive))},
-		Entries: []crosslog.EntryAtPosition{mkEntry(10, "did:court:a", 1, envelope.SigAlgoECDSA)},
+		Entries: []crosslog.EntryAtPosition{mkEntry(10, "did:org:a", 1, envelope.SigAlgoECDSA)},
 		AsOf:    gpos(100),
 	}
 	if a := runAlgoPolicy(cfg); len(a) != 0 {
@@ -61,7 +61,7 @@ func TestAlgorithmPolicy_ForbiddenAlgorithmAdmitted_Critical(t *testing.T) {
 			algoRec(50, ar(envelope.SigAlgoECDSA, authz.AlgorithmForbidden)), // legal retirement
 		},
 		// Entry at seq 60 signed with the now-forbidden algorithm.
-		Entries: []crosslog.EntryAtPosition{mkEntry(60, "did:court:a", 1, envelope.SigAlgoECDSA)},
+		Entries: []crosslog.EntryAtPosition{mkEntry(60, "did:org:a", 1, envelope.SigAlgoECDSA)},
 		AsOf:    gpos(100),
 	}
 	a := runAlgoPolicy(cfg)
@@ -74,7 +74,7 @@ func TestAlgorithmPolicy_AbsentAlgorithmAdmitted_Critical(t *testing.T) {
 	cfg := AlgorithmPolicyComplianceConfig{
 		Records: authz.AlgorithmPolicyByPosition{algoRec(0, ar(envelope.SigAlgoECDSA, authz.AlgorithmActive))},
 		// SLH-DSA (0x09) is not in the policy at all → not permitted.
-		Entries: []crosslog.EntryAtPosition{mkEntry(10, "did:court:a", 1, envelope.SigAlgoSLHDSA128s)},
+		Entries: []crosslog.EntryAtPosition{mkEntry(10, "did:org:a", 1, envelope.SigAlgoSLHDSA128s)},
 		AsOf:    gpos(100),
 	}
 	if countSeverity(runAlgoPolicy(cfg), sdkmon.Critical) != 1 {
@@ -90,7 +90,7 @@ func TestAlgorithmPolicy_DeprecatedStillPermitted_NoAlert(t *testing.T) {
 			algoRec(0, ar(envelope.SigAlgoECDSA, authz.AlgorithmActive)),
 			algoRec(50, ar(envelope.SigAlgoECDSA, authz.AlgorithmDeprecated)),
 		},
-		Entries: []crosslog.EntryAtPosition{mkEntry(60, "did:court:a", 1, envelope.SigAlgoECDSA)},
+		Entries: []crosslog.EntryAtPosition{mkEntry(60, "did:org:a", 1, envelope.SigAlgoECDSA)},
 		AsOf:    gpos(100),
 	}
 	if a := runAlgoPolicy(cfg); len(a) != 0 {
@@ -105,7 +105,7 @@ func TestAlgorithmPolicy_EntryBeforeGenesis_Warning(t *testing.T) {
 		Records: authz.AlgorithmPolicyByPosition{algoRec(10, ar(envelope.SigAlgoECDSA, authz.AlgorithmActive))},
 		Entries: []crosslog.EntryAtPosition{
 			{Position: gpos(0), Entry: nil},                     // skipped
-			mkEntry(5, "did:court:a", 1, envelope.SigAlgoECDSA), // before genesis(seq 10) → Warning
+			mkEntry(5, "did:org:a", 1, envelope.SigAlgoECDSA), // before genesis(seq 10) → Warning
 		},
 		AsOf: gpos(100),
 	}

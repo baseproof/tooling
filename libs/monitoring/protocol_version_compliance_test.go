@@ -30,7 +30,7 @@ func runProtoPolicy(cfg ProtocolVersionComplianceConfig) []sdkmon.Alert {
 func TestProtocolVersion_Compliant_NoAlerts(t *testing.T) {
 	cfg := ProtocolVersionComplianceConfig{
 		Records: authz.ProtocolVersionAdmissionByPosition{protoRec(0, pvr(1, authz.ProtocolVersionReadWrite))},
-		Entries: []crosslog.EntryAtPosition{mkEntry(10, "did:court:a", 1)},
+		Entries: []crosslog.EntryAtPosition{mkEntry(10, "did:org:a", 1)},
 		AsOf:    gpos(100),
 	}
 	if a := runProtoPolicy(cfg); len(a) != 0 {
@@ -76,7 +76,7 @@ func TestProtocolVersion_LegalRetirement_NoAlert(t *testing.T) {
 			protoRec(50, pvr(1, authz.ProtocolVersionReadOnly)),
 			protoRec(100, pvr(1, authz.ProtocolVersionForbidden)),
 		},
-		Entries: []crosslog.EntryAtPosition{mkEntry(10, "did:court:a", 1)}, // write while read_write — fine
+		Entries: []crosslog.EntryAtPosition{mkEntry(10, "did:org:a", 1)}, // write while read_write — fine
 		AsOf:    gpos(200),
 	}
 	if a := runProtoPolicy(cfg); len(a) != 0 {
@@ -91,7 +91,7 @@ func TestProtocolVersion_EntryUnderNonWriteAdmittedVersion_Critical(t *testing.T
 			protoRec(50, pvr(1, authz.ProtocolVersionReadOnly)), // writes no longer admitted from here
 		},
 		// Entry at seq 60 writes under v1, which is read_only at seq 60.
-		Entries: []crosslog.EntryAtPosition{mkEntry(60, "did:court:a", 1)},
+		Entries: []crosslog.EntryAtPosition{mkEntry(60, "did:org:a", 1)},
 		AsOf:    gpos(100),
 	}
 	if countSeverity(runProtoPolicy(cfg), sdkmon.Critical) != 1 {
@@ -121,7 +121,7 @@ func TestProtocolVersion_EntryBeforeGenesis_Warning(t *testing.T) {
 		Records: authz.ProtocolVersionAdmissionByPosition{protoRec(10, pvr(1, authz.ProtocolVersionReadWrite))},
 		Entries: []crosslog.EntryAtPosition{
 			{Position: gpos(0), Entry: nil}, // skipped
-			mkEntry(5, "did:court:a", 1),    // before genesis(seq 10) → Warning
+			mkEntry(5, "did:org:a", 1),    // before genesis(seq 10) → Warning
 		},
 		AsOf: gpos(100),
 	}

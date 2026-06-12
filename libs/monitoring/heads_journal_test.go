@@ -55,9 +55,9 @@ func ts(year int, month time.Month, day int) time.Time {
 }
 
 const (
-	tnCourts  = "did:web:tn-courts.example"
-	federal   = "did:web:federal-courts.example"
-	gaCourts  = "did:web:ga-courts.example"
+	tnLogs  = "did:web:tn-logs.example"
+	federal   = "did:web:federal-logs.example"
+	gaLogs  = "did:web:ga-logs.example"
 	corrupted = "did:web:malicious.example"
 )
 
@@ -68,7 +68,7 @@ const (
 func TestHeadsJournal_ValidateForRecord(t *testing.T) {
 	t.Parallel()
 
-	good := hdr(tnCourts, 1, 1, 0x01, ts(2026, 5, 12))
+	good := hdr(tnLogs, 1, 1, 0x01, ts(2026, 5, 12))
 
 	cases := []struct {
 		name string
@@ -105,7 +105,7 @@ func TestHeadsJournal_Record_HappyPath_Persists(t *testing.T) {
 	t.Parallel()
 	j := NewMemoryHeadsJournal()
 	ctx := context.Background()
-	h := hdr(tnCourts, 100, 5, 0x01, ts(2026, 5, 12))
+	h := hdr(tnLogs, 100, 5, 0x01, ts(2026, 5, 12))
 
 	v, err := j.Record(ctx, h)
 	if err != nil {
@@ -118,7 +118,7 @@ func TestHeadsJournal_Record_HappyPath_Persists(t *testing.T) {
 		t.Error("flagged equivocation / burn on a clean record")
 	}
 
-	got, err := j.HeadByRootHash(ctx, tnCourts, h.TreeSize, h.RootHash)
+	got, err := j.HeadByRootHash(ctx, tnLogs, h.TreeSize, h.RootHash)
 	if err != nil {
 		t.Fatalf("HeadByRootHash: %v", err)
 	}
@@ -137,7 +137,7 @@ func TestHeadsJournal_Record_Idempotent_ExactDup(t *testing.T) {
 	t.Parallel()
 	j := NewMemoryHeadsJournal()
 	ctx := context.Background()
-	h := hdr(tnCourts, 100, 5, 0x01, ts(2026, 5, 12))
+	h := hdr(tnLogs, 100, 5, 0x01, ts(2026, 5, 12))
 
 	if _, err := j.Record(ctx, h); err != nil {
 		t.Fatalf("first Record: %v", err)
@@ -274,15 +274,15 @@ func TestHeadsJournal_BurnTransition_FiresOnceOnly(t *testing.T) {
 	ctx := context.Background()
 
 	// Force the burn.
-	mustRecord(t, j, hdr(tnCourts, 100, 1, 0x01, ts(2026, 1, 1)))
-	v2, _ := j.Record(ctx, hdr(tnCourts, 100, 2, 0x02, ts(2026, 1, 1)))
+	mustRecord(t, j, hdr(tnLogs, 100, 1, 0x01, ts(2026, 1, 1)))
+	v2, _ := j.Record(ctx, hdr(tnLogs, 100, 2, 0x02, ts(2026, 1, 1)))
 	if !v2.BurnTransition {
 		t.Fatal("setup: second Record should burn")
 	}
 
 	// Third Record on the burned log — Equivocation:true, but
 	// BurnTransition:false (the on-call has already been paged).
-	v3, err := j.Record(ctx, hdr(tnCourts, 100, 3, 0x03, ts(2026, 1, 2)))
+	v3, err := j.Record(ctx, hdr(tnLogs, 100, 3, 0x03, ts(2026, 1, 2)))
 	if err != nil {
 		t.Fatalf("third Record on burned log: %v", err)
 	}
@@ -305,9 +305,9 @@ func TestHeadsJournal_HeadAt_OrderingSemantics(t *testing.T) {
 	j := NewMemoryHeadsJournal()
 	ctx := context.Background()
 
-	mustRecord(t, j, hdr(tnCourts, 10, 1, 0xAA, ts(2026, 1, 1)))
-	mustRecord(t, j, hdr(tnCourts, 50, 2, 0xBB, ts(2026, 2, 1)))
-	mustRecord(t, j, hdr(tnCourts, 100, 3, 0xCC, ts(2026, 3, 1)))
+	mustRecord(t, j, hdr(tnLogs, 10, 1, 0xAA, ts(2026, 1, 1)))
+	mustRecord(t, j, hdr(tnLogs, 50, 2, 0xBB, ts(2026, 2, 1)))
+	mustRecord(t, j, hdr(tnLogs, 100, 3, 0xCC, ts(2026, 3, 1)))
 
 	cases := []struct {
 		asOf uint64
@@ -324,7 +324,7 @@ func TestHeadsJournal_HeadAt_OrderingSemantics(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(fmt.Sprintf("asOf=%d", c.asOf), func(t *testing.T) {
-			h, err := j.HeadAt(ctx, tnCourts, c.asOf)
+			h, err := j.HeadAt(ctx, tnLogs, c.asOf)
 			if c.ok {
 				if err != nil {
 					t.Fatalf("err = %v", err)
@@ -346,9 +346,9 @@ func TestHeadsJournal_HeadAtTime_Ordering(t *testing.T) {
 	j := NewMemoryHeadsJournal()
 	ctx := context.Background()
 
-	mustRecord(t, j, hdr(tnCourts, 10, 1, 0xAA, ts(2026, 6, 15)))
-	mustRecord(t, j, hdr(tnCourts, 20, 2, 0xBB, ts(2027, 6, 15)))
-	mustRecord(t, j, hdr(tnCourts, 30, 3, 0xCC, ts(2028, 6, 15)))
+	mustRecord(t, j, hdr(tnLogs, 10, 1, 0xAA, ts(2026, 6, 15)))
+	mustRecord(t, j, hdr(tnLogs, 20, 2, 0xBB, ts(2027, 6, 15)))
+	mustRecord(t, j, hdr(tnLogs, 30, 3, 0xCC, ts(2028, 6, 15)))
 
 	cases := []struct {
 		when time.Time
@@ -362,7 +362,7 @@ func TestHeadsJournal_HeadAtTime_Ordering(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.when.Format("2006-01-02"), func(t *testing.T) {
-			h, err := j.HeadAtTime(ctx, tnCourts, c.when)
+			h, err := j.HeadAtTime(ctx, tnLogs, c.when)
 			if c.ok {
 				if err != nil {
 					t.Fatalf("err = %v", err)
@@ -384,11 +384,11 @@ func TestHeadsJournal_LatestHead_AfterAdvance(t *testing.T) {
 	j := NewMemoryHeadsJournal()
 	ctx := context.Background()
 
-	mustRecord(t, j, hdr(tnCourts, 5, 1, 0x01, ts(2026, 1, 1)))
-	mustRecord(t, j, hdr(tnCourts, 12, 2, 0x02, ts(2026, 2, 1)))
-	mustRecord(t, j, hdr(tnCourts, 100, 3, 0x03, ts(2026, 3, 1)))
+	mustRecord(t, j, hdr(tnLogs, 5, 1, 0x01, ts(2026, 1, 1)))
+	mustRecord(t, j, hdr(tnLogs, 12, 2, 0x02, ts(2026, 2, 1)))
+	mustRecord(t, j, hdr(tnLogs, 100, 3, 0x03, ts(2026, 3, 1)))
 
-	h, err := j.LatestHead(ctx, tnCourts)
+	h, err := j.LatestHead(ctx, tnLogs)
 	if err != nil {
 		t.Fatalf("LatestHead: %v", err)
 	}
@@ -401,7 +401,7 @@ func TestHeadsJournal_LatestHead_AfterAdvance(t *testing.T) {
 func TestHeadsJournal_LatestHead_NoEntries(t *testing.T) {
 	t.Parallel()
 	j := NewMemoryHeadsJournal()
-	_, err := j.LatestHead(context.Background(), tnCourts)
+	_, err := j.LatestHead(context.Background(), tnLogs)
 	if !errors.Is(err, ErrNoHead) {
 		t.Errorf("err = %v, want ErrNoHead", err)
 	}
@@ -421,15 +421,15 @@ func TestHeadsJournal_MultiLog_Isolation(t *testing.T) {
 	j := NewMemoryHeadsJournal()
 	ctx := context.Background()
 
-	mustRecord(t, j, hdr(tnCourts, 100, 1, 0x01, ts(2026, 1, 1)))
+	mustRecord(t, j, hdr(tnLogs, 100, 1, 0x01, ts(2026, 1, 1)))
 	mustRecord(t, j, hdr(federal, 100, 1, 0x99, ts(2026, 1, 1)))
-	mustRecord(t, j, hdr(gaCourts, 100, 1, 0xCC, ts(2026, 1, 1)))
+	mustRecord(t, j, hdr(gaLogs, 100, 1, 0xCC, ts(2026, 1, 1)))
 
 	// Burn the federal log.
 	mustRecord(t, j, hdr(federal, 100, 2, 0xAA, ts(2026, 1, 1)))
 
 	// TN and GA must still respond cleanly.
-	for _, did := range []string{tnCourts, gaCourts} {
+	for _, did := range []string{tnLogs, gaLogs} {
 		if _, err := j.LatestHead(ctx, did); err != nil {
 			t.Errorf("%s LatestHead errored after federal burn: %v (cross-log contamination)", did, err)
 		}
@@ -455,7 +455,7 @@ func TestHeadsJournal_Year15_HistoricalVerification(t *testing.T) {
 	ctx := context.Background()
 
 	// W1 witness set published a sealing order in May 2026.
-	yearOne := hdr(tnCourts, 50_000, 50_000, 0x01, ts(2026, 5, 12))
+	yearOne := hdr(tnLogs, 50_000, 50_000, 0x01, ts(2026, 5, 12))
 	yearOne.Signatures = []types.WitnessSignature{
 		{PubKeyID: [32]byte{0xA1, 0x1c, 0xe}, SchemeTag: 0x01, SigBytes: []byte("W1-Alice-sig")},
 		{PubKeyID: [32]byte{0xB0, 0xB}, SchemeTag: 0x01, SigBytes: []byte("W1-Bob-sig")},
@@ -465,7 +465,7 @@ func TestHeadsJournal_Year15_HistoricalVerification(t *testing.T) {
 	mustRecord(t, j, yearOne)
 
 	// 15 years of rotation: W2 (year-5), W3 (year-10), W4 (year-15).
-	w2 := hdr(tnCourts, 5_000_000, 5_000_000, 0x02, ts(2031, 1, 1))
+	w2 := hdr(tnLogs, 5_000_000, 5_000_000, 0x02, ts(2031, 1, 1))
 	w2.Signatures = []types.WitnessSignature{
 		{PubKeyID: [32]byte{0xD0}, SchemeTag: 0x01, SigBytes: []byte("W2-Dan")},
 		{PubKeyID: [32]byte{0xE1}, SchemeTag: 0x01, SigBytes: []byte("W2-Eve")},
@@ -473,7 +473,7 @@ func TestHeadsJournal_Year15_HistoricalVerification(t *testing.T) {
 	}
 	mustRecord(t, j, w2)
 
-	w4 := hdr(tnCourts, 80_000_000, 80_000_000, 0x04, ts(2041, 5, 12))
+	w4 := hdr(tnLogs, 80_000_000, 80_000_000, 0x04, ts(2041, 5, 12))
 	w4.Signatures = []types.WitnessSignature{
 		{PubKeyID: [32]byte{0xC1}, SchemeTag: 0x01, SigBytes: []byte("W4-Chen")},
 		{PubKeyID: [32]byte{0xC2}, SchemeTag: 0x01, SigBytes: []byte("W4-Singh")},
@@ -484,7 +484,7 @@ func TestHeadsJournal_Year15_HistoricalVerification(t *testing.T) {
 	// 2041: defense attorney queries HeadAt(50_000) — asks the
 	// journal for the head that was authoritative for the year-1
 	// sealing order.
-	got, err := j.HeadAt(ctx, tnCourts, 50_000)
+	got, err := j.HeadAt(ctx, tnLogs, 50_000)
 	if err != nil {
 		t.Fatalf("year-15 HeadAt(year-1-sequence): %v", err)
 	}
@@ -524,17 +524,17 @@ func TestHeadsJournal_DeterministicTemporal(t *testing.T) {
 	ctx := context.Background()
 
 	// Record three heads.
-	mustRecord(t, j, hdr(tnCourts, 10, 1, 0x01, ts(2026, 1, 1)))
-	mustRecord(t, j, hdr(tnCourts, 20, 2, 0x02, ts(2026, 2, 1)))
-	mustRecord(t, j, hdr(tnCourts, 30, 3, 0x03, ts(2026, 3, 1)))
+	mustRecord(t, j, hdr(tnLogs, 10, 1, 0x01, ts(2026, 1, 1)))
+	mustRecord(t, j, hdr(tnLogs, 20, 2, 0x02, ts(2026, 2, 1)))
+	mustRecord(t, j, hdr(tnLogs, 30, 3, 0x03, ts(2026, 3, 1)))
 
 	const asOf = 25
-	want, err := j.HeadAt(ctx, tnCourts, asOf)
+	want, err := j.HeadAt(ctx, tnLogs, asOf)
 	if err != nil {
 		t.Fatalf("first HeadAt: %v", err)
 	}
 	for i := 0; i < 100; i++ {
-		got, err := j.HeadAt(ctx, tnCourts, asOf)
+		got, err := j.HeadAt(ctx, tnLogs, asOf)
 		if err != nil {
 			t.Fatalf("iter %d: %v", i, err)
 		}
@@ -572,12 +572,12 @@ func TestHeadsJournal_Scale_BoundedTime(t *testing.T) {
 	const heads = 10_000
 	base := ts(2026, 1, 1)
 	for i := uint64(1); i <= heads; i++ {
-		mustRecord(t, j, hdr(tnCourts, i, i, byte(i&0xFF), base.Add(time.Duration(i)*time.Second)))
+		mustRecord(t, j, hdr(tnLogs, i, i, byte(i&0xFF), base.Add(time.Duration(i)*time.Second)))
 	}
 
 	start := time.Now()
 	for i := 0; i < 100; i++ {
-		_, err := j.HeadAt(ctx, tnCourts, heads/2)
+		_, err := j.HeadAt(ctx, tnLogs, heads/2)
 		if err != nil {
 			t.Fatalf("HeadAt under load: %v", err)
 		}
@@ -605,12 +605,12 @@ func TestHeadsJournal_WireFormatPreserved(t *testing.T) {
 	j := NewMemoryHeadsJournal()
 	ctx := context.Background()
 
-	h := hdr(tnCourts, 100, 1, 0x01, ts(2026, 5, 12))
+	h := hdr(tnLogs, 100, 1, 0x01, ts(2026, 5, 12))
 	// Deliberately non-JSON, non-UTF-8 bytes — pure binary wire.
 	h.CanonicalBytes = []byte{0x00, 0xFF, 0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0xFF, 0x01, 0x02}
 	mustRecord(t, j, h)
 
-	got, err := j.HeadByRootHash(ctx, tnCourts, h.TreeSize, h.RootHash)
+	got, err := j.HeadByRootHash(ctx, tnLogs, h.TreeSize, h.RootHash)
 	if err != nil {
 		t.Fatalf("retrieval: %v", err)
 	}
@@ -676,7 +676,7 @@ func TestHeadsJournal_Concurrent_RecordSafe(t *testing.T) {
 func TestHeadsJournal_ContextCancellation(t *testing.T) {
 	t.Parallel()
 	j := NewMemoryHeadsJournal()
-	mustRecord(t, j, hdr(tnCourts, 1, 1, 0x01, ts(2026, 1, 1)))
+	mustRecord(t, j, hdr(tnLogs, 1, 1, 0x01, ts(2026, 1, 1)))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -686,19 +686,19 @@ func TestHeadsJournal_ContextCancellation(t *testing.T) {
 			var err error
 			switch name {
 			case "Record":
-				_, err = j.Record(ctx, hdr(tnCourts, 2, 2, 0x02, ts(2026, 1, 1)))
+				_, err = j.Record(ctx, hdr(tnLogs, 2, 2, 0x02, ts(2026, 1, 1)))
 			case "HeadAt":
-				_, err = j.HeadAt(ctx, tnCourts, 1)
+				_, err = j.HeadAt(ctx, tnLogs, 1)
 			case "HeadAtTime":
-				_, err = j.HeadAtTime(ctx, tnCourts, ts(2026, 1, 1))
+				_, err = j.HeadAtTime(ctx, tnLogs, ts(2026, 1, 1))
 			case "HeadByRootHash":
-				_, err = j.HeadByRootHash(ctx, tnCourts, 1, [32]byte{0x01})
+				_, err = j.HeadByRootHash(ctx, tnLogs, 1, [32]byte{0x01})
 			case "HeadsAtSequence":
-				_, err = j.HeadsAtSequence(ctx, tnCourts, 1)
+				_, err = j.HeadsAtSequence(ctx, tnLogs, 1)
 			case "LatestHead":
-				_, err = j.LatestHead(ctx, tnCourts)
+				_, err = j.LatestHead(ctx, tnLogs)
 			case "BurnStatus":
-				_, err = j.BurnStatus(ctx, tnCourts)
+				_, err = j.BurnStatus(ctx, tnLogs)
 			}
 			if !errors.Is(err, context.Canceled) {
 				t.Errorf("%s should surface context.Canceled; got %v", name, err)

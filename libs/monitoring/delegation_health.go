@@ -32,12 +32,12 @@ import (
 	"github.com/baseproof/tooling/libs/clitools"
 )
 
-const MonitorDelegationHealth monitoring.MonitorID = "judicial.delegation_health"
+const MonitorDelegationHealth monitoring.MonitorID = "platform.delegation_health"
 
 // DelegationHealthConfig configures the delegation health monitor.
 type DelegationHealthConfig struct {
 	LocalLogDID    string
-	RootEntityPos  types.LogPosition // Court profile scope entity
+	RootEntityPos  types.LogPosition // Root profile scope entity
 	ScanLookback   int               // Entries to scan from tip backward
 	ScanStartSeq   uint64            // Starting position for the scan
 	OfficersLogDID string            // Officers log DID (may equal LocalLogDID)
@@ -93,7 +93,7 @@ func CheckDelegationHealth(
 			continue
 		}
 		if node.SignerDID == tree.Root.SignerDID {
-			continue // direct court-level delegation, always valid
+			continue // direct root-level delegation, always valid
 		}
 		if !liveDIDs[node.SignerDID] {
 			alerts = append(alerts, monitoring.Alert{

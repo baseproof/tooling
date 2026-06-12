@@ -33,7 +33,7 @@ func TestSignaturePolicy_Compliant_NoAlerts(t *testing.T) {
 		Records: network.SignaturePolicyByPosition{
 			sigRec(0, []uint16{envelope.SigAlgoECDSA, envelope.SigAlgoEd25519}, []uint8{0x01}, 1),
 		},
-		Entries: []crosslog.EntryAtPosition{mkEntry(10, "did:court:a", 1, envelope.SigAlgoECDSA)},
+		Entries: []crosslog.EntryAtPosition{mkEntry(10, "did:org:a", 1, envelope.SigAlgoECDSA)},
 		Heads:   []CosignedHeadObservation{{Position: gpos(10), SchemeTags: []uint8{0x01}}},
 		AsOf:    gpos(100),
 	}
@@ -46,7 +46,7 @@ func TestSignaturePolicy_NonAllowedScheme_Critical(t *testing.T) {
 	cfg := SignaturePolicyComplianceConfig{
 		Records: network.SignaturePolicyByPosition{sigRec(0, []uint16{envelope.SigAlgoECDSA}, []uint8{0x01}, 1)},
 		// MLDSA65 (0x07) is not in the allow-list.
-		Entries: []crosslog.EntryAtPosition{mkEntry(10, "did:court:a", 1, envelope.SigAlgoMLDSA65)},
+		Entries: []crosslog.EntryAtPosition{mkEntry(10, "did:org:a", 1, envelope.SigAlgoMLDSA65)},
 		AsOf:    gpos(100),
 	}
 	a := runSigPolicy(cfg)
@@ -59,7 +59,7 @@ func TestSignaturePolicy_SubThresholdSignatureCount_Critical(t *testing.T) {
 	cfg := SignaturePolicyComplianceConfig{
 		Records: network.SignaturePolicyByPosition{sigRec(0, []uint16{envelope.SigAlgoECDSA}, []uint8{0x01}, 2)},
 		// One signature, policy requires 2.
-		Entries: []crosslog.EntryAtPosition{mkEntry(10, "did:court:a", 1, envelope.SigAlgoECDSA)},
+		Entries: []crosslog.EntryAtPosition{mkEntry(10, "did:org:a", 1, envelope.SigAlgoECDSA)},
 		AsOf:    gpos(100),
 	}
 	if countSeverity(runSigPolicy(cfg), sdkmon.Critical) != 1 {
@@ -147,7 +147,7 @@ func TestSignaturePolicy_SubjectBeforeGenesis_Warning(t *testing.T) {
 		Records: network.SignaturePolicyByPosition{sigRec(10, []uint16{envelope.SigAlgoECDSA}, []uint8{0x01}, 1)},
 		Entries: []crosslog.EntryAtPosition{
 			{Position: gpos(0), Entry: nil},                     // nil entry → skipped
-			mkEntry(5, "did:court:a", 1, envelope.SigAlgoECDSA), // before genesis(seq 10) → Warning
+			mkEntry(5, "did:org:a", 1, envelope.SigAlgoECDSA), // before genesis(seq 10) → Warning
 		},
 		Heads: []CosignedHeadObservation{{Position: gpos(5), SchemeTags: []uint8{0x01}}}, // before genesis → Warning
 		AsOf:  gpos(100),
@@ -167,7 +167,7 @@ func TestSignaturePolicy_OversizeBundle_NoFalseSubThreshold(t *testing.T) {
 	}
 	cfg := SignaturePolicyComplianceConfig{
 		Records: network.SignaturePolicyByPosition{sigRec(0, []uint16{envelope.SigAlgoECDSA}, []uint8{0x01}, 64)},
-		Entries: []crosslog.EntryAtPosition{mkEntry(10, "did:court:a", 1, algos...)},
+		Entries: []crosslog.EntryAtPosition{mkEntry(10, "did:org:a", 1, algos...)},
 		AsOf:    gpos(100),
 	}
 	if a := runSigPolicy(cfg); len(a) != 0 {
@@ -185,8 +185,8 @@ func TestSignaturePolicy_PerEntryResolvedAtOwnPosition(t *testing.T) {
 			sigRec(50, []uint16{envelope.SigAlgoECDSA, envelope.SigAlgoEd25519}, []uint8{0x01}, 1), // widened at seq 50
 		},
 		Entries: []crosslog.EntryAtPosition{
-			mkEntry(10, "did:court:a", 1, envelope.SigAlgoEd25519), // BEFORE widening → violation
-			mkEntry(60, "did:court:b", 1, envelope.SigAlgoEd25519), // AFTER widening  → OK
+			mkEntry(10, "did:org:a", 1, envelope.SigAlgoEd25519), // BEFORE widening → violation
+			mkEntry(60, "did:org:b", 1, envelope.SigAlgoEd25519), // AFTER widening  → OK
 		},
 		AsOf: gpos(100),
 	}

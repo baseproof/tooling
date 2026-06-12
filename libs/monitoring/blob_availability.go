@@ -26,7 +26,7 @@ import (
 	"github.com/baseproof/baseproof/storage"
 )
 
-const MonitorBlobAvailability monitoring.MonitorID = "judicial.blob_availability"
+const MonitorBlobAvailability monitoring.MonitorID = "platform.blob_availability"
 
 // BlobCheckConfig configures the blob availability monitor.
 type BlobCheckConfig struct {

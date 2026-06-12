@@ -381,6 +381,14 @@ type Handlers struct {
 	// Control: public, max-age=60.
 	NetworkWitnessEndpoints http.HandlerFunc
 
+	// NetworkBundle serves GET /v1/network/bundle — the platform's
+	// baseproof-network-manifest/v1 consumption document, composed at
+	// boot from the SAME sources the sibling /v1/network/* handlers
+	// serve (derived, never asserted) and mounted via the shared
+	// libs/networkbundle serve handler (ETag, published-vs-enforced
+	// drift detection). Constructed by NewNetworkBundleHandler.
+	NetworkBundle http.Handler
+
 	// Bundle serves GET /v1/bundle/{seq}?smt_key=hex — the
 	// baseproof-bundle/v1 wire format assembled from this binary's
 	// in-process composition of BootstrapDocument + entry bytes +
@@ -656,6 +664,9 @@ func NewServer(
 	}
 	if handlers.NetworkWitnessEndpoints != nil {
 		mux.HandleFunc("GET /v1/network/witness-endpoints", handlers.NetworkWitnessEndpoints)
+	}
+	if handlers.NetworkBundle != nil {
+		mux.Handle("GET /v1/network/bundle", handlers.NetworkBundle)
 	}
 	if handlers.Bundle != nil {
 		mux.HandleFunc("GET /v1/bundle/{seq}", handlers.Bundle)

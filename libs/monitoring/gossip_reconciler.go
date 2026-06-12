@@ -6,7 +6,7 @@
 //	SignedEvents from the topology PeerPuller, runs the zero-trust two-tier
 //	verifier, and routes each VERIFIED, strongly-typed finding to its enforcer.
 //	It is the "Smart Edge brain" — the active agent that turns cryptographically
-//	proven peer events into Judicial Network state changes.
+//	proven peer events into network state changes.
 //
 //	  CosignedTreeHead         → TrustedHeadStore (advance JN's verified view of
 //	                             the peer log's head; flag forks/regressions)

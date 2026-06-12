@@ -53,15 +53,15 @@ type ClientBundle struct {
 	Transport     Transport `json:"transport"`
 	Admission     Admission `json:"admission,omitempty"`
 
-	// WriteEndpoint is the JN enforcer's base URL for a GATED network. When set,
-	// `submit` writes THROUGH the JN — POST <WriteEndpoint>/v1/entries/submit over
-	// the Transport mTLS — instead of direct to the ledger's /v1/entries. The JN
-	// runs its admission gate (cosignature + prerequisite policy) and mints the
+	// WriteEndpoint is the network's write gate base URL for a GATED network. When
+	// set, `submit` writes THROUGH the gate — POST <WriteEndpoint>/v1/entries/submit
+	// over the Transport mTLS — instead of direct to the ledger's /v1/entries. The
+	// gate runs its admission policy (cosignature + prerequisite) and mints the
 	// gate-5 WriteAuthorization the ledger requires; a direct write to a gated
 	// ledger is refused. READS (proof/info) always use Endpoint (the ledger). Empty
 	// ⇒ the ungated posture: writes go direct to the ledger. The CLI stays
-	// domain-agnostic — it signs (optionally with cosigners) and posts; the JN owns
-	// the domain policy.
+	// domain-agnostic — it signs (optionally with cosigners) and posts; the gate
+	// owns the domain policy.
 	WriteEndpoint string `json:"write_endpoint,omitempty"`
 
 	// Messages is the set of foundational message structures this network admits

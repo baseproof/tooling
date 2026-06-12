@@ -1,5 +1,5 @@
 /*
-FILE PATH: libs/monitoring/derivation_commitment_compliance.go — judicial.derivation_commitment_compliance.
+FILE PATH: libs/monitoring/derivation_commitment_compliance.go — platform.derivation_commitment_compliance.
 
 Independent re-verification of the ledger's on-log SMT-derivation commitments
 (#190). The ledger moves each commitment's mutation set OFF-log behind a
@@ -54,7 +54,7 @@ import (
 	"github.com/baseproof/baseproof/verifier"
 )
 
-const MonitorDerivationCommitmentCompliance monitoring.MonitorID = "judicial.derivation_commitment_compliance"
+const MonitorDerivationCommitmentCompliance monitoring.MonitorID = "platform.derivation_commitment_compliance"
 
 // CommitmentVerifyFunc is the per-ref verification primitive. It matches
 // verifier.VerifyDerivationCommitmentRef; production wires that, tests inject a

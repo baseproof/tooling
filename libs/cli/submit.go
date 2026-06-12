@@ -43,7 +43,7 @@ func RunSubmit(ctx context.Context, args []string) error {
 		outKey       = fs.String("out-key", "", "write the generated signer key (hex) here (new root only)")
 		token        = fs.String("token", "", "Mode A credit token; empty ⇒ Mode B PoW")
 		difficulty   = fs.Int("difficulty", 0, "Mode B PoW difficulty (0 ⇒ query the ledger)")
-		cosignerKeys = fs.String("cosigner-keys", "", "comma-separated key files (hex) added as INLINE cosignatures on ONE entry (in-band multi-sig, model #1; requires a gated network's write_endpoint — the JN's cosignature policy is the gate)")
+		cosignerKeys = fs.String("cosigner-keys", "", "comma-separated key files (hex) added as INLINE cosignatures on ONE entry (in-band multi-sig, model #1; requires a gated network's write_endpoint — the write gate's cosignature policy decides)")
 		cosign       = fs.String("cosign", "", "TWO-PART attestation (model #2): submit a separate entry that cosigns the prior primary at <log-did>@<seq> (sets Header.CosignatureOf; @<seq> alone ⇒ this network's log)")
 		timeout      = fs.Duration("timeout", 30*time.Second, "per-request HTTP timeout")
 	)
@@ -94,8 +94,9 @@ func RunSubmit(ctx context.Context, args []string) error {
 	}
 
 	// Resolve any INLINE cosigners (model #1, in-band multi-sig): each signs the
-	// SAME signing payload and rides on ONE entry. The JN's cosignature policy is
-	// the gate, so they require a gated write_endpoint (enforced at submit below).
+	// SAME signing payload and rides on ONE entry. The write gate's cosignature
+	// policy decides, so they require a gated write_endpoint (enforced at submit
+	// below).
 	cosigners, ccErr := resolveCosigners(*cosignerKeys)
 	if ccErr != nil {
 		return ccErr
@@ -157,14 +158,15 @@ func RunSubmit(ctx context.Context, args []string) error {
 
 	var seq uint64
 	if b.WriteEndpoint != "" {
-		// GATED network: write THROUGH the JN enforcer — it runs its admission gate
-		// (cosignature + prerequisite policy) and mints the gate-5 WriteAuthorization
-		// the ledger requires. Multi-sign (primary + inline cosigners); the JN's
-		// forward satisfies the payment axis, so no PoW/token is attached here.
-		seq, err = submitViaJN(ctx, hc, b, entry, id, cosigners, *timeout)
+		// GATED network: write THROUGH the network's write gate — it runs its
+		// admission policy (cosignature + prerequisite) and mints the gate-5
+		// WriteAuthorization the ledger requires. Multi-sign (primary + inline
+		// cosigners); the gate's forward satisfies the payment axis, so no
+		// PoW/token is attached here.
+		seq, err = submitViaGate(ctx, hc, b, entry, id, cosigners, *timeout)
 	} else {
 		if len(cosigners) > 0 {
-			return fmt.Errorf("--cosigner-keys (in-band multi-sig) needs a gated network (a write_endpoint / JN enforcer): inline cosignatures are validated by the JN's cosignature policy, not on a direct-to-ledger write")
+			return fmt.Errorf("--cosigner-keys (in-band multi-sig) needs a gated network (a write_endpoint / write gate): inline cosignatures are validated by the gate's cosignature policy, not on a direct-to-ledger write")
 		}
 		seq, err = loadgen.SubmitOne(ctx, loadgen.SubmitParams{
 			LedgerURL:      b.Endpoint,
@@ -259,12 +261,13 @@ func parseLogPos(arg, defaultLogDID string) (types.LogPosition, error) {
 	return types.LogPosition{LogDID: ld, Sequence: seq}, nil
 }
 
-// submitViaJN signs entry with the primary + inline cosigners (over the SAME
-// signing payload), POSTs it THROUGH the JN enforcer (which runs its admission gate
-// + mints the gate-5 WriteAuthorization), then waits for the LEDGER to sequence it.
+// submitViaGate signs entry with the primary + inline cosigners (over the SAME
+// signing payload), POSTs it THROUGH the network's write gate (which runs its
+// admission policy + mints the gate-5 WriteAuthorization), then waits for the
+// LEDGER to sequence it.
 // Reads stay on the ledger; the bundle's mTLS transport serves both hops (one
 // network CA verifies both server certs).
-func submitViaJN(ctx context.Context, hc *http.Client, b *ClientBundle, entry *envelope.Entry, primary loadgen.Identity, cosigners []loadgen.Identity, timeout time.Duration) (uint64, error) {
+func submitViaGate(ctx context.Context, hc *http.Client, b *ClientBundle, entry *envelope.Entry, primary loadgen.Identity, cosigners []loadgen.Identity, timeout time.Duration) (uint64, error) {
 	u, err := envelope.NewUnsignedEntry(entry.Header, entry.DomainPayload)
 	if err != nil {
 		return 0, fmt.Errorf("new unsigned entry: %w", err)
@@ -291,7 +294,7 @@ func submitViaJN(ctx context.Context, hc *http.Client, b *ClientBundle, entry *e
 	if err != nil {
 		return 0, fmt.Errorf("serialize: %w", err)
 	}
-	hash, err := postThroughJN(ctx, hc, strings.TrimRight(b.WriteEndpoint, "/")+"/v1/entries/submit", wire)
+	hash, err := postThroughGate(ctx, hc, strings.TrimRight(b.WriteEndpoint, "/")+"/v1/entries/submit", wire)
 	if err != nil {
 		return 0, err
 	}
@@ -301,11 +304,11 @@ func submitViaJN(ctx context.Context, hc *http.Client, b *ClientBundle, entry *e
 	return pollSequence(ctx, hc, strings.TrimRight(b.Endpoint, "/")+"/v1/entries-hash/"+hash, timeout)
 }
 
-// postThroughJN POSTs wire bytes to the JN's /v1/entries/submit (mTLS) and returns
-// the canonical_hash from the forwarded ledger SCT. A non-202 surfaces the JN's own
-// rejection — its SubmitGate verdict (cosignature/prerequisite) or the ledger's
-// gate-5 refusal — verbatim, so the operator sees exactly which gate said no.
-func postThroughJN(ctx context.Context, hc *http.Client, url string, wire []byte) (string, error) {
+// postThroughGate POSTs wire bytes to the gate's /v1/entries/submit (mTLS) and
+// returns the canonical_hash from the forwarded ledger SCT. A non-202 surfaces the
+// gate's own rejection — its submit-gate verdict (cosignature/prerequisite) or the
+// ledger's gate-5 refusal — verbatim, so the operator sees exactly which gate said no.
+func postThroughGate(ctx context.Context, hc *http.Client, url string, wire []byte) (string, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(wire))
 	if err != nil {
 		return "", fmt.Errorf("new request: %w", err)
@@ -318,7 +321,7 @@ func postThroughJN(ctx context.Context, hc *http.Client, url string, wire []byte
 	defer func() { _ = resp.Body.Close() }()
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
 	if resp.StatusCode != http.StatusAccepted {
-		return "", fmt.Errorf("JN submit HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		return "", fmt.Errorf("write gate submit HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 	var sct struct {
 		CanonicalHash string `json:"canonical_hash"`
@@ -357,7 +360,7 @@ func pollSequence(ctx context.Context, hc *http.Client, url string, timeout time
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
-	return 0, fmt.Errorf("the JN accepted the write, but the ledger did not sequence it within %s", timeout)
+	return 0, fmt.Errorf("the write gate accepted the write, but the ledger did not sequence it within %s", timeout)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -415,7 +418,7 @@ func PostEntry(ctx context.Context, hc *http.Client, ledgerBaseURL, token string
 
 // postDirect POSTs wire bytes to a ledger's /v1/entries (the dumb-write surface,
 // no submit gate) and returns the canonical_hash from the 202 SCT — the direct
-// sibling of postThroughJN.
+// sibling of postThroughGate.
 func postDirect(ctx context.Context, hc *http.Client, url, token string, wire []byte) (string, error) {
 	body, err := postRaw(ctx, hc, url, token, wire)
 	if err != nil {

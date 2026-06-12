@@ -1,5 +1,5 @@
 /*
-FILE PATH: libs/monitoring/algorithm_policy_compliance.go — judicial.algorithm_policy_compliance.
+FILE PATH: libs/monitoring/algorithm_policy_compliance.go — platform.algorithm_policy_compliance.
 
 Independent re-derivation of the network ALGORITHM POLICY (the synthesized
 genesis baseline + on-log BP-ENTRY-NETWORK-ALGORITHM-POLICY-V1 amendments) and
@@ -38,7 +38,7 @@ import (
 	"github.com/baseproof/tooling/libs/crosslog"
 )
 
-const MonitorAlgorithmPolicyCompliance monitoring.MonitorID = "judicial.algorithm_policy_compliance"
+const MonitorAlgorithmPolicyCompliance monitoring.MonitorID = "platform.algorithm_policy_compliance"
 
 // AlgorithmPolicyComplianceConfig configures the algorithm-policy monitor.
 type AlgorithmPolicyComplianceConfig struct {

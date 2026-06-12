@@ -1,9 +1,11 @@
 // Module baseproof-cli — the unified baseproof client BINARY.
 //
-// Staged at tooling/baseproof-cli for extraction to its OWN repository next
-// sprint (where the surface is rebuilt on Cobra). In-repo it builds against the
-// local libs via the replace below; on extraction, drop the replace and bump the
-// require to the published libs tag (e.g. v0.1.7) — no other change.
+// DECIDED (pre-launch): this binary LIVES HERE — the tooling monorepo is the
+// delivery unit (one repo → one binary → one image → one version); siblings it
+// links (libs, and as consolidation proceeds, services/*) resolve via in-repo
+// replaces. The move to its own repository (baseproof/cli) happens AFTER
+// launch, at which point the replaces become published-tag requires — no other
+// change.
 module github.com/baseproof/tooling/baseproof-cli
 
 go 1.25.11

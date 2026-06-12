@@ -1,5 +1,5 @@
 /*
-content_type_compliance.go — judicial.content_type_compliance (Tier 7h).
+content_type_compliance.go — platform.content_type_compliance (Tier 7h).
 
 Independent re-verification that every committed PUBLIC artifact's bytes match
 its SIGNED MIME claim. The claim is per-artifact and immutable — it rides on the
@@ -35,7 +35,7 @@ import (
 	"github.com/baseproof/baseproof/storage"
 )
 
-const MonitorContentTypeCompliance monitoring.MonitorID = "judicial.content_type_compliance"
+const MonitorContentTypeCompliance monitoring.MonitorID = "platform.content_type_compliance"
 
 // ArtifactClaim is a committed artifact's signed content-type claim, projected
 // from its ArtifactGenesis entry: the public bytes' CID + the signed MIME type.

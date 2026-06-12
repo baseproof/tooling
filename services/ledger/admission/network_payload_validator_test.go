@@ -43,6 +43,8 @@ import (
 
 	"github.com/baseproof/baseproof/core/envelope"
 	"github.com/baseproof/baseproof/network"
+	"github.com/baseproof/baseproof/types"
+	"github.com/baseproof/baseproof/witness"
 
 	"github.com/baseproof/tooling/services/ledger/admission"
 )
@@ -276,4 +278,59 @@ func minInt(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// ─── PRE-6: the witness-rotation admission kind-gate ─────────────────
+
+// validWitnessRotation builds a structurally valid rotation via the SDK's
+// OWN encoder (tests are consumers — no hand-assembled wire).
+func validWitnessRotation(t *testing.T) []byte {
+	t.Helper()
+	r := types.WitnessRotation{
+		CurrentSetHash: [32]byte{0x01},
+		NewSet: []types.WitnessPublicKey{
+			{ID: [32]byte{0x02}, PublicKey: []byte{0x04, 0xAA}, SchemeTag: 1},
+		},
+		SchemeTagOld: 1,
+		SchemeTagNew: 1,
+		CurrentSignatures: []types.WitnessSignature{
+			{PubKeyID: [32]byte{0x03}, SchemeTag: 1, SigBytes: []byte{0xBB, 0xCC}},
+		},
+		NewSignatures: []types.WitnessSignature{
+			{PubKeyID: [32]byte{0x02}, SchemeTag: 1, SigBytes: []byte{0xDD, 0xEE}},
+		},
+	}
+	b, err := witness.EncodeWitnessRotationPayload(r)
+	if err != nil {
+		t.Fatalf("SDK encode: %v", err)
+	}
+	return b
+}
+
+func TestVerifyNetworkPayloadEntry_WitnessRotation_KindGated(t *testing.T) {
+	// A structurally valid rotation passes the firewall (trust is
+	// ProcessRotation's job, not admission's).
+	ok := &envelope.Entry{DomainPayload: validWitnessRotation(t)}
+	if err := admission.VerifyNetworkPayloadEntry(ok); err != nil {
+		t.Fatalf("valid rotation must pass the structural gate: %v", err)
+	}
+
+	// Kind-matching but structurally broken: refused BEFORE sequencing —
+	// zero set hash is the SDK's named violation.
+	var probe map[string]any
+	if err := json.Unmarshal(validWitnessRotation(t), &probe); err != nil {
+		t.Fatal(err)
+	}
+	probe["current_set_hash"] = strings.Repeat("00", 32)
+	broken, _ := json.Marshal(probe)
+	err := admission.VerifyNetworkPayloadEntry(&envelope.Entry{DomainPayload: broken})
+	if !errors.Is(err, admission.ErrNetworkPayloadInvalid) {
+		t.Fatalf("a kind-matching invalid rotation must refuse with the typed sentinel: %v", err)
+	}
+
+	// The one-compare contract: a non-rotation payload carrying any other
+	// kind string is untouched by this case.
+	if err := admission.VerifyNetworkPayloadEntry(&envelope.Entry{DomainPayload: []byte(`{"kind":"something-else","x":1}`)}); err != nil {
+		t.Fatalf("non-rotation kinds must pass through: %v", err)
+	}
 }

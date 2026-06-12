@@ -78,7 +78,7 @@ func TestPrereq_IsAuthorityRule(t *testing.T) {
 func TestValidateRule_HappyAncestor(t *testing.T) {
 	r := &Prereq{
 		Mode:             PrereqModeHard,
-		RequiredAncestor: []string{"case_initiated"},
+		RequiredAncestor: []string{"record_opened"},
 		Reason:           "case lifecycle",
 	}
 	if err := validateRule(r); err != nil {
@@ -89,7 +89,7 @@ func TestValidateRule_HappyAncestor(t *testing.T) {
 func TestValidateRule_HappyAuthority(t *testing.T) {
 	r := &Prereq{
 		Mode:              PrereqModeHard,
-		RequiredAuthority: "judicial_appointment_authority",
+		RequiredAuthority: "appointment_authority",
 		Reason:            "personnel",
 	}
 	if err := validateRule(r); err != nil {
