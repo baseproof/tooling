@@ -65,8 +65,8 @@ func NewRotationHandler(proc RotationProcessor) http.Handler {
 			writeRotationError(w, http.StatusUnprocessableEntity, "decode rotation: "+err.Error())
 			return
 		}
-		if err := witness.ValidateWitnessRotation(rotation); err != nil {
-			writeRotationError(w, http.StatusUnprocessableEntity, "invalid rotation: "+err.Error())
+		if verr := witness.ValidateWitnessRotation(rotation); verr != nil {
+			writeRotationError(w, http.StatusUnprocessableEntity, "invalid rotation: "+verr.Error())
 			return
 		}
 
