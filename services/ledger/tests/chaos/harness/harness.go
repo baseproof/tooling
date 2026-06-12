@@ -189,7 +189,7 @@ func New(t *testing.T, cfg Config) *Harness {
 	var placeholder [32]byte
 	h.witnesses = NewWitnesses(t, cfg.WitnessCount, cfg.WitnessQuorumK, placeholder)
 	h.bootstrap = BuildBootstrap(t, h.tmpDir,
-		cfg.ExchangeDID, cfg.NetworkName, h.witnesses.DIDs())
+		cfg.ExchangeDID, cfg.NetworkName, h.witnesses.DIDs(), h.witnesses.PrivateKeys())
 	h.witnesses.rebindNetworkID(t, h.bootstrap.NetworkID)
 
 	// Address — pick a free port now so we can write it into

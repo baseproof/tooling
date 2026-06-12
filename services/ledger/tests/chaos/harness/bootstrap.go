@@ -41,7 +41,7 @@ loader takes a hex scalar, not a PEM.
 package harness
 
 import (
-	"encoding/json"
+	"crypto/ecdsa"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -75,7 +75,7 @@ type BootstrapBundle struct {
 // so different test cases can produce different NetworkIDs.
 //
 // On any failure, t.Fatalf is called.
-func BuildBootstrap(t *testing.T, dir string, exchangeDID, networkName string, witnessDIDs []string) BootstrapBundle {
+func BuildBootstrap(t *testing.T, dir string, exchangeDID, networkName string, witnessDIDs []string, witnessPrivs []*ecdsa.PrivateKey) BootstrapBundle {
 	t.Helper()
 	if exchangeDID == "" {
 		t.Fatal("BuildBootstrap: empty exchangeDID")
@@ -114,6 +114,12 @@ func BuildBootstrap(t *testing.T, dir string, exchangeDID, networkName string, w
 			AllowedCosignSchemeTags: []uint8{0x01},
 			MinSignaturesPerEntry:   1,
 		},
+		// Born-endorsed, like a production mint: the require policy is
+		// canonical-bytes material (set BEFORE IDs() below), and every
+		// witness key the fixture holds self-endorses N-of-N. A chaos
+		// network must exercise the same first-contact ceremony gate a
+		// real network does.
+		GenesisEndorsementPolicy: network.GenesisEndorsementRequire,
 	}
 	// Validate by computing IDs — surfaces malformed inputs at
 	// construction time rather than at subprocess boot.
@@ -121,10 +127,21 @@ func BuildBootstrap(t *testing.T, dir string, exchangeDID, networkName string, w
 	if err != nil {
 		t.Fatalf("BuildBootstrap: bootstrap.IDs (validation): %v", err)
 	}
-
-	body, err := json.MarshalIndent(doc, "", "  ")
+	if len(witnessPrivs) != len(witnessDIDs) {
+		t.Fatalf("BuildBootstrap: %d witness keys for %d DIDs — the ceremony is N-of-N", len(witnessPrivs), len(witnessDIDs))
+	}
+	for i, priv := range witnessPrivs {
+		e, eErr := network.EndorseGenesis(doc, priv)
+		if eErr != nil {
+			t.Fatalf("BuildBootstrap: witness #%d EndorseGenesis: %v", i, eErr)
+		}
+		doc.GenesisEndorsements = append(doc.GenesisEndorsements, e)
+	}
+	// The verified seal: refuses a partial ceremony and emits the SERVED
+	// (endorsed) form — the same bytes every consumer first-contacts.
+	body, err := network.EndorsedBootstrapBytes(doc)
 	if err != nil {
-		t.Fatalf("BuildBootstrap: marshal bootstrap doc: %v", err)
+		t.Fatalf("BuildBootstrap: seal endorsed bootstrap: %v", err)
 	}
 	bootstrapPath := filepath.Join(dir, "bootstrap.json")
 	if err := os.WriteFile(bootstrapPath, body, 0o644); err != nil {

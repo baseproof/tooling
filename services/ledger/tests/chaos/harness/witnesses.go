@@ -169,6 +169,12 @@ func (w *Witnesses) DIDs() []string {
 // N returns the witness count.
 func (w *Witnesses) N() int { return w.n }
 
+// PrivateKeys exposes the fixture's witness keys so the harness can run the
+// genesis self-endorsement ceremony (born-endorsed bootstrap, like a
+// production mint — the fixture holds every key it names, exactly the
+// genesis-ceremony dev custody model).
+func (w *Witnesses) PrivateKeys() []*ecdsa.PrivateKey { return w.privKeys }
+
 // K returns the quorum value the caller specified at construction.
 // The ledger enforces this via LEDGER_WITNESS_QUORUM_K.
 func (w *Witnesses) K() int { return w.k }
