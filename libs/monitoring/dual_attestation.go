@@ -3,7 +3,7 @@ FILE PATH: libs/monitoring/dual_attestation.go
 DESCRIPTION: Verifies that each active officer has at least two independent
 
 	identity attestations on the log (typically AOC + bar association, or
-	court + identity witness). Mitigates single-authority compromise.
+	authority + identity witness). Mitigates single-authority compromise.
 
 KEY ARCHITECTURAL DECISIONS:
   - Queries entries by each officer's DID, filters for attestation-shaped
@@ -33,11 +33,11 @@ import (
 	"github.com/baseproof/tooling/libs/clitools"
 )
 
-const MonitorDualAttestation monitoring.MonitorID = "judicial.dual_attestation"
+const MonitorDualAttestation monitoring.MonitorID = "platform.dual_attestation"
 
 // DualAttestationConfig configures the dual-attestation monitor.
 type DualAttestationConfig struct {
-	// RootEntityPos is the court scope entity.
+	// RootEntityPos is the root scope entity.
 	RootEntityPos types.LogPosition
 
 	// MinimumAttesters is the required distinct attester count. Default 2.

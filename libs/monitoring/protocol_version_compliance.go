@@ -1,5 +1,5 @@
 /*
-FILE PATH: libs/monitoring/protocol_version_compliance.go — judicial.protocol_version_compliance.
+FILE PATH: libs/monitoring/protocol_version_compliance.go — platform.protocol_version_compliance.
 
 Independent re-derivation of the network PROTOCOL-VERSION admission policy (the
 synthesized genesis baseline + on-log BP-ENTRY-NETWORK-PROTOCOL-VERSION-V1
@@ -49,7 +49,7 @@ import (
 	"github.com/baseproof/tooling/libs/crosslog"
 )
 
-const MonitorProtocolVersionCompliance monitoring.MonitorID = "judicial.protocol_version_compliance"
+const MonitorProtocolVersionCompliance monitoring.MonitorID = "platform.protocol_version_compliance"
 
 // protocol-version admission-state capability bits.
 const (

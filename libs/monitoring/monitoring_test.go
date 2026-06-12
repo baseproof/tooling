@@ -154,35 +154,35 @@ func TestBuildDashboard_Empty(t *testing.T) {
 	if nh == nil {
 		t.Fatal("dashboard must not be nil")
 	}
-	if nh.TotalCourts != 0 {
-		t.Errorf("TotalCourts = %d", nh.TotalCourts)
+	if nh.TotalLogs != 0 {
+		t.Errorf("TotalLogs = %d", nh.TotalLogs)
 	}
 	if nh.Grade != GradeOK {
 		t.Errorf("empty = %v, want OK", nh.Grade)
 	}
 }
 
-func TestBuildDashboard_OneHealthyCourt(t *testing.T) {
+func TestBuildDashboard_OneHealthyLog(t *testing.T) {
 	input := map[string][]MonitorResult{
 		"did:web:davidson": {},
 	}
 	nh := BuildDashboard(input, time.Now())
-	if nh.TotalCourts != 1 {
-		t.Errorf("TotalCourts = %d", nh.TotalCourts)
+	if nh.TotalLogs != 1 {
+		t.Errorf("TotalLogs = %d", nh.TotalLogs)
 	}
 	if nh.Grade != GradeOK {
 		t.Errorf("grade = %v, want OK", nh.Grade)
 	}
-	if len(nh.Courts) != 1 || nh.Courts[0].Grade != GradeOK {
-		t.Error("court should be OK")
+	if len(nh.Logs) != 1 || nh.Logs[0].Grade != GradeOK {
+		t.Error("log should be OK")
 	}
 }
 
-func TestBuildDashboard_CriticalCourt(t *testing.T) {
+func TestBuildDashboard_CriticalLog(t *testing.T) {
 	input := map[string][]MonitorResult{
 		"did:web:davidson": {
 			{
-				Monitor: "judicial.delegation_health",
+				Monitor: "platform.delegation_health",
 				Alerts: []monitoring.Alert{
 					{Severity: monitoring.Critical, Message: "non-live signer active"},
 				},
@@ -193,8 +193,8 @@ func TestBuildDashboard_CriticalCourt(t *testing.T) {
 	if nh.Grade != GradeCritical {
 		t.Errorf("network grade = %v, want Critical", nh.Grade)
 	}
-	if nh.CriticalCourts != 1 {
-		t.Errorf("CriticalCourts = %d", nh.CriticalCourts)
+	if nh.CriticalLogs != 1 {
+		t.Errorf("CriticalLogs = %d", nh.CriticalLogs)
 	}
 }
 
@@ -209,28 +209,28 @@ func TestBuildDashboard_SortsCriticalFirst(t *testing.T) {
 		},
 	}
 	nh := BuildDashboard(input, time.Now())
-	if len(nh.Courts) != 2 {
-		t.Fatalf("courts = %d", len(nh.Courts))
+	if len(nh.Logs) != 2 {
+		t.Fatalf("logs = %d", len(nh.Logs))
 	}
-	if nh.Courts[0].Grade != GradeCritical {
-		t.Error("critical court should sort first")
+	if nh.Logs[0].Grade != GradeCritical {
+		t.Error("critical log should sort first")
 	}
 }
 
 func TestBuildDashboard_AlertsByMonitor(t *testing.T) {
 	input := map[string][]MonitorResult{
-		"did:web:court": {
+		"did:web:log": {
 			{Monitor: "mon_a", Alerts: []monitoring.Alert{{Severity: monitoring.Warning}}},
 			{Monitor: "mon_b", Alerts: []monitoring.Alert{{Severity: monitoring.Warning}, {Severity: monitoring.Info}}},
 		},
 	}
 	nh := BuildDashboard(input, time.Now())
-	court := nh.Courts[0]
-	if court.AlertsByMonitor["mon_a"] != 1 {
-		t.Errorf("mon_a = %d", court.AlertsByMonitor["mon_a"])
+	log := nh.Logs[0]
+	if log.AlertsByMonitor["mon_a"] != 1 {
+		t.Errorf("mon_a = %d", log.AlertsByMonitor["mon_a"])
 	}
-	if court.AlertsByMonitor["mon_b"] != 2 {
-		t.Errorf("mon_b = %d", court.AlertsByMonitor["mon_b"])
+	if log.AlertsByMonitor["mon_b"] != 2 {
+		t.Errorf("mon_b = %d", log.AlertsByMonitor["mon_b"])
 	}
 }
 

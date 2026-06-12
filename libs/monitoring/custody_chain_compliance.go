@@ -1,5 +1,5 @@
 /*
-FILE PATH: libs/monitoring/custody_chain_compliance.go — judicial.custody_chain_compliance.
+FILE PATH: libs/monitoring/custody_chain_compliance.go — platform.custody_chain_compliance.
 
 Independent re-derivation of every artifact's on-log custody chain
 (ArtifactGenesis → CustodyTransfer → Destruction). The ledger gates restricted
@@ -46,7 +46,7 @@ import (
 	"github.com/baseproof/tooling/libs/crosslog"
 )
 
-const MonitorCustodyChainCompliance monitoring.MonitorID = "judicial.custody_chain_compliance"
+const MonitorCustodyChainCompliance monitoring.MonitorID = "platform.custody_chain_compliance"
 
 // CustodyChainComplianceConfig configures the custody-chain monitor. Custody is
 // the per-ContentDigest projection (see crosslog.MaterializeCustody); empty ⇒

@@ -40,7 +40,7 @@ import (
 	"github.com/baseproof/baseproof/witness"
 )
 
-const MonitorAnchorFreshness monitoring.MonitorID = "judicial.anchor_freshness"
+const MonitorAnchorFreshness monitoring.MonitorID = "platform.anchor_freshness"
 
 // AnchorFreshnessConfig configures the anchor freshness monitor.
 type AnchorFreshnessConfig struct {

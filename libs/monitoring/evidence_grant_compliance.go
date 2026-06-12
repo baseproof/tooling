@@ -39,7 +39,7 @@ import (
 	"github.com/baseproof/baseproof/verifier"
 )
 
-const MonitorGrantCompliance monitoring.MonitorID = "judicial.grant_compliance"
+const MonitorGrantCompliance monitoring.MonitorID = "platform.grant_compliance"
 
 // GrantComplianceConfig configures the evidence grant compliance monitor.
 type GrantComplianceConfig struct {

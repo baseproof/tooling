@@ -18,16 +18,16 @@ DESCRIPTION:
 
 	       RequiredAncestor  — at least one entry of one of these
 	                           event_types must already exist in the
-	                           case-root subtree (e.g.,
-	                           motion_continuance requires a
-	                           case_initiated ancestor).
+	                           root-entity subtree (e.g., an
+	                           amendment requires a record_opened
+	                           ancestor).
 
 	       RequiredAuthority — the primary signer's delegation chain
 	                           must include this authority scope
-	                           (e.g., judicial_appointment requires
-	                           judicial_appointment_authority).
+	                           (e.g., an appointment requires
+	                           appointment_authority).
 
-	The verifier evaluates rules against a CaseContext the caller
+	The verifier evaluates rules against an EvalContext the caller
 	builds (observed event_types in the subtree + authority scopes
 	held by the primary signer). This keeps the policy module pure
 	— no fetcher, no walk-the-SMT side effects — so tests can drive
@@ -106,12 +106,12 @@ type Prereq struct {
 	Mode PrereqMode `json:"mode"`
 
 	// RequiredAncestor: at least one entry whose event_type is in
-	// this list must already exist in the case-root subtree. OR
+	// this list must already exist in the root-entity subtree. OR
 	// semantics. Mutually exclusive with RequiredAuthority.
 	RequiredAncestor []string `json:"required_ancestor,omitempty"`
 
 	// RequiredAuthority: the primary signer's authority chain must
-	// include this scope (e.g., "judicial_appointment_authority").
+	// include this scope (e.g., "appointment_authority").
 	// Mutually exclusive with RequiredAncestor.
 	RequiredAuthority string `json:"required_authority,omitempty"`
 

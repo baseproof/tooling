@@ -24,7 +24,7 @@ import (
 	"github.com/baseproof/baseproof/verifier"
 )
 
-const MonitorShardHealth monitoring.MonitorID = "judicial.shard_health"
+const MonitorShardHealth monitoring.MonitorID = "platform.shard_health"
 
 // ShardHealthConfig configures the shard health monitor.
 type ShardHealthConfig struct {

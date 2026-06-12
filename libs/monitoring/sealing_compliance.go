@@ -34,7 +34,7 @@ import (
 	"github.com/baseproof/baseproof/verifier"
 )
 
-const MonitorSealingCompliance monitoring.MonitorID = "judicial.sealing_compliance"
+const MonitorSealingCompliance monitoring.MonitorID = "platform.sealing_compliance"
 
 // SealingComplianceConfig configures the sealing compliance monitor.
 type SealingComplianceConfig struct {

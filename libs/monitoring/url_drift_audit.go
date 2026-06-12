@@ -58,7 +58,7 @@ import (
 // MonitorURLDrift is the MonitorID for the v1.32.0 URL drift
 // auditor. Mirrors the MonitorAnchorFreshness ID shape so the
 // alerting infrastructure can dispatch on Monitor uniformly.
-const MonitorURLDrift monitoring.MonitorID = "judicial.url_drift"
+const MonitorURLDrift monitoring.MonitorID = "platform.url_drift"
 
 // URLDriftAuditConfig configures a periodic URL drift audit.
 type URLDriftAuditConfig struct {

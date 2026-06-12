@@ -3,7 +3,7 @@ FILE PATH: libs/monitoring/dashboard.go
 DESCRIPTION: Aggregates health signals from all other monitoring services into
 
 	a single AOC-style dashboard view. Runs each monitor once per tick and
-	produces a CourtHealth summary per court + a NetworkHealth rollup.
+	produces a LogHealth summary per row + a NetworkHealth rollup.
 
 KEY ARCHITECTURAL DECISIONS:
   - Pure reducer over other monitors' outputs. Does NOT re-read the log.
@@ -11,7 +11,7 @@ KEY ARCHITECTURAL DECISIONS:
     underlying monitors' alerts; the dashboard is read-only reporting.
   - Health grades are deterministic: Critical > Warning > Info > OK.
 
-OVERVIEW: BuildDashboard takes per-court MonitorResults and produces a rollup.
+OVERVIEW: BuildDashboard takes per-row MonitorResults and produces a rollup.
 KEY DEPENDENCIES: baseproof/monitoring (types only)
 */
 package monitoring
@@ -23,7 +23,7 @@ import (
 	"github.com/baseproof/baseproof/monitoring"
 )
 
-// HealthGrade is the aggregate health score for a court or network.
+// HealthGrade is the aggregate health score for a row or network.
 type HealthGrade uint8
 
 const (
@@ -46,15 +46,15 @@ func (g HealthGrade) String() string {
 	}
 }
 
-// MonitorResult is one monitor's output for one court.
+// MonitorResult is one monitor's output for one row.
 type MonitorResult struct {
 	Monitor monitoring.MonitorID
 	Alerts  []monitoring.Alert
 }
 
-// CourtHealth is the per-court dashboard row.
-type CourtHealth struct {
-	CourtDID        string
+// LogHealth is the per-row dashboard row.
+type LogHealth struct {
+	LogDID          string
 	Grade           HealthGrade
 	CriticalCount   int
 	WarningCount    int
@@ -65,63 +65,63 @@ type CourtHealth struct {
 
 // NetworkHealth is the network-wide rollup.
 type NetworkHealth struct {
-	Grade          HealthGrade
-	TotalCourts    int
-	CriticalCourts int
-	WarningCourts  int
-	Courts         []CourtHealth
-	GeneratedAt    time.Time
+	Grade        HealthGrade
+	TotalLogs    int
+	CriticalLogs int
+	WarningLogs  int
+	Logs         []LogHealth
+	GeneratedAt  time.Time
 }
 
-// BuildDashboard reduces per-court monitor results into a dashboard view.
-// Input: map of courtDID → list of MonitorResult.
+// BuildDashboard reduces per-row monitor results into a dashboard view.
+// Input: map of logDID → list of MonitorResult.
 func BuildDashboard(
-	perCourt map[string][]MonitorResult,
+	perLog map[string][]MonitorResult,
 	now time.Time,
 ) *NetworkHealth {
 	nh := &NetworkHealth{
-		TotalCourts: len(perCourt),
+		TotalLogs:   len(perLog),
 		GeneratedAt: now,
 	}
 
-	for courtDID, results := range perCourt {
-		court := CourtHealth{
-			CourtDID:        courtDID,
+	for logDID, results := range perLog {
+		row := LogHealth{
+			LogDID:          logDID,
 			AlertsByMonitor: make(map[monitoring.MonitorID]int),
 			LastCheckedAt:   now,
 		}
 		for _, result := range results {
-			court.AlertsByMonitor[result.Monitor] += len(result.Alerts)
+			row.AlertsByMonitor[result.Monitor] += len(result.Alerts)
 			for _, alert := range result.Alerts {
 				switch alert.Severity {
 				case monitoring.Critical:
-					court.CriticalCount++
+					row.CriticalCount++
 				case monitoring.Warning:
-					court.WarningCount++
+					row.WarningCount++
 				case monitoring.Info:
-					court.InfoCount++
+					row.InfoCount++
 				}
 			}
 		}
-		court.Grade = classifyGrade(court.CriticalCount, court.WarningCount, court.InfoCount)
+		row.Grade = classifyGrade(row.CriticalCount, row.WarningCount, row.InfoCount)
 
-		switch court.Grade {
+		switch row.Grade {
 		case GradeCritical:
-			nh.CriticalCourts++
+			nh.CriticalLogs++
 		case GradeWarning:
-			nh.WarningCourts++
+			nh.WarningLogs++
 		}
-		nh.Courts = append(nh.Courts, court)
+		nh.Logs = append(nh.Logs, row)
 	}
 
-	nh.Grade = classifyNetworkGrade(nh.CriticalCourts, nh.WarningCourts)
+	nh.Grade = classifyNetworkGrade(nh.CriticalLogs, nh.WarningLogs)
 
-	// Sort courts: critical first, then warning, then by DID.
-	sort.Slice(nh.Courts, func(i, j int) bool {
-		if nh.Courts[i].Grade != nh.Courts[j].Grade {
-			return nh.Courts[i].Grade > nh.Courts[j].Grade
+	// Sort logs: critical first, then warning, then by DID.
+	sort.Slice(nh.Logs, func(i, j int) bool {
+		if nh.Logs[i].Grade != nh.Logs[j].Grade {
+			return nh.Logs[i].Grade > nh.Logs[j].Grade
 		}
-		return nh.Courts[i].CourtDID < nh.Courts[j].CourtDID
+		return nh.Logs[i].LogDID < nh.Logs[j].LogDID
 	})
 
 	return nh
@@ -140,11 +140,11 @@ func classifyGrade(critical, warning, info int) HealthGrade {
 	}
 }
 
-func classifyNetworkGrade(criticalCourts, warningCourts int) HealthGrade {
+func classifyNetworkGrade(criticalLogs, warningLogs int) HealthGrade {
 	switch {
-	case criticalCourts > 0:
+	case criticalLogs > 0:
 		return GradeCritical
-	case warningCourts > 0:
+	case warningLogs > 0:
 		return GradeWarning
 	default:
 		return GradeOK

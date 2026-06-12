@@ -32,11 +32,11 @@ import (
 	"github.com/baseproof/tooling/libs/clitools"
 )
 
-const MonitorMirrorConsistency monitoring.MonitorID = "judicial.mirror_consistency"
+const MonitorMirrorConsistency monitoring.MonitorID = "platform.mirror_consistency"
 
 // MirrorConsistencyConfig configures the mirror consistency monitor.
 type MirrorConsistencyConfig struct {
-	// RootEntityPos is the court scope entity on the officers log.
+	// RootEntityPos is the root scope entity on the officers log.
 	RootEntityPos types.LogPosition
 
 	// OfficersLogDID is the officers log DID.

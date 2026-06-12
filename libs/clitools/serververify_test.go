@@ -81,30 +81,7 @@ func TestNewServerVerifyLedgerClient_BadCAFailsClosed(t *testing.T) {
 	}
 }
 
-// ALLOW_SELF_SIGNED with no CA is startup-fatal at config load.
-func TestLoadConfig_AllowSelfSigned_RequiresCA(t *testing.T) {
-	t.Setenv("TOOLS_LEDGER_CA_FILE", "")
-	t.Setenv("TOOLS_LEDGER_ALLOW_SELF_SIGNED", "1")
-	if _, err := LoadConfig(""); err == nil {
-		t.Fatal("TOOLS_LEDGER_ALLOW_SELF_SIGNED without TOOLS_LEDGER_CA_FILE must fail LoadConfig")
-	}
-}
-
-func TestConfig_LedgerServerVerifyConfigured(t *testing.T) {
-	cases := []struct {
-		name string
-		cfg  Config
-		want bool
-	}{
-		{"mTLS configured", Config{LedgerClientCertFile: "c", LedgerClientKeyFile: "k"}, false},
-		{"CA only", Config{LedgerCAFile: "ca"}, true},
-		{"allow-self-signed", Config{LedgerAllowSelfSigned: true}, true},
-		{"nothing (plaintext)", Config{}, false},
-		{"mTLS + CA still mTLS", Config{LedgerClientCertFile: "c", LedgerClientKeyFile: "k", LedgerCAFile: "ca"}, false},
-	}
-	for _, tc := range cases {
-		if got := tc.cfg.LedgerServerVerifyConfigured(); got != tc.want {
-			t.Errorf("%s: LedgerServerVerifyConfigured() = %v, want %v", tc.name, got, tc.want)
-		}
-	}
-}
+// NOTE: the Config-driven posture tests (LoadConfig fail-closed on
+// ALLOW_SELF_SIGNED without a CA; the LedgerServerVerifyConfigured truth
+// table) moved WITH the Config to judicial-network tools/common — the
+// court-typed tools config is the tenant's, not the agnostic layer's.

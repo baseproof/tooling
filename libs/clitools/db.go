@@ -17,7 +17,7 @@ type DB struct {
 
 // NewDB opens a connection pool. connStr is a Postgres connection string:
 //
-//	"postgres://localhost:5432/court_tools?sslmode=disable"
+//	"postgres://localhost:5432/tools_db?sslmode=disable"
 func NewDB(connStr string) (*DB, error) {
 	pool, err := sql.Open("postgres", connStr)
 	if err != nil {

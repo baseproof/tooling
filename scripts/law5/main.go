@@ -12,12 +12,12 @@
 // AST, not grep: only the parser can tell an identifier or string literal from
 // a comment, so comments never false-positive and indirection can't hide a hit.
 //
-// The allowlist below is the KNOWN 3B debt (CLI_CONSOLIDATION_REVIEW.md §3B:
-// the clitools court-type split + the judicial.* monitor relocation), carried
-// explicitly so the law can land before the moves do. It is a burn-down list:
-// entries are deleted as 3B lands, and NEW vocabulary anywhere else fails CI
-// immediately. Allowlisted hits are counted and reported so the debt stays
-// visible.
+// The allowlist below is EMPTY — the §3B burn-down completed (the clitools
+// court-typed config/types moved to judicial-network tools/common; the
+// judicial.* monitor IDs re-namespaced to platform.*; prereq's CaseContext →
+// EvalContext). The mechanism stays so any future, justified debt is carried
+// explicitly (path prefix → justification), counted, and reported — but the
+// steady state is zero entries: NEW vocabulary anywhere fails CI immediately.
 //
 // Usage: go run . <libs-root>   (exit 1 on any non-allowlisted hit)
 package main
@@ -45,13 +45,10 @@ var (
 )
 
 // allowlist maps a path prefix (relative to the libs root, slash-separated) to
-// the justification for carrying it. Every entry is pending 3B work — delete
-// the entry when the move lands; the law then enforces it forever.
-var allowlist = map[string]string{
-	"clitools/":   "3B pending: court-typed client config/types (CourtDID, Case*, …) move to judicial-network",
-	"monitoring/": "3B pending: judicial.* monitor IDs are deployed wire-visible IDs; CourtHealth dashboard relocates/parameterizes",
-	"prereq/":     "coordinated rename pending: CaseContext/CaseRef → agnostic names; judicial-network consumes CaseContext at ~105 sites (incl. its submit gate) — rename rides the JN C2 gate rework + next libs bump",
-}
+// the justification for carrying it. Kept EMPTY — add an entry only for
+// migration debt that cannot land atomically, and delete it when the move
+// lands; the law then enforces it forever.
+var allowlist = map[string]string{}
 
 type hit struct {
 	pos  token.Position

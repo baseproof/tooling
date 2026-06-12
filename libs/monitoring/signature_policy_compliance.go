@@ -1,5 +1,5 @@
 /*
-FILE PATH: libs/monitoring/signature_policy_compliance.go — judicial.signature_policy_compliance.
+FILE PATH: libs/monitoring/signature_policy_compliance.go — platform.signature_policy_compliance.
 
 Independent re-derivation of the network SIGNATURE POLICY (the founding
 GenesisSignaturePolicy + on-log BP-ENTRY-NETWORK-SIGNATURE-POLICY-V1 amendments)
@@ -42,7 +42,7 @@ import (
 	"github.com/baseproof/tooling/libs/crosslog"
 )
 
-const MonitorSignaturePolicyCompliance monitoring.MonitorID = "judicial.signature_policy_compliance"
+const MonitorSignaturePolicyCompliance monitoring.MonitorID = "platform.signature_policy_compliance"
 
 // CosignedHeadObservation is one cosigned tree head as the auditor observed it:
 // the head's log position + the scheme tags of the cosignatures it carries. The

@@ -10,13 +10,13 @@ DESCRIPTION:
 	     policy.EventTypes(). This is the v1.6 "closed-set" promise.
 
 	  2. Per-rule evaluation. For each Hard rule, the walker checks
-	     the CaseContext and records a violation if unsatisfied.
+	     the EvalContext and records a violation if unsatisfied.
 	     Any Hard violation rejects the entry. Advisory violations
 	     are surfaced but do not block.
 
-	Why a CaseContext (not a fetcher): the walker is a pure
+	Why an EvalContext (not a fetcher): the walker is a pure
 	function of (event_type × policy × ctx). The aggregator builds
-	the context once per case-root subtree and feeds the same data
+	the context once per root-entity subtree and feeds the same data
 	to every walker call. Tests drive the walker with hand-built
 	contexts; production wiring plugs in a real subtree
 	scanner.
@@ -27,7 +27,7 @@ DESCRIPTION:
 OVERVIEW:
 
 	Rejection         — closed-set rejection code.
-	CaseContext       — observed events + signer authorities.
+	EvalContext       — observed events + signer authorities.
 	Verdict           — outcome shape.
 	Violation         — single rule failure (mode + reason +
 	                    rule pointer for audit).
@@ -76,23 +76,24 @@ const (
 
 // ─── Context ────────────────────────────────────────────────────────
 
-// CaseContext carries the prerequisite-evaluation inputs for one
-// entry. The caller assembles this from the case-root subtree (for
+// EvalContext carries the prerequisite-evaluation inputs for one
+// entry. The caller assembles this from the root-entity subtree (for
 // observed events) and the primary signer's authority chain (for
 // scopes).
-type CaseContext struct {
-	// CaseRef is the docket / case identifier. Surfaced in
-	// Verdict.Reason for human-readable diagnostics.
-	CaseRef string
+type EvalContext struct {
+	// RootRef identifies the root-entity subtree under evaluation
+	// (whatever the tenant's thread/record identifier is). Surfaced
+	// in Verdict.Reason for human-readable diagnostics.
+	RootRef string
 
 	// ObservedEvents is the set of event_types that appear in the
-	// case-root subtree at the time of the check. Used by
+	// root-entity subtree at the time of the check. Used by
 	// RequiredAncestor rules.
 	ObservedEvents []string
 
 	// PrimaryAuthorityScopes lists every authority scope the
 	// primary signer holds in their delegation chain (e.g.
-	// "judicial_appointment_authority", "filing_authority"). Used
+	// "registration_authority", "publication_authority"). Used
 	// by RequiredAuthority rules.
 	PrimaryAuthorityScopes []string
 }
@@ -144,7 +145,7 @@ type Walker struct {
 // Check evaluates eventType against the policy using ctx as the
 // observed-state input. Returns a Verdict. Never returns an error
 // — the verdict's Rejection field carries the failure mode.
-func (w *Walker) Check(eventType string, ctx CaseContext) Verdict {
+func (w *Walker) Check(eventType string, ctx EvalContext) Verdict {
 	if w == nil || w.Policy == nil {
 		return Verdict{
 			EventType: eventType,
@@ -203,7 +204,7 @@ func (w *Walker) Check(eventType string, ctx CaseContext) Verdict {
 
 // evaluateRule returns (satisfied, reason). When satisfied, reason
 // is "". When unsatisfied, reason is a short diagnostic.
-func evaluateRule(r *Prereq, ctx CaseContext) (bool, string) {
+func evaluateRule(r *Prereq, ctx EvalContext) (bool, string) {
 	if r.IsAncestorRule() {
 		for _, want := range r.RequiredAncestor {
 			if HasObservedEvent(ctx, want) {
@@ -224,8 +225,8 @@ func evaluateRule(r *Prereq, ctx CaseContext) (bool, string) {
 
 // HasObservedEvent reports whether eventType appears in
 // ctx.ObservedEvents. Linear scan — the slice is small in practice
-// (one case-root subtree).
-func HasObservedEvent(ctx CaseContext, eventType string) bool {
+// (one root-entity subtree).
+func HasObservedEvent(ctx EvalContext, eventType string) bool {
 	for _, e := range ctx.ObservedEvents {
 		if e == eventType {
 			return true
@@ -236,7 +237,7 @@ func HasObservedEvent(ctx CaseContext, eventType string) bool {
 
 // HasAuthorityScope reports whether scope appears in
 // ctx.PrimaryAuthorityScopes.
-func HasAuthorityScope(ctx CaseContext, scope string) bool {
+func HasAuthorityScope(ctx EvalContext, scope string) bool {
 	for _, s := range ctx.PrimaryAuthorityScopes {
 		if s == scope {
 			return true
