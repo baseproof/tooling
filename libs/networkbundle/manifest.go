@@ -286,6 +286,10 @@ func (m *Manifest) Validate() error {
 		}
 		known[evt] = true
 	}
+	datatypes := make(map[string]*Datatype, len(m.Datatypes))
+	for i := range m.Datatypes {
+		datatypes[m.Datatypes[i].Name] = &m.Datatypes[i]
+	}
 	for i := range m.Operations {
 		op := &m.Operations[i]
 		for _, t := range op.ClosedBy {
@@ -297,6 +301,13 @@ func (m *Manifest) Validate() error {
 			if !known[t] {
 				return fmt.Errorf("networkbundle: %s references %q: not an operation in this manifest", op.EventType, t)
 			}
+		}
+		// Same authoring-drift class as ClosedBy/References: an operation
+		// naming a payload shape the manifest doesn't declare is broken
+		// authoring, structurally. (Whether the declared shape is ANCHORED
+		// is the consumer trust bar — VerifyManifest's rule, not Validate's.)
+		if op.Datatype != "" && datatypes[op.Datatype] == nil {
+			return fmt.Errorf("networkbundle: %s datatype %q: not declared in this manifest's datatypes", op.EventType, op.Datatype)
 		}
 	}
 	if len(m.Endpoints) > 0 {

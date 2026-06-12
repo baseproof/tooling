@@ -47,6 +47,7 @@ func RunWitnesses(ctx context.Context, args []string) error {
 		bundlePath = fs.String("bundle", "", "client bundle JSON (else --network or the active network)")
 		network    = fs.String("network", "", "stored network name (else the active network)")
 		at         = fs.Int64("at", -1, "witness set active as-of this tree size (omit ⇒ the current set)")
+		output     = fs.String("output", "table", "output format: table|json")
 		timeout    = fs.Duration("timeout", 15*time.Second, "per-request HTTP timeout")
 	)
 	if err := fs.Parse(args); err != nil {
@@ -102,22 +103,59 @@ func RunWitnesses(ctx context.Context, args []string) error {
 		labelOf[strings.ToLower(l.PubKeyID)] = l.Label
 	}
 
-	fmt.Printf("witnesses: %s — set %s  scheme=%d  effective_seq=%d  (%d keys)\n",
-		label, short(set.SetHash), set.SchemeTag, set.EffectiveSeq, len(set.Keys))
-	if genesisDerived {
-		fmt.Printf("witnesses: GENESIS set — derived from the hash-verified bootstrap (the ledger serves no witness history)\n")
+	data := WitnessesData{
+		Scope:          label,
+		SetHash:        set.SetHash,
+		SchemeTag:      set.SchemeTag,
+		EffectiveSeq:   set.EffectiveSeq,
+		RetiredSeq:     set.RetiredSeq,
+		GenesisDerived: genesisDerived,
 	}
-	if set.RetiredSeq != nil {
-		fmt.Printf("witnesses: this set RETIRED at seq %d — a later set is active (rotation)\n", *set.RetiredSeq)
+	for _, k := range set.Keys {
+		data.Witnesses = append(data.Witnesses, WitnessEntry{
+			ID:        k.ID,
+			PublicKey: k.PublicKey,
+			SchemeTag: k.SchemeTag,
+			Label:     labelOf[strings.ToLower(k.ID)],
+		})
 	}
-	for i, k := range set.Keys {
-		name := ""
-		if l := labelOf[strings.ToLower(k.ID)]; l != "" {
-			name = "  " + l
+	return emitOutput(*output, "witnesses", data, func() error {
+		fmt.Printf("witnesses: %s — set %s  scheme=%d  effective_seq=%d  (%d keys)\n",
+			label, short(set.SetHash), set.SchemeTag, set.EffectiveSeq, len(set.Keys))
+		if genesisDerived {
+			fmt.Printf("witnesses: GENESIS set — derived from the hash-verified bootstrap (the ledger serves no witness history)\n")
 		}
-		fmt.Printf("  [%d] %s%s\n", i, short(k.ID), name)
-	}
-	return nil
+		if set.RetiredSeq != nil {
+			fmt.Printf("witnesses: this set RETIRED at seq %d — a later set is active (rotation)\n", *set.RetiredSeq)
+		}
+		for i, k := range data.Witnesses {
+			name := ""
+			if k.Label != "" {
+				name = "  " + k.Label
+			}
+			fmt.Printf("  [%d] %s%s\n", i, short(k.ID), name)
+		}
+		return nil
+	})
+}
+
+// WitnessEntry is one witness key in the set (kind "witnesses").
+type WitnessEntry struct {
+	ID        string `json:"id"`
+	PublicKey string `json:"public_key"`
+	SchemeTag uint8  `json:"scheme_tag"`
+	Label     string `json:"label,omitempty"`
+}
+
+// WitnessesData is the --output json data shape (kind "witnesses").
+type WitnessesData struct {
+	Scope          string         `json:"scope"` // "current" or "at tree_size N"
+	SetHash        string         `json:"set_hash,omitempty"`
+	SchemeTag      uint8          `json:"scheme_tag"`
+	EffectiveSeq   uint64         `json:"effective_seq"`
+	RetiredSeq     *uint64        `json:"retired_seq,omitempty"`
+	GenesisDerived bool           `json:"genesis_derived"`
+	Witnesses      []WitnessEntry `json:"witnesses"`
 }
 
 // genesisWitnessSetFallback derives the genesis witness set from the

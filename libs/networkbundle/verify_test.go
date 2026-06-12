@@ -103,3 +103,44 @@ func TestVerifyManifest_QuorumIsCacheNeverSource(t *testing.T) {
 		t.Fatalf("a disagreeing quorum cache must be fatal: %v", err)
 	}
 }
+
+// ─── PRE-3: the driveable-operation anchor rule ──────────────────────
+
+func TestValidate_OperationDatatypeMustResolve(t *testing.T) {
+	m := refManifest()
+	m.Operations[0].Datatype = "ghost/v1"
+	err := m.Validate()
+	if err == nil || !strings.Contains(err.Error(), `datatype "ghost/v1"`) {
+		t.Fatalf("an operation naming an undeclared datatype is authoring drift: %v", err)
+	}
+}
+
+func TestVerifyManifest_DriveableOpRequiresAnchoredDatatype(t *testing.T) {
+	doc, _ := testBootstrap(t)
+	ids, _ := doc.IDs()
+	idHex := hex.EncodeToString(ids.NetworkID[:])
+
+	// Anchored (the reference manifest's datatype carries the full anchor):
+	// verifies.
+	raw := verifiableManifest(t, idHex, 0)
+	if _, err := VerifyManifest(raw, doc); err != nil {
+		t.Fatalf("anchored driveable op must verify: %v", err)
+	}
+
+	// Strip the anchor: Validate still passes (structural name resolves),
+	// but the DOOR refuses — materialization is fail-closed by construction.
+	m := refManifest()
+	m.Network.NetworkID = idHex
+	m.Network.QuorumK = 0
+	m.Datatypes[0].LogDID = ""
+	m.Datatypes[0].Sequence = 0
+	m.Datatypes[0].ContentHash = ""
+	if vErr := m.Validate(); vErr != nil {
+		t.Fatalf("unanchored datatype must still be structurally valid: %v", vErr)
+	}
+	b, _ := m.CanonicalBytes()
+	_, err := VerifyManifest(b, doc)
+	if err == nil || !strings.Contains(err.Error(), "without an on-log anchor") {
+		t.Fatalf("the door must refuse a driveable op without an anchored datatype: %v", err)
+	}
+}

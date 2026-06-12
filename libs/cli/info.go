@@ -32,6 +32,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -108,47 +109,49 @@ type wireWitnessEndpoints struct {
 
 // auditorHealth is one auditor's probe result.
 type auditorHealth struct {
-	DID    string
-	Live   bool
-	InSync bool
+	DID    string `json:"did"`
+	Live   bool   `json:"live"`
+	InSync bool   `json:"in_sync"`
 }
 
 // peerResult is one cited peer's verified-reachability verdict.
 type peerResult struct {
-	NetworkID string
-	Reached   bool
-	IDMatches bool
+	NetworkID string `json:"network_id"`
+	Reached   bool   `json:"reached"`
+	IDMatches bool   `json:"id_matches"`
 }
 
-// netInfo is the aggregated, verified picture of one network.
+// netInfo is the aggregated, verified picture of one network. It is also the
+// --output json data shape (kind "info"): the wire sections carry their own
+// tags; the verdict fields are tagged here.
 type netInfo struct {
-	Endpoint   string
-	Identity   wireIdentity
-	Witnesses  wireWitnessSet
-	Auditors   wireAuditors
-	Mirrors    wireMirrors
-	Federation wireFederation
-	Horizon    wireHorizon
-	Anchors    wireAnchors
-	Labels     wireLabels
-	WitnessEPs wireWitnessEndpoints
-	Difficulty uint64
-	Accepts    []string
-	QuorumK    int
+	Endpoint   string               `json:"endpoint"`
+	Identity   wireIdentity         `json:"identity"`
+	Witnesses  wireWitnessSet       `json:"witnesses"`
+	Auditors   wireAuditors         `json:"auditors"`
+	Mirrors    wireMirrors          `json:"mirrors"`
+	Federation wireFederation       `json:"federation"`
+	Horizon    wireHorizon          `json:"horizon"`
+	Anchors    wireAnchors          `json:"anchors"`
+	Labels     wireLabels           `json:"labels"`
+	WitnessEPs wireWitnessEndpoints `json:"witness_endpoints"`
+	Difficulty uint64               `json:"difficulty"`
+	Accepts    []string             `json:"accepts,omitempty"`
+	QuorumK    int                  `json:"quorum_k"`
 
 	// WitnessesGenesis marks Witnesses as DERIVED from the hash-verified
 	// bootstrap (genesis fallback) rather than fetched from the ledger's
 	// witness-history endpoint — a never-rotated network, an image predating
 	// the genesis-baseline row, or a PG-off reader.
-	WitnessesGenesis bool
+	WitnessesGenesis bool `json:"witnesses_genesis"`
 
 	// verdicts
-	IdentityOK bool
-	HorizonOK  bool
-	HorizonErr string
-	Cosigs     clitools.HorizonResult
-	AuditorHP  []auditorHealth
-	Peers      []peerResult
+	IdentityOK bool                   `json:"identity_ok"`
+	HorizonOK  bool                   `json:"horizon_ok"`
+	HorizonErr string                 `json:"horizon_err,omitempty"`
+	Cosigs     clitools.HorizonResult `json:"cosigs"`
+	AuditorHP  []auditorHealth        `json:"auditor_health,omitempty"`
+	Peers      []peerResult           `json:"peers,omitempty"`
 
 	verify bool
 }
@@ -162,6 +165,7 @@ func RunInfo(ctx context.Context, args []string) error {
 		verify     = fs.Bool("verify", false, "recompute the cryptographic checks (horizon K-of-N, auditor liveness, peer ids)")
 		federation = fs.Bool("federation", false, "walk + verify the cited federation peers")
 		depth      = fs.Int("depth", 1, "federation walk depth (bounded)")
+		output     = fs.String("output", "table", "output format: table|json")
 		timeout    = fs.Duration("timeout", 15*time.Second, "per-request HTTP timeout")
 	)
 	if err := fs.Parse(args); err != nil {
@@ -180,10 +184,15 @@ func RunInfo(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	renderNetwork(fs.Output(), n)
+	if err := emitOutput(*output, "info", n, func() error {
+		renderNetwork(os.Stdout, n)
+		return nil
+	}); err != nil {
+		return err
+	}
 
 	if *verify && (!n.IdentityOK || !n.HorizonOK) {
-		return fmt.Errorf("info: one or more verification checks FAILED (see ✗ above)")
+		return fmt.Errorf("info: one or more verification checks FAILED (identity_ok=%v horizon_ok=%v)", n.IdentityOK, n.HorizonOK)
 	}
 	return nil
 }

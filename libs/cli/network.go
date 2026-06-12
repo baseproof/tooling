@@ -28,7 +28,7 @@ func RunNetwork(ctx context.Context, args []string) error {
 	case "add":
 		return networkAdd(ctx, rest)
 	case "list":
-		return networkList()
+		return networkList(rest)
 	case "use":
 		return networkUse(rest)
 	case "show":
@@ -201,49 +201,110 @@ func isHex(s string) bool {
 	return true
 }
 
-func networkList() error {
+// NetworkListEntry is one stored network in the list (kind "network-list").
+type NetworkListEntry struct {
+	Name      string `json:"name"`
+	NetworkID string `json:"network_id,omitempty"`
+	Endpoint  string `json:"endpoint,omitempty"`
+	Pinned    bool   `json:"pinned"`
+	Active    bool   `json:"active"`
+	LoadError string `json:"load_error,omitempty"` // pin-mismatch / unreadable bundle, surfaced not hidden
+}
+
+// NetworkListData is the --output json data shape (kind "network-list").
+type NetworkListData struct {
+	Active   string             `json:"active,omitempty"`
+	Networks []NetworkListEntry `json:"networks"`
+}
+
+func networkList(args []string) error {
+	fs := flag.NewFlagSet("network list", flag.ContinueOnError)
+	output := fs.String("output", "table", "output format: table|json")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
 	names, err := listNetworks()
 	if err != nil {
 		return err
 	}
-	if len(names) == 0 {
-		fmt.Println("no networks — add one: baseproof network add <name> --from-ledger <url>")
-		return nil
-	}
 	cfg, _ := loadConfig()
+	pins, _ := loadPins()
+	data := NetworkListData{Active: cfg.ActiveNetwork, Networks: []NetworkListEntry{}}
 	for _, n := range names {
-		mark := "  "
-		if n == cfg.ActiveNetwork {
-			mark = "* "
+		e := NetworkListEntry{Name: n, Active: n == cfg.ActiveNetwork}
+		if _, ok := pins[n]; ok {
+			e.Pinned = true
 		}
-		id, ep := "?", "?"
-		if b, err := loadNetwork(n); err == nil {
-			id, ep = short(b.NetworkID), b.Endpoint
+		if b, lerr := loadNetwork(n); lerr == nil {
+			e.NetworkID, e.Endpoint = b.NetworkID, b.Endpoint
+		} else {
+			e.LoadError = lerr.Error()
 		}
-		fmt.Printf("%s%-16s %s  %s\n", mark, n, id, ep)
+		data.Networks = append(data.Networks, e)
 	}
-	return nil
+	return emitOutput(*output, "network-list", data, func() error {
+		if len(data.Networks) == 0 {
+			fmt.Println("no networks — add one: baseproof network add <name> --from-ledger <url>")
+			return nil
+		}
+		for _, e := range data.Networks {
+			mark := "  "
+			if e.Active {
+				mark = "* "
+			}
+			id, ep := "?", "?"
+			if e.LoadError == "" {
+				id, ep = short(e.NetworkID), e.Endpoint
+			}
+			fmt.Printf("%s%-16s %s  %s\n", mark, e.Name, id, ep)
+		}
+		return nil
+	})
+}
+
+// NetworkShowData is the --output json data shape (kind "network-show").
+type NetworkShowData struct {
+	Name         string        `json:"name"`
+	Active       bool          `json:"active"`
+	Pinned       bool          `json:"pinned"`
+	PinNetworkID string        `json:"pin_network_id,omitempty"`
+	Bundle       *ClientBundle `json:"bundle"`
 }
 
 func networkShow(args []string) error {
+	fs := flag.NewFlagSet("network show", flag.ContinueOnError)
+	output := fs.String("output", "table", "output format: table|json")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
 	name := ""
 	switch {
-	case len(args) == 1:
-		name = args[0]
-	default:
+	case fs.NArg() == 1:
+		name = fs.Arg(0)
+	case fs.NArg() == 0:
 		cfg, _ := loadConfig()
 		name = cfg.ActiveNetwork
 		if name == "" {
 			return fmt.Errorf("no active network; usage: baseproof network show <name>")
 		}
+	default:
+		return fmt.Errorf("usage: baseproof network show [name]")
 	}
 	b, err := loadNetwork(name)
 	if err != nil {
 		return err
 	}
-	data, _ := json.MarshalIndent(b, "", "  ")
-	fmt.Println(string(data))
-	return nil
+	cfg, _ := loadConfig()
+	pins, _ := loadPins()
+	data := NetworkShowData{Name: name, Active: cfg.ActiveNetwork == name, Bundle: b}
+	if pin, ok := pins[name]; ok {
+		data.Pinned, data.PinNetworkID = true, pin.NetworkID
+	}
+	return emitOutput(*output, "network-show", data, func() error {
+		out, _ := json.MarshalIndent(b, "", "  ")
+		fmt.Println(string(out))
+		return nil
+	})
 }
 
 func configList() error {

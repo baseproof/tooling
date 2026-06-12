@@ -14,14 +14,23 @@ package main
 
 import (
 	"context"
+	"errors"
 	"os"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
+
+	"github.com/baseproof/tooling/libs/cli"
 )
 
 func main() {
 	if err := root().Execute(); err != nil {
+		// The verify exit-code contract (PRE-1): 1 = the proof FAILED
+		// verification; 2 = verification could not run (usage/IO). Every
+		// other verb keeps the generic failure code 1.
+		if errors.Is(err, cli.ErrVerifyUsage) {
+			os.Exit(2)
+		}
 		os.Exit(1)
 	}
 }

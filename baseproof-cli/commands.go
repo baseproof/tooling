@@ -97,6 +97,7 @@ K-of-N cosignatures, inclusion, and SMT membership — fail-closed. Network-agno
 	f.String("pin", "", "require the proof's network id to equal this 64-hex id")
 	f.StringP("network", "n", "", "pin against this stored/active network")
 	f.String("bundle", "", "pin against this network bundle's id (content-addressed anchor)")
+	f.StringP("output", "o", "table", "output format: table|json (json = the versioned machine envelope)")
 	return c
 }
 
@@ -116,6 +117,7 @@ crypto; --federation walks + verifies the cited peers (bounded, cycle-guarded).`
 	f.Bool("verify", false, "recompute the cryptographic checks (horizon K-of-N, auditor liveness, peer ids)")
 	f.Bool("federation", false, "walk + verify the cited federation peers")
 	f.Int("depth", 1, "federation walk depth (bounded)")
+	f.StringP("output", "o", "table", "output format: table|json (json = the versioned machine envelope)")
 	f.Duration("timeout", 15*time.Second, "per-request HTTP timeout")
 	return c
 }
@@ -130,6 +132,7 @@ func witnessesCmd() *cobra.Command {
 	bundleFlags(c)
 	f := c.Flags()
 	f.Int64("at", -1, "witness set active as-of this tree size (omit ⇒ the current set)")
+	f.StringP("output", "o", "table", "output format: table|json (json = the versioned machine envelope)")
 	f.Duration("timeout", 15*time.Second, "per-request HTTP timeout")
 	return c
 }
@@ -154,8 +157,10 @@ func networkCmd() *cobra.Command {
 	af.Duration("timeout", 30*time.Second, "per-request HTTP timeout")
 
 	list := &cobra.Command{Use: "list", Short: "List stored networks", Args: cobra.NoArgs, RunE: forward(cli.RunNetwork, "list")}
+	list.Flags().StringP("output", "o", "table", "output format: table|json (json = the versioned machine envelope)")
 	use := &cobra.Command{Use: "use <name>", Short: "Set the active network", Args: cobra.ExactArgs(1), RunE: forward(cli.RunNetwork, "use")}
 	show := &cobra.Command{Use: "show [name]", Short: "Show a network (default: active)", Args: cobra.MaximumNArgs(1), RunE: forward(cli.RunNetwork, "show")}
+	show.Flags().StringP("output", "o", "table", "output format: table|json (json = the versioned machine envelope)")
 	remove := &cobra.Command{
 		Use:   "remove <name>",
 		Short: "Remove a stored network (its trust pin remains — tombstoned)",

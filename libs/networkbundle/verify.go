@@ -87,6 +87,27 @@ func VerifyManifest(raw []byte, bootstrap *network.BootstrapDocument) (*Manifest
 		return nil, fmt.Errorf("networkbundle: verify: manifest caches quorum_k=%d but the constitution's GenesisQuorumK=%d — the constitution is the single source of K",
 			m.Network.QuorumK, bootstrap.GenesisQuorumK)
 	}
+
+	// Driveable-operation anchor rule: every operation that names a payload
+	// shape must name a VERIFIABLE one — {LogDID, Sequence, ContentHash} all
+	// present — so fail-closed materialization is automatic, not a client
+	// courtesy. (Validate already guarantees the name resolves; this door
+	// requires the resolved shape to be anchored on-log.)
+	datatypes := make(map[string]*Datatype, len(m.Datatypes))
+	for i := range m.Datatypes {
+		datatypes[m.Datatypes[i].Name] = &m.Datatypes[i]
+	}
+	for i := range m.Operations {
+		op := &m.Operations[i]
+		if op.Datatype == "" {
+			continue
+		}
+		dt := datatypes[op.Datatype]
+		if dt.LogDID == "" || dt.Sequence == 0 || dt.ContentHash == "" {
+			return nil, fmt.Errorf("networkbundle: verify: operation %s names datatype %q without an on-log anchor (log_did+sequence+content_hash required for a driveable operation — publish the datatype before serving the manifest)",
+				op.EventType, op.Datatype)
+		}
+	}
 	return m, nil
 }
 
