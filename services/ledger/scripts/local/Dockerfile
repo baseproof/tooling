@@ -35,7 +35,7 @@ COPY . .
 
 # VERSION is stamped into main.Version; defaults to "docker" for unstamped
 # (local) builds. Build the daemon PLUS the ops CLIs (submit-stamp seeds an
-# entry; init-network mints a network bootstrap) so an image-only deployment can
+# entry; genesis-ceremony mints/assembles a network constitution) so an image-only deployment can
 # seed + bootstrap from the SAME image — no source checkout, no `go run`. Static,
 # reproducible binaries: CGO off, -trimpath, -buildvcs=false.
 ARG VERSION=docker
@@ -59,7 +59,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build \
       -trimpath -buildvcs=false -o /submit-stamp ./cmd/submit-stamp && \
     CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build \
-      -trimpath -buildvcs=false -o /init-network ./cmd/init-network && \
+      -trimpath -buildvcs=false -o /genesis-ceremony ./cmd/genesis-ceremony && \
     CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build \
       -trimpath -buildvcs=false -o /backfill ./cmd/backfill && \
     CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build \
@@ -98,7 +98,7 @@ COPY --from=builder /ledger-reader /ledger-reader
 # Ops CLIs (reachable via `--entrypoint /submit-stamp` etc.) for image-only
 # seeding + bootstrap generation — the daemon stays the default entrypoint.
 COPY --from=builder /submit-stamp /submit-stamp
-COPY --from=builder /init-network /init-network
+COPY --from=builder /genesis-ceremony /genesis-ceremony
 # backfill seeds VALID, INTERCONNECTED authority entries that populate the SMT
 # (submit-stamp only emits commentary). Reachable via `--entrypoint /backfill`.
 COPY --from=builder /backfill /backfill

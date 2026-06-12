@@ -18,7 +18,7 @@ ledger/
 │   ├── submit-stamp/   # CLI: build + sign + POST an entry
 │   ├── seed-session/   # dev: insert a sessions row
 │   ├── rebuild-tiles/  # ops: replay entry_index → Tessera
-│   └── init-network/   # local-dev bootstrap-doc + witness-key generator
+│   └── genesis-ceremony/ # constitution producer: build/assemble (multi-host) + dev fixture mode
 ├── api/                  # HTTP handlers (api/middleware/ holds Auth, SizeLimit, WithRequestID)
 │   ├── server.go              # the route table — single source of truth
 │   ├── ports.go               # interfaces for store/* and middleware (no pgx)

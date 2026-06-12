@@ -334,7 +334,7 @@ func TestRule_EntryReaderIsAuthoritative(t *testing.T) {
 // ═════════════════════════════════════════════════════════════════════════════
 
 func TestRule_EndToEnd_BytesNeverTouchPostgres(t *testing.T) {
-	t.Skipf("harness sequencer never sequences — documented-dark with exit criteria in baseproof/tooling#82")
+	t.Skipf("harness sequencer never sequences — documented-dark with exit criteria in baseproof/tooling#91")
 	op := startTestLedger(t)
 	op.seedSession(t, "tok-e2e-rule", "did:example:exchange-e2e-rule", 100)
 

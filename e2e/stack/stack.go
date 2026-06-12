@@ -3,7 +3,7 @@
 // container wiring mirrors the judicial-network e2e's proven config (services.go),
 // adapted to the tooling-only fleet (no JN/aggregator) and an HTTPS ledger with a
 // self-signed run CA (certs.go). The genesis bootstrap + witness key are minted by
-// the ledger's own cmd/init-network (reused, not reinvented); the ledger serves
+// the ledger's own cmd/genesis-ceremony dev mode (reused, not reinvented); the ledger serves
 // OPEN HTTPS (server cert, no client CA — reads open, writes gated by in-body
 // crypto), which the libs runner pins via --ca-cert.
 //
@@ -37,7 +37,7 @@ const (
 // Config parameterises a single-network fleet.
 type Config struct {
 	RunID    string // short id; container/network names derive from it
-	RepoRoot string // tooling repo root (for cmd/init-network + Dockerfiles); auto-detected if empty
+	RepoRoot string // tooling repo root (for cmd/genesis-ceremony + Dockerfiles); auto-detected if empty
 	WorkDir  string // host scratch for fixtures + certs (bind-mounted); a temp dir if empty
 	LogDID   string
 	QuorumK  int
@@ -139,9 +139,9 @@ func Build(cfg Config) (*Manifest, error) {
 		return nil, err
 	}
 
-	// 1. Genesis fixtures via the ledger's own init-network (bootstrap + witness key).
+	// 1. Genesis fixtures via the ledger's own genesis-ceremony dev mode (bootstrap + witness key).
 	if err := initNetwork(root, fixtures, cfg); err != nil {
-		return nil, fmt.Errorf("init-network: %w", err)
+		return nil, fmt.Errorf("genesis-ceremony dev: %w", err)
 	}
 	netID, err := networkIDFromBootstrap(filepath.Join(fixtures, "network-bootstrap.json"))
 	if err != nil {
@@ -199,7 +199,7 @@ func Wipe(cfg Config) {
 // ── steps ───────────────────────────────────────────────────────────────────
 
 func initNetwork(root, fixtures string, cfg Config) error {
-	cmd := exec.Command("go", "run", "./cmd/init-network",
+	cmd := exec.Command("go", "run", "./cmd/genesis-ceremony", "dev",
 		"-out-dir", fixtures,
 		"-out-bootstrap", filepath.Join(fixtures, "network-bootstrap.json"),
 		"-log-did", cfg.LogDID,
@@ -207,11 +207,11 @@ func initNetwork(root, fixtures string, cfg Config) error {
 		"-witnesses", "1",
 	)
 	cmd.Dir = filepath.Join(root, "services", "ledger")
-	// GOWORK=off: init-network does NOT use tessera, but the ledger's go.work
+	// GOWORK=off: genesis-ceremony does NOT use tessera, but the ledger's go.work
 	// links ./third_party/tessera (the fork submodule). Running with that
 	// workspace fails on a checkout where the submodule is not initialized (the
 	// common case). Upstream resolution needs no submodule and yields the same
-	// init-network binary.
+	// genesis-ceremony binary.
 	cmd.Env = append(os.Environ(), "GOWORK=off")
 	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
 	return cmd.Run()

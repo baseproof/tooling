@@ -76,7 +76,7 @@ func TestMultiHostCeremony_RoundTrip(t *testing.T) {
 	// Phase 2: each witness endorses INDEPENDENTLY with its own key.
 	var ends []network.GenesisEndorsement
 	for _, kp := range []string{k1, k2, k3} {
-		e, _, err := endorse(kp, unendorsed)
+		e, _, err := endorse(kp, unendorsed, kindGenesisWitness, "")
 		if err != nil {
 			t.Fatalf("endorse(%s): %v", kp, err)
 		}
@@ -115,7 +115,7 @@ func TestEndorse_RefusesNetworkItIsNotIn(t *testing.T) {
 
 	unendorsed := writeUnendorsed(t, dir, []string{d1, d2}, 2)
 
-	if _, _, err := endorse(outsiderKey, unendorsed); err == nil {
+	if _, _, err := endorse(outsiderKey, unendorsed, kindGenesisWitness, ""); err == nil {
 		t.Fatal("an outsider witness endorsed a network it is not part of")
 	} else if !strings.Contains(err.Error(), "not in the constitution's genesis_witness_set") {
 		t.Fatalf("refusal came from the wrong place: %v", err)
@@ -133,11 +133,11 @@ func TestMultiHostCeremony_IncompleteRefused(t *testing.T) {
 	unendorsed := writeUnendorsed(t, dir, []string{d1, d2, d3}, 2)
 
 	// Only two of three witnesses endorse.
-	e1, _, err := endorse(k1, unendorsed)
+	e1, _, err := endorse(k1, unendorsed, kindGenesisWitness, "")
 	if err != nil {
 		t.Fatalf("endorse w1: %v", err)
 	}
-	e2, _, err := endorse(k2, unendorsed)
+	e2, _, err := endorse(k2, unendorsed, kindGenesisWitness, "")
 	if err != nil {
 		t.Fatalf("endorse w2: %v", err)
 	}

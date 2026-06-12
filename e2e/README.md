@@ -38,7 +38,7 @@ The ledger serves **open HTTPS** with a self-signed run CA (minted by the harnes
 SANs cover `localhost` + the container name). Reads are open; writes are gated by
 in-body crypto. The libs runner pins the CA via `network add --ca-cert`. The
 genesis bootstrap + witness key are minted by the ledger's own
-`services/ledger/cmd/init-network` (reused, not reinvented).
+`services/ledger/cmd/genesis-ceremony` dev mode (reused, not reinvented).
 
 ## Layout
 - `dockerx/` — the only layer that shells to `docker` (pure, testable argv builders).
@@ -60,5 +60,5 @@ genesis bootstrap + witness key are minted by the ledger's own
   image, set `E2E_LEDGER_IMAGE` to a published `-upstream` tag (e.g.
   `…/ledger:0.1.7-upstream`) — there is no `:latest-upstream`. The fork/upstream
   split is the ledger's `services/ledger/go.work` (`use ./third_party/tessera`)
-  vs `GOWORK=off`; the e2e never touches that workspace (it runs `init-network`
+  vs `GOWORK=off`; the e2e never touches that workspace (it runs `genesis-ceremony`
   with `GOWORK=off` and selects the engine at image build/pull time).

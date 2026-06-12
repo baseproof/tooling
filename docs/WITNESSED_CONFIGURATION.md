@@ -41,7 +41,7 @@ that does not is genesis itself.**
 
 ## 2. The gap: genesis is asserted, not witnessed
 
-Today `init-network`/`gen-fixtures` runs on one host, mints every witness key
+Historically `init-network`/`gen-fixtures` ran on one host, minting every witness key
 plus the admission authority G, writes a bootstrap JSON — and that is the
 constitution. Its integrity story is self-certification (NetworkID =
 SHA-256(JCS bytes)) plus TOFU pinning. Good — but nobody ever **signed** it:
@@ -184,7 +184,7 @@ declaration). Both shapes are already walked; rule 4 of §1 is preserved.
   other command.
 - Witness daemon: an `endorse` one-shot (reads its existing witkey; refuses
   unknown ceremony kinds).
-- `init-network` gains a ceremony mode (assemble → collect → verify → emit
+- SUPERSEDED by `genesis-ceremony` (build → genesis-endorse per host → assemble
   endorsed bootstrap); today's single-host mode remains, explicitly labeled
   dev-only.
 - Ledger boot: verify endorsements when present (fail-closed when the doc
@@ -200,7 +200,7 @@ declaration). Both shapes are already walked; rule 4 of §1 is preserved.
    `VerifyGenesisEndorsements(doc, bundle)`; the `network_genesis` payload
    kind (a `kinds/` entry + codec, passing kindslint).
 3. **tooling:** `libs/ceremony` driver + `baseproof ceremony` seams; witness
-   `endorse` one-shot; `init-network --ceremony`; ledger boot endorsement
+   `genesis-endorse` one-shot; `genesis-ceremony build/assemble`; ledger boot endorsement
    verification + genesis sequencing; rotation dual-sign required by policy
    default; anchoring cadence read from genesis policy.
 4. **JN/e2e:** unchanged consumption; fixture mint stays dev-mode; JN's

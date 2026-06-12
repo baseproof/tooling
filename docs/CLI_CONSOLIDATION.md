@@ -67,7 +67,7 @@ Long-running HTTP servers. Out of scope for "move to CLI."
 | `audit` (ledger) | ledger `internal/{clienttls,retryhttp}` | → `baseproof ledger audit` (live K-of-N checkpoint + SMT sampling) |
 | `admission-authority` | ledger `internal/{clienttls,retryhttp}` | → `baseproof ledger admission-authority` |
 | `signature-policy` | ledger `internal/{clienttls,retryhttp}` | → `baseproof ledger signature-policy` |
-| `init-network` | SDK only | → `baseproof network init` (optional; local-dev bootstrap) |
+| `genesis-ceremony` (superseded init-network) | SDK only | → `baseproof network init` (optional; dev mode wraps `genesis-ceremony dev`) |
 
 The **only** thing tying these to the ledger module is two *generic* HTTP helpers —
 `internal/clienttls` (~162 lines, TLS config) and `internal/retryhttp` (~150 lines,
@@ -157,7 +157,7 @@ baseproof config      {get, set, list}                 # CLI defaults (active ne
 baseproof network     {create, list, describe, use, delete, init}
                       #  create  ← was `add`   (--from-ledger | --from)
                       #  describe← was `show` + the rich `info` (--verify, --federation)
-                      #  use     ← set the active network        init ← was init-network (dev)
+                      #  use     ← set the active network        init ← was genesis-ceremony dev
 baseproof entries     {submit, describe}                # submit ← top-level `submit` alias
 baseproof proof       {create, verify}                  # create ← `proof`; verify ← `verify`
 baseproof witnesses   {list, describe}                  # list ← `witnesses` (--at N)
@@ -316,7 +316,7 @@ command an operator can fire at a live multi-billion-entry log by reflex.
      `signature-policy {describe,update}`, `audit run`; add `tooling/e2e` coverage.
    - Fold the existing flat commands into resource forms with aliases (`submit` →
      `entries submit`, `show`/`info` → `network describe`, `add` → `network create`).
-   - Optionally fold `init-network` into `baseproof network init`.
+   - Optionally fold `genesis-ceremony dev` into `baseproof network init`.
 3. **Ledger admin API + operations.**
    - Add `POST /v1/admin/sessions` (→ `ledger session …`, replaces `seed-session`).
    - Add the operations API: `POST /v1/admin/operations` + `GET

@@ -58,7 +58,7 @@ func TestRun_GenesisAuditors_Emitted(t *testing.T) {
 	dir := t.TempDir()
 	auditorDID := testSecp256k1DIDKey(t)
 	const url = "https://auditor.example/v1/findings"
-	if err := run(dir, "", defaultLogDID, defaultNetworkName, 1, "ecdsa", auditorDID, url, devNull(t)); err != nil {
+	if err := run(dir, "", defaultLogDID, defaultNetworkName, 1, "ecdsa", auditorDID, url, "require", devNull(t)); err != nil {
 		t.Fatalf("run: %v", err)
 	}
 	body, err := os.ReadFile(filepath.Join(dir, "network-bootstrap.json"))
@@ -93,7 +93,7 @@ func TestRun_GenesisAuditors_Emitted(t *testing.T) {
 // -genesis-auditor-did without a findings URL is a hard config error (the SDK
 // requires a non-empty URL on every auditor registration).
 func TestRun_GenesisAuditors_RequireFindingsURL(t *testing.T) {
-	if err := run(t.TempDir(), "", defaultLogDID, defaultNetworkName, 1, "ecdsa", testSecp256k1DIDKey(t), "", devNull(t)); err == nil {
+	if err := run(t.TempDir(), "", defaultLogDID, defaultNetworkName, 1, "ecdsa", testSecp256k1DIDKey(t), "", "require", devNull(t)); err == nil {
 		t.Fatal("expected error: -genesis-auditor-did set without -genesis-auditor-findings-url")
 	}
 }
@@ -101,14 +101,14 @@ func TestRun_GenesisAuditors_RequireFindingsURL(t *testing.T) {
 // A non-secp256k1 did:key cannot be an ECDSA genesis auditor — rejected.
 func TestRun_GenesisAuditors_RejectsNonSecp256k1(t *testing.T) {
 	if err := run(t.TempDir(), "", defaultLogDID, defaultNetworkName, 1, "ecdsa",
-		"did:key:z6MkpTHR8VNsBxYAAWHut2Geadd9jSwuBV8xRoAnwWsdvktH", "https://x.example/f", devNull(t)); err == nil {
+		"did:key:z6MkpTHR8VNsBxYAAWHut2Geadd9jSwuBV8xRoAnwWsdvktH", "https://x.example/f", "require", devNull(t)); err == nil {
 		t.Fatal("expected error for a non-secp256k1 (ed25519) genesis auditor did:key")
 	}
 }
 
 func TestRun_SingleWitness_HappyPath(t *testing.T) {
 	dir := t.TempDir()
-	err := run(dir, "", defaultLogDID, defaultNetworkName, 1, "ecdsa", "", "", devNull(t))
+	err := run(dir, "", defaultLogDID, defaultNetworkName, 1, "ecdsa", "", "", "require", devNull(t))
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
@@ -144,7 +144,7 @@ func TestRun_SingleWitness_HappyPath(t *testing.T) {
 func TestRun_MultiWitness(t *testing.T) {
 	dir := t.TempDir()
 	const n = 3
-	if err := run(dir, "", defaultLogDID, defaultNetworkName, n, "ecdsa", "", "", devNull(t)); err != nil {
+	if err := run(dir, "", defaultLogDID, defaultNetworkName, n, "ecdsa", "", "", "require", devNull(t)); err != nil {
 		t.Fatalf("run: %v", err)
 	}
 	for i := 1; i <= n; i++ {
@@ -178,7 +178,7 @@ func TestRun_MultiWitness(t *testing.T) {
 
 func TestRun_Idempotent_PreservesKeys(t *testing.T) {
 	dir := t.TempDir()
-	if err := run(dir, "", defaultLogDID, defaultNetworkName, 2, "ecdsa", "", "", devNull(t)); err != nil {
+	if err := run(dir, "", defaultLogDID, defaultNetworkName, 2, "ecdsa", "", "", "require", devNull(t)); err != nil {
 		t.Fatalf("first run: %v", err)
 	}
 	keyPath := filepath.Join(dir, "witnesses", "witness-1.pem")
@@ -187,7 +187,7 @@ func TestRun_Idempotent_PreservesKeys(t *testing.T) {
 		t.Fatalf("read key after first run: %v", err)
 	}
 	// Second run with same args — keys must not be regenerated.
-	if err := run(dir, "", defaultLogDID, defaultNetworkName, 2, "ecdsa", "", "", devNull(t)); err != nil {
+	if err := run(dir, "", defaultLogDID, defaultNetworkName, 2, "ecdsa", "", "", "require", devNull(t)); err != nil {
 		t.Fatalf("second run: %v", err)
 	}
 	second, err := os.ReadFile(keyPath)
@@ -200,19 +200,19 @@ func TestRun_Idempotent_PreservesKeys(t *testing.T) {
 }
 
 func TestRun_RejectsZeroWitnesses(t *testing.T) {
-	if err := run(t.TempDir(), "", defaultLogDID, defaultNetworkName, 0, "ecdsa", "", "", devNull(t)); err == nil {
+	if err := run(t.TempDir(), "", defaultLogDID, defaultNetworkName, 0, "ecdsa", "", "", "require", devNull(t)); err == nil {
 		t.Fatal("expected error for -witnesses=0")
 	}
 }
 
 func TestRun_RejectsEmptyLogDID(t *testing.T) {
-	if err := run(t.TempDir(), "", "", defaultNetworkName, 1, "ecdsa", "", "", devNull(t)); err == nil {
+	if err := run(t.TempDir(), "", "", defaultNetworkName, 1, "ecdsa", "", "", "require", devNull(t)); err == nil {
 		t.Fatal("expected error for empty -log-did")
 	}
 }
 
 func TestRun_RejectsEmptyNetworkName(t *testing.T) {
-	if err := run(t.TempDir(), "", defaultLogDID, "", 1, "ecdsa", "", "", devNull(t)); err == nil {
+	if err := run(t.TempDir(), "", defaultLogDID, "", 1, "ecdsa", "", "", "require", devNull(t)); err == nil {
 		t.Fatal("expected error for empty -network-name")
 	}
 }
@@ -220,7 +220,7 @@ func TestRun_RejectsEmptyNetworkName(t *testing.T) {
 func TestRun_CustomBootstrapPath(t *testing.T) {
 	dir := t.TempDir()
 	custom := filepath.Join(dir, "sub", "custom-bootstrap.json")
-	if err := run(dir, custom, defaultLogDID, defaultNetworkName, 1, "ecdsa", "", "", devNull(t)); err != nil {
+	if err := run(dir, custom, defaultLogDID, defaultNetworkName, 1, "ecdsa", "", "", "require", devNull(t)); err != nil {
 		t.Fatalf("run: %v", err)
 	}
 	if _, err := os.Stat(custom); err != nil {
@@ -235,7 +235,7 @@ func TestRun_CustomBootstrapPath(t *testing.T) {
 // "x coordinate not on the secp256k1 curve".
 func TestRun_GeneratedKeysAreSecp256k1AndLedgerResolvable(t *testing.T) {
 	dir := t.TempDir()
-	if err := run(dir, "", defaultLogDID, defaultNetworkName, 2, "ecdsa", "", "", devNull(t)); err != nil {
+	if err := run(dir, "", defaultLogDID, defaultNetworkName, 2, "ecdsa", "", "", "require", devNull(t)); err != nil {
 		t.Fatalf("run: %v", err)
 	}
 
@@ -276,7 +276,7 @@ func TestRun_GeneratedKeysAreSecp256k1AndLedgerResolvable(t *testing.T) {
 // witness key loads as a blskey (the witnesses join the verifying set on-log).
 func TestRun_BLSScheme(t *testing.T) {
 	dir := t.TempDir()
-	if err := run(dir, "", defaultLogDID, defaultNetworkName, 2, "bls", "", "", devNull(t)); err != nil {
+	if err := run(dir, "", defaultLogDID, defaultNetworkName, 2, "bls", "", "", "require", devNull(t)); err != nil {
 		t.Fatalf("run(bls): %v", err)
 	}
 
@@ -309,7 +309,7 @@ func TestRun_BLSScheme(t *testing.T) {
 }
 
 func TestRun_RejectsUnknownScheme(t *testing.T) {
-	if err := run(t.TempDir(), "", defaultLogDID, defaultNetworkName, 1, "rsa", "", "", devNull(t)); err == nil {
+	if err := run(t.TempDir(), "", defaultLogDID, defaultNetworkName, 1, "rsa", "", "", "require", devNull(t)); err == nil {
 		t.Fatal("unknown -scheme must be rejected")
 	}
 }
@@ -341,3 +341,48 @@ func itoa(i int) string {
 // Compile-time check that devNull's return value satisfies the
 // stdout argument's io.Writer-via-*os.File contract.
 var _ io.Writer = (*os.File)(nil)
+
+// TestRun_FixtureIsBornEndorsed pins #77 A6: the default mint binds the require
+// policy into the NetworkID, self-endorses N-of-N with the keys it minted, and
+// the WRITTEN file passes the self-pin first-contact door — so a JN/e2e network
+// bootstrapped from fixtures clears the same gate as a production mint.
+func TestRun_FixtureIsBornEndorsed(t *testing.T) {
+	dir := t.TempDir()
+	if err := run(dir, "", defaultLogDID, defaultNetworkName, 3, "ecdsa", "", "", "require", devNull(t)); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, "network-bootstrap.json"))
+	if err != nil {
+		t.Fatalf("read bootstrap: %v", err)
+	}
+	doc, err := network.LoadSelfVerifiedBootstrap(raw)
+	if err != nil {
+		t.Fatalf("fixture failed the self-pin first-contact door: %v", err)
+	}
+	if !doc.RequiresEndorsement() {
+		t.Fatal("fixture is not require-policy — A6 demands fixtures born endorsed")
+	}
+	if len(doc.GenesisEndorsements) != 3 {
+		t.Fatalf("fixture carries %d endorsements, want 3 (N-of-N)", len(doc.GenesisEndorsements))
+	}
+}
+
+// TestRun_EndorsementPolicyOff keeps the escape hatch honest: "off" emits no
+// policy and no endorsements, and the file still loads.
+func TestRun_EndorsementPolicyOff(t *testing.T) {
+	dir := t.TempDir()
+	if err := run(dir, "", defaultLogDID, defaultNetworkName, 1, "ecdsa", "", "", "off", devNull(t)); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, "network-bootstrap.json"))
+	if err != nil {
+		t.Fatalf("read bootstrap: %v", err)
+	}
+	doc, err := network.LoadSelfVerifiedBootstrap(raw)
+	if err != nil {
+		t.Fatalf("off-policy fixture failed first contact: %v", err)
+	}
+	if doc.RequiresEndorsement() || len(doc.GenesisEndorsements) != 0 {
+		t.Fatal("off policy leaked a require policy or endorsements")
+	}
+}
