@@ -8,7 +8,8 @@
 // args those functions parse, so all defaults + logic live in libs/cli (untouched)
 // and the platform e2e drives exactly what ships. cli.Main (the stdlib-flag
 // dispatch) remains in libs for callers that embed it; this binary is the Cobra
-// front end, staged for extraction to its own repository.
+// front end. It lives in this monorepo until the post-launch move to its own
+// repository (the monorepo is the delivery unit — one binary, one version).
 package main
 
 import (
@@ -67,8 +68,10 @@ func forward(run func(context.Context, []string) error, prefix ...string) func(*
 	}
 }
 
-// bundleFlags adds the network-selection flags every act-on-a-network command takes.
+// bundleFlags adds the network-selection flags every act-on-a-network command
+// takes. Resolution order (libs/cli resolveBundle): --bundle, then
+// --network/-n, then $BASEPROOF_NETWORK, then the active network.
 func bundleFlags(c *cobra.Command) {
 	c.Flags().String("bundle", "", "client bundle JSON (else --network or the active network)")
-	c.Flags().String("network", "", "stored network name (else the active network)")
+	c.Flags().StringP("network", "n", "", "stored network name (else $BASEPROOF_NETWORK, else the active network)")
 }

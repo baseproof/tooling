@@ -57,6 +57,7 @@ func networkAdd(ctx context.Context, args []string) error {
 		caFile     = fs.String("ca-cert", "", "CA cert to pin (for --from-ledger HTTPS + the bundle's transport)")
 		logDID     = fs.String("log-did", "", "log DID (--from-ledger; else taken from /v1/log-info)")
 		use        = fs.Bool("use", false, "set this network active after adding")
+		repin      = fs.Bool("repin", false, "explicitly replace this name's pinned trust root if the offered network id differs (prints old → new; without it, a mismatch refuses)")
 		timeout    = fs.Duration("timeout", 30*time.Second, "per-request HTTP timeout")
 	)
 	if err := fs.Parse(args); err != nil {
@@ -83,8 +84,42 @@ func networkAdd(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+
+	// Trust-boundary moment: a known name may only ever mean ONE network.
+	// The prior identity is the pin if one exists, else the already-stored
+	// bundle's id (stores predating pins.json get the same protection). A
+	// mismatch REFUSES before anything is written; --repin replaces the trust
+	// root loudly. Same-identity re-adds are free: endpoints and TLS posture
+	// refresh, the pin stands.
+	pins, err := loadPins()
+	if err != nil {
+		return err
+	}
+	priorID := ""
+	if pin, ok := pins[name]; ok {
+		priorID = pin.NetworkID
+	} else if old, lerr := loadNetwork(name); lerr == nil {
+		priorID = old.NetworkID
+	}
+	switch {
+	case priorID == "" || priorID == b.NetworkID:
+		// first contact, or an identity-preserving refresh
+	case *repin:
+		fmt.Printf("network: REPINNING %q  %s → %s\n", name, short(priorID), short(b.NetworkID))
+	default:
+		return fmt.Errorf("network add: %q is pinned to network id %s, but the offered bundle claims %s — refusing: a different network is claiming a known name. If the identity change is genuine, re-run with --repin",
+			name, short(priorID), short(b.NetworkID))
+	}
+
 	if err := saveNetwork(name, b); err != nil {
 		return err
+	}
+	if pin, ok := pins[name]; !ok || pin.NetworkID != b.NetworkID {
+		pins[name] = networkPin{NetworkID: b.NetworkID, BootstrapHash: b.BootstrapHash, AddedAt: time.Now().UTC().Format(time.RFC3339)}
+		if err := savePins(pins); err != nil {
+			return err
+		}
+		fmt.Printf("network: pinned %q to network id %s — verify this id out-of-band before trusting writes\n", name, b.NetworkID)
 	}
 	fmt.Printf("network: added %q  (id %s, endpoint %s)\n", name, short(b.NetworkID), b.Endpoint)
 	if *use {

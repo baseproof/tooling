@@ -4,7 +4,14 @@ package cli
 //
 //	~/.config/baseproof/
 //	  config.json            { "active_network": "<name>" }
-//	  networks/<name>.json   a ClientBundle
+//	  networks/<name>.json   a ClientBundle (mutable: endpoints, TLS posture)
+//	  pins.json              { "<name>": { network_id, … } } — the TRUST ROOT
+//
+// pins.json deliberately lives OUTSIDE the bundle files: the bundle is the
+// mutable half (where to dial), the pin is the identity half (which network
+// this name means), recorded once at first contact and changed only by an
+// explicit --repin. Every load re-checks bundle vs pin, so neither a refresh
+// nor on-disk tampering can quietly point a known name at a different network.
 //
 // The directory is $BASEPROOF_CONFIG_DIR, else $XDG_CONFIG_HOME/baseproof, else
 // ~/.config/baseproof — so tests point it at a temp dir.
@@ -111,7 +118,76 @@ func loadNetwork(name string) (*ClientBundle, error) {
 	if err != nil {
 		return nil, err
 	}
-	return LoadClientBundle(p)
+	b, err := LoadClientBundle(p)
+	if err != nil {
+		return nil, err
+	}
+	// The pin is authoritative over the mutable bundle file: a stored bundle
+	// whose identity drifted from the pin (overwritten, tampered, restored from
+	// the wrong backup) is refused everywhere, not just at add time.
+	pins, err := loadPins()
+	if err != nil {
+		return nil, err
+	}
+	if pin, ok := pins[name]; ok && pin.NetworkID != b.NetworkID {
+		return nil, fmt.Errorf("network %q: stored bundle claims network id %s but the name is pinned to %s — the bundle changed underneath its trust root; if the identity change is genuine, re-add with `baseproof network add %s --from … --repin`",
+			name, short(b.NetworkID), short(pin.NetworkID), name)
+	}
+	return b, nil
+}
+
+// ── trust pins ──────────────────────────────────────────────────────
+
+// networkPin is the write-once identity record for a stored network name.
+type networkPin struct {
+	NetworkID     string `json:"network_id"`
+	BootstrapHash string `json:"bootstrap_hash,omitempty"`
+	AddedAt       string `json:"added_at,omitempty"` // RFC3339; informational
+}
+
+func pinsFile() (string, error) {
+	h, err := configHome()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(h, "pins.json"), nil
+}
+
+// loadPins returns the name→pin map; a missing file is an empty map (a store
+// predating pins keeps working — names get pinned on their next add).
+func loadPins() (map[string]networkPin, error) {
+	p, err := pinsFile()
+	if err != nil {
+		return nil, err
+	}
+	data, err := os.ReadFile(p)
+	if os.IsNotExist(err) {
+		return map[string]networkPin{}, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("config: read pins: %w", err)
+	}
+	pins := map[string]networkPin{}
+	if err := json.Unmarshal(data, &pins); err != nil {
+		return nil, fmt.Errorf("config: parse pins: %w", err)
+	}
+	return pins, nil
+}
+
+func savePins(pins map[string]networkPin) error {
+	h, err := configHome()
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(h, 0o700); err != nil {
+		return fmt.Errorf("config: mkdir %s: %w", h, err)
+	}
+	p, err := pinsFile()
+	if err != nil {
+		return err
+	}
+	data, _ := json.MarshalIndent(pins, "", "  ")
+	return os.WriteFile(p, append(data, '\n'), 0o600)
 }
 
 func listNetworks() ([]string, error) {
@@ -145,8 +221,9 @@ func setActiveNetwork(name string) error {
 }
 
 // resolveBundle resolves the network bundle a command uses: an explicit --bundle
-// file wins, then --network <name>, then the active network — the gcloud pattern
-// (a per-command flag overrides the active default).
+// file wins, then --network <name>, then $BASEPROOF_NETWORK, then the active
+// network — the gcloud pattern (a per-command flag overrides the env, which
+// overrides the stored default).
 func resolveBundle(bundlePath, networkName string) (*ClientBundle, error) {
 	if bundlePath != "" {
 		return LoadClientBundle(bundlePath)
@@ -154,12 +231,15 @@ func resolveBundle(bundlePath, networkName string) (*ClientBundle, error) {
 	if networkName != "" {
 		return loadNetwork(networkName)
 	}
+	if env := os.Getenv("BASEPROOF_NETWORK"); env != "" {
+		return loadNetwork(env)
+	}
 	cfg, err := loadConfig()
 	if err != nil {
 		return nil, err
 	}
 	if cfg.ActiveNetwork == "" {
-		return nil, fmt.Errorf("no --bundle, no --network, and no active network — run `baseproof network add <name> ...` then `baseproof network use <name>`")
+		return nil, fmt.Errorf("no --bundle, no --network, no $BASEPROOF_NETWORK, and no active network — run `baseproof network add <name> ...` then `baseproof network use <name>`")
 	}
 	return loadNetwork(cfg.ActiveNetwork)
 }

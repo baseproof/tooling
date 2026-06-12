@@ -49,7 +49,9 @@ func loadCmd() *cobra.Command {
 	}
 	bundleFlags(c)
 	f := c.Flags()
-	f.IntP("n", "n", 1000, "total entries to submit (roots + delegations + amendments)")
+	// Long-only: -n is the global network shorthand (a flag means the same
+	// thing on every verb), so the count is --n, never -n.
+	f.Int("n", 1000, "total entries to submit (roots + delegations + amendments)")
 	f.Float64("amend-ratio", 0.5, "fraction of entries that amend a recent root")
 	f.Float64("delegate-ratio", 0, "fraction of new entities given a delegation (⇒ delegated amendments)")
 	f.Int("workers", 0, "concurrent PoW/submit workers (0 = NumCPU)")
@@ -93,7 +95,7 @@ K-of-N cosignatures, inclusion, and SMT membership — fail-closed. Network-agno
 	}
 	f := c.Flags()
 	f.String("pin", "", "require the proof's network id to equal this 64-hex id")
-	f.String("network", "", "pin against this stored/active network")
+	f.StringP("network", "n", "", "pin against this stored/active network")
 	f.String("bundle", "", "pin against this network bundle's id (content-addressed anchor)")
 	return c
 }
@@ -147,6 +149,7 @@ func networkCmd() *cobra.Command {
 	af.String("ca-cert", "", "CA cert to pin (for --from-ledger HTTPS + the bundle's transport)")
 	af.String("log-did", "", "log DID (--from-ledger; else taken from /v1/log-info)")
 	af.Bool("use", false, "set this network active after adding")
+	af.Bool("repin", false, "explicitly replace this name's pinned trust root if the offered network id differs (else a mismatch refuses)")
 	af.Duration("timeout", 30*time.Second, "per-request HTTP timeout")
 
 	list := &cobra.Command{Use: "list", Short: "List stored networks", Args: cobra.NoArgs, RunE: forward(cli.RunNetwork, "list")}
