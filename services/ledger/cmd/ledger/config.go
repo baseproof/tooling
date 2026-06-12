@@ -243,11 +243,6 @@ type Config struct {
 	// the PARENT'S log) that this ledger does not know
 	// authoritatively without parent-side queries; operator-
 	// curated metadata closes the gap.
-	NetworkAnchorsFile string
-
-	// NetworkAnchors is the parsed anchor chain loaded from
-	// NetworkAnchorsFile at boot. Zero LogDID → handler 404s.
-	NetworkAnchors api.WireAnchorChain
 
 	// Sequencer settings (SCT/MMD architecture). The Sequencer
 	// drains StatePending entries asynchronously; v2 admission
@@ -730,7 +725,6 @@ func loadConfig() (*Config, error) {
 
 		// Part II.1 — anchor chain file. Operator-supplied JSON
 		// matching api.WireAnchorChain.
-		NetworkAnchorsFile: os.Getenv("LEDGER_NETWORK_ANCHORS_FILE"),
 	}
 	if cfg.PgMaxConns == 0 {
 		cfg.PgMaxConns = defaultPgMaxConns()
@@ -858,14 +852,6 @@ func loadConfig() (*Config, error) {
 		return nil, err
 	}
 	cfg.NetworkMirrors = mirrors
-
-	// Part II.1 — load the anchor chain file (if any). Same
-	// fail-fast contract.
-	anchors, err := loadNetworkAnchors(cfg.NetworkAnchorsFile)
-	if err != nil {
-		return nil, err
-	}
-	cfg.NetworkAnchors = anchors
 
 	// G1: cross-field validation. Anything that requires multiple
 	// fields to be set together (or NOT together) is checked here.
@@ -1245,34 +1231,6 @@ func loadNetworkMirrors(path string) (api.WireMirrorManifest, error) {
 			fmt.Errorf("LEDGER_NETWORK_MIRRORS_FILE: log_did required")
 	}
 	return m, nil
-}
-
-// loadNetworkAnchors reads LEDGER_NETWORK_ANCHORS_FILE (if set)
-// and parses it into the api.WireAnchorChain shape. Same loader
-// contract: empty path → zero chain; malformed file → fail boot.
-//
-// Part II.1.
-func loadNetworkAnchors(path string) (api.WireAnchorChain, error) {
-	if path == "" {
-		return api.WireAnchorChain{}, nil
-	}
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		return api.WireAnchorChain{},
-			fmt.Errorf("LEDGER_NETWORK_ANCHORS_FILE: read %s: %w", path, err)
-	}
-	var c api.WireAnchorChain
-	dec := json.NewDecoder(bytes.NewReader(raw))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&c); err != nil {
-		return api.WireAnchorChain{},
-			fmt.Errorf("LEDGER_NETWORK_ANCHORS_FILE: parse %s: %w", path, err)
-	}
-	if c.LogDID == "" {
-		return api.WireAnchorChain{},
-			fmt.Errorf("LEDGER_NETWORK_ANCHORS_FILE: log_did required")
-	}
-	return c, nil
 }
 
 // toBytestoreConfig flattens the ledger config's bytestore-related

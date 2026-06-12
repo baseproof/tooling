@@ -67,11 +67,13 @@ import (
 	sdkdid "github.com/baseproof/baseproof/did"
 	"github.com/baseproof/baseproof/exchange/policy"
 	sdklog "github.com/baseproof/baseproof/log"
+
 	"github.com/baseproof/baseproof/log/discover"
 	"github.com/baseproof/baseproof/network"
 	"github.com/baseproof/baseproof/storage"
 	"github.com/baseproof/baseproof/types"
 	"github.com/baseproof/baseproof/witness"
+	"github.com/baseproof/tooling/libs/anchorfeed"
 
 	"go.opentelemetry.io/otel"
 
@@ -184,7 +186,6 @@ type Config struct {
 
 	NetworkPeers   api.WireFederationGraph
 	NetworkMirrors api.WireMirrorManifest
-	NetworkAnchors api.WireAnchorChain
 }
 
 // walEntryTrace adapts the WAL committer to builder.EntryTraceReader: it resolves
@@ -839,6 +840,95 @@ func composeBuilderLoop(
 		)
 	}
 
+	var parentTargets []anchor.ParentTarget
+	// PR-4d — the derivation chain for the publisher's parent target:
+	// WHICH from the constitution; WHERE from the on-log declaration
+	// projection; env only as the pre-first-declaration canary, cross-checked
+	// fatal once a declaration exists; a constitutional target with no
+	// endpoint anywhere refuses boot. (Pre-targets constitutions skip all of
+	// this — the legacy env path is untouched.) Publish fan-out beyond the
+	// first derived target rides the multi-parent publisher extension; the
+	// chain itself — and its fatals — are fully in force here.
+	if cfg.GenesisBootstrapDocument.GenesisAnchoring != nil && len(cfg.GenesisBootstrapDocument.GenesisAnchoring.Targets) > 0 {
+		if atPos, ok := parseSchemaEnv("LEDGER_ANCHOR_TARGET_SCHEMA"); ok {
+			derivationQuery := indexes.NewPostgresQueryAPI(ctx, pool, compositeReader, cfg.LogDID)
+			src := buildAnchorTargetDeclarationSource(derivationQuery, atPos)
+			recs, srcErr := src(ctx)
+			if srcErr != nil {
+				recs = nil // walk unavailable: derivation proceeds on canary-only terms
+			}
+			asOf := types.LogPosition{LogDID: cfg.LogDID, Sequence: ^uint64(0)}
+			_, declared, _ := projectAnchorTargetGraph(cfg.GenesisBootstrapDocument, cfg.LogDID, recs, asOf)
+			eps, depErr := deriveParentEndpoints(cfg.GenesisBootstrapDocument, declared, cfg.ParentLogDID, cfg.ParentAdmissionURL)
+			if depErr != nil {
+				panic(fmt.Sprintf("anchoring WHERE derivation refused boot: %v", depErr))
+			}
+			confirmStore := store.NewAnchorConfirmationStore(d.PgPool.DB)
+			for _, ep := range eps {
+				ep := ep
+				submit := anchor.SignAndSubmit(d.LedgerSignerPriv, d.LedgerDID,
+					anchor.SubmitToHTTPEndpoint(d.OutboundHTTPClient, ep.AdmissionURL))
+				var confirm func(ctx context.Context, head types.CosignedTreeHead) error
+				if ep.ReadBaseURL != "" {
+					if pf, pfErr := sdklog.NewHTTPEntryFetcher(sdklog.HTTPEntryFetcherConfig{
+						BaseURL: ep.ReadBaseURL, LogDID: ep.LogDID, Client: d.OutboundHTTPClient,
+					}); pfErr == nil {
+						confirm, _ = anchor.NewParentAnchorConfirmer(anchor.ParentReadBackConfig{
+							ParentLogDID: ep.LogDID,
+							OwnLogDID:    cfg.LogDID,
+							OwnNetworkID: cfg.NetworkID,
+							FetchSeqs: func(fctx context.Context) ([]uint64, error) {
+								return anchorfeed.FetchBySourceSeqs(fctx, d.OutboundHTTPClient, ep.ReadBaseURL, cfg.LogDID, 256)
+							},
+							ParentFetcher: pf,
+							Recorder:      confirmStore,
+						})
+					}
+				}
+				parentTargets = append(parentTargets, anchor.ParentTarget{
+					LogDID:       ep.LogDID,
+					AdmissionURL: ep.AdmissionURL,
+					SubmitFn:     submit,
+					Confirm:      confirm,
+				})
+				d.Logger.Info("anchoring WHERE: publisher parent derived",
+					"target", ep.TargetNetworkID[:16],
+					"parent_log_did", ep.LogDID,
+					"from_declaration", ep.FromDeclaration)
+			}
+		}
+	}
+
+	// PR-4b read-back: close the parent submit's 202-and-forget. The
+	// confirmer pages the parent's by-source discovery for OUR anchors,
+	// reads them back through the parent log handle (SDK MultiLog), and
+	// records the durable first-seen confirmation. Wired only when the
+	// parent's read base is knowable (the admission URL's origin) — the 4d
+	// derivation chain replaces this env-derived base with the on-log
+	// declaration's read endpoint.
+	var confirmParent func(ctx context.Context, head types.CosignedTreeHead) error
+	if parentSubmitFn != nil && cfg.ParentAdmissionURL != "" {
+		parentReadBase := strings.TrimSuffix(cfg.ParentAdmissionURL, "/v1/entries")
+		parentFetcher, pfErr := sdklog.NewHTTPEntryFetcher(sdklog.HTTPEntryFetcherConfig{
+			BaseURL: parentReadBase,
+			LogDID:  cfg.ParentLogDID,
+			Client:  d.OutboundHTTPClient,
+		})
+		if pfErr != nil {
+			return nil, nil // unreachable: all three fields are non-empty here
+		}
+		confirmParent, _ = anchor.NewParentAnchorConfirmer(anchor.ParentReadBackConfig{
+			ParentLogDID: cfg.ParentLogDID,
+			OwnLogDID:    cfg.LogDID,
+			OwnNetworkID: cfg.NetworkID,
+			FetchSeqs: func(fctx context.Context) ([]uint64, error) {
+				return anchorfeed.FetchBySourceSeqs(fctx, d.OutboundHTTPClient, parentReadBase, cfg.LogDID, 256)
+			},
+			ParentFetcher: parentFetcher,
+			Recorder:      store.NewAnchorConfirmationStore(d.PgPool.DB),
+		})
+	}
+
 	anchorPub := anchor.NewPublisher(
 		anchor.PublisherConfig{
 			LedgerDID:     cfg.LedgerDID,
@@ -852,6 +942,8 @@ func composeBuilderLoop(
 			ParentAdmissionURL:   cfg.ParentAdmissionURL,
 			ParentAnchorInterval: cfg.ParentAnchorInterval,
 			ParentSubmitFn:       parentSubmitFn,
+			ConfirmParentAnchor:  confirmParent,
+			ParentTargets:        parentTargets,
 		},
 		tesseraAdapter,
 		treeHeadStoreCosignedAdapter{store: d.TreeHeadStore},
@@ -1131,7 +1223,12 @@ func composeHandlers(
 		WitnessesCurrent:   api.NewWitnessesCurrentHandler(witnessHistoryFetcher),
 		WitnessesBySetHash: api.NewWitnessesBySetHashHandler(witnessHistoryFetcher),
 		WitnessesAtSeq:     api.NewWitnessesAtSeqHandler(witnessHistoryFetcher),
-		NetworkAnchors:     api.NewNetworkAnchorsHandler(cfg.NetworkAnchors),
+		// PR-4b: the anchor chain is DERIVED from the publisher read-back's
+		// durable confirmations — never an operator file (the hand-curated
+		// LEDGER_NETWORK_ANCHORS_FILE is deleted). Empty chain = valid
+		// (a log that has never anchored anywhere).
+		NetworkAnchors:  api.NewNetworkAnchorsHandler(anchorChainProvider(store.NewAnchorConfirmationStore(d.PgPool.DB), cfg.LogDID)),
+		AnchorsBySource: api.NewAnchorsBySourceHandler(queryDeps),
 
 		// v1.32.0 L3 — materialized walker-projection endpoints.
 		NetworkLabels:           api.NewNetworkLabelsHandler(d.WitnessLabelsFetcher),
@@ -1495,6 +1592,37 @@ func buildProtocolVersionAmendmentSource(
 // L3 fetcher adapters.
 // ────────────────────────────────────────────────────────────────
 
+// buildAnchorTargetDeclarationSource walks BP-ENTRY-ANCHOR-TARGET-V1
+// declarations (PR-4d / Tier 1.5): the on-log WHERE for each constitutional
+// anchor target. Same schema-position discipline as its sibling walkers.
+func buildAnchorTargetDeclarationSource(
+	q *indexes.PostgresQueryAPI,
+	schemaPos types.LogPosition,
+) func(ctx context.Context) ([]network.AnchorTargetDeclarationRecord, error) {
+	return func(ctx context.Context) ([]network.AnchorTargetDeclarationRecord, error) {
+		entries, err := q.QueryBySchemaRef(schemaPos)
+		if err != nil {
+			return nil, err
+		}
+		recs := make([]network.AnchorTargetDeclarationRecord, 0, len(entries))
+		for i := range entries {
+			e, err := envelope.Deserialize(entries[i].CanonicalBytes)
+			if err != nil {
+				continue
+			}
+			p, err := network.DecodeAnchorTargetDeclarationPayload(e.DomainPayload)
+			if err != nil {
+				continue
+			}
+			recs = append(recs, network.AnchorTargetDeclarationRecord{
+				EffectivePos: entries[i].Position,
+				Payload:      p,
+			})
+		}
+		return recs, nil
+	}
+}
+
 func buildWitnessEndpointDeclarationSource(
 	q *indexes.PostgresQueryAPI,
 	schemaPos types.LogPosition,
@@ -1624,8 +1752,9 @@ func buildAuthoritativeResolver(
 	labelPos, hasLabelSchema := parseSchemaEnv("LEDGER_WITNESS_LABEL_SCHEMA")
 	auditorPos, hasAuditorSchema := parseSchemaEnv("LEDGER_AUDITOR_REGISTRATION_SCHEMA")
 	amendPos, hasAmendmentSchema := parseSchemaEnv("LEDGER_AUDITOR_SCOPE_AMENDMENT_SCHEMA")
+	anchorTargetPos, hasAnchorTargetSchema := parseSchemaEnv("LEDGER_ANCHOR_TARGET_SCHEMA")
 
-	if !hasWitnessEPSchema && !hasLabelSchema && !hasAuditorSchema && !hasAmendmentSchema {
+	if !hasWitnessEPSchema && !hasLabelSchema && !hasAuditorSchema && !hasAmendmentSchema && !hasAnchorTargetSchema {
 		logger.Info("v1.33.0: AuthoritativeResolver disabled (no schema env vars set); resolver wire-up skipped")
 		return nil, nil
 	}
@@ -1696,6 +1825,25 @@ func buildAuthoritativeResolver(
 			resolver.AuditorScopeAmendmentRecords = recs
 			logger.Info("v1.33.0: AuditorScopeAmendment records loaded",
 				"count", len(recs))
+		}
+	}
+	if hasAnchorTargetSchema {
+		// PR-4d — closes #94: the FederationGraph finally has a producer.
+		// ResolvePeer's on-log branch becomes the live path; the env canary
+		// is reachable only in the genuine pre-first-declaration window
+		// (logAnchorTargetPosture says which one we're in, honestly).
+		src := buildAnchorTargetDeclarationSource(q, anchorTargetPos)
+		recs, err := src(ctx)
+		if err != nil {
+			logger.Warn("PR-4d: AnchorTargetDeclaration source initial fetch failed", "error", err)
+		} else {
+			asOf := types.LogPosition{LogDID: ourLogDID, Sequence: ^uint64(0)}
+			graph, declared, undeclared := projectAnchorTargetGraph(doc, ourLogDID, recs, asOf)
+			if graph != nil {
+				resolver.FederationGraph = *graph
+			}
+			logAnchorTargetPosture(logger, graph, declared, undeclared,
+				os.Getenv("LEDGER_PARENT_ADMISSION_URL"), time.Now())
 		}
 	}
 
@@ -2463,5 +2611,30 @@ func buildIdentityDeps(d *deps.AppDeps) api.IdentityDeps {
 		Credits:     d.CreditStore,
 		DIDResolver: legacyResolver,
 		Verifier:    registry,
+	}
+}
+
+// anchorChainProvider derives the /v1/network/anchors chain from the durable
+// read-back confirmations: one hop per parent, freshest first-seen. The
+// WitnessSetHash field is served zero — the parent's set hash at admission is
+// the parent's state, not ours; consumers fetch it live via the parent's
+// /v1/network/witnesses/* (the SDK walker re-verifies every hop regardless).
+func anchorChainProvider(s *store.AnchorConfirmationStore, logDID string) func(ctx context.Context) (api.WireAnchorChain, error) {
+	zeroSetHash := strings.Repeat("0", 64)
+	return func(ctx context.Context) (api.WireAnchorChain, error) {
+		latest, err := s.LatestPerParent(ctx)
+		if err != nil {
+			return api.WireAnchorChain{}, err
+		}
+		chain := api.WireAnchorChain{LogDID: logDID}
+		for _, c := range latest {
+			chain.Hops = append(chain.Hops, api.WireAnchorChainEntry{
+				ParentLogDID:         c.ParentLogDID,
+				WitnessSetHash:       zeroSetHash,
+				LatestAnchorSeq:      c.ParentSeq,
+				LatestAnchorTreeSize: c.AnchoredTreeSize,
+			})
+		}
+		return chain, nil
 	}
 }

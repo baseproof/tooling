@@ -16,7 +16,7 @@
 //     implementation; this one is the contract reference, not a
 //     production durability layer.
 //
-// CONCURRENCY
+// # CONCURRENCY
 //
 // Writes serialize through a single sync.Mutex (the equivocation
 // detection requires read-then-write atomicity at the (LogDID,

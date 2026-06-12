@@ -443,7 +443,6 @@ func wireConfigFromCfg(cfg *Config) wire.Config {
 		LogInfo:                     buildLogInfo(cfg),
 		NetworkPeers:                cfg.NetworkPeers,
 		NetworkMirrors:              cfg.NetworkMirrors,
-		NetworkAnchors:              cfg.NetworkAnchors,
 	}
 }
 

@@ -143,7 +143,15 @@ type EntryRow struct {
 	// one index seek to off-ledger consumers (the judicial-network
 	// SubmitGate and the auditor) that run the SDK authority engine.
 	DelegateDID string
-	Status      EntryStatus
+
+	// SourceLogDID is the anchored CHILD log's DID when this entry is a
+	// BP-ENTRY-ANCHOR-COSIGNED-HEAD-V1 cosigned anchor; "" otherwise.
+	// Projected at sequencing by store.AnchorSourceLogDID (the one
+	// extraction home, shared with the rebuild path). DISCOVERY metadata
+	// for the by-source read path (idx_anchor_source, migration 0020) —
+	// never authority; consumers re-verify from the entry bytes.
+	SourceLogDID string
+	Status       EntryStatus
 
 	// Web3ReceiptsBytes is the serialized per-signature
 	// Web3VerificationReceipt slice captured at admission
@@ -175,18 +183,23 @@ func (s *EntryStore) Insert(ctx context.Context, tx pgx.Tx, row EntryRow) error 
 	if row.DelegateDID != "" {
 		delegateDID = row.DelegateDID
 	}
+	var sourceLogDID any
+	if row.SourceLogDID != "" {
+		sourceLogDID = row.SourceLogDID
+	}
 	_, err := tx.Exec(ctx, `
 		INSERT INTO entry_index (
 			sequence_number, canonical_hash, log_time,
 			signer_did, target_root, cosignature_of, schema_ref,
-			delegate_did, status, web3_receipts
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+			delegate_did, status, web3_receipts, source_log_did
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
 		row.SequenceNumber, row.CanonicalHash[:],
 		row.LogTime, row.SignerDID,
 		row.TargetRoot, row.CosignatureOf, row.SchemaRef,
 		delegateDID,
 		int16(row.Status),
 		row.Web3ReceiptsBytes,
+		sourceLogDID,
 	)
 	if err != nil {
 		if strings.Contains(err.Error(), "unique") || strings.Contains(err.Error(), "duplicate") {
@@ -312,6 +325,10 @@ func (s *EntryStore) InsertBatch(ctx context.Context, tx pgx.Tx, rows []EntryRow
 	// partial idx_delegate_did_latest index excludes non-delegation
 	// rows.
 	delegateDIDs := make([]string, len(rows))
+	// source_log_did rides the same ""-means-NULL convention as
+	// delegate_did (NULLIF in the INSERT), so non-anchor rows stay
+	// invisible to the partial idx_anchor_source index.
+	sourceLogDIDs := make([]string, len(rows))
 	statuses := make([]int16, len(rows))
 	web3Receipts := make([][]byte, len(rows)) // nil entries land as SQL NULL
 	for i := range rows {
@@ -324,6 +341,7 @@ func (s *EntryStore) InsertBatch(ctx context.Context, tx pgx.Tx, rows []EntryRow
 		cosigs[i] = rows[i].CosignatureOf
 		schemas[i] = rows[i].SchemaRef
 		delegateDIDs[i] = rows[i].DelegateDID
+		sourceLogDIDs[i] = rows[i].SourceLogDID
 		statuses[i] = int16(rows[i].Status)
 		web3Receipts[i] = rows[i].Web3ReceiptsBytes
 	}
@@ -331,25 +349,27 @@ func (s *EntryStore) InsertBatch(ctx context.Context, tx pgx.Tx, rows []EntryRow
 		INSERT INTO entry_index (
 			sequence_number, canonical_hash, log_time,
 			signer_did, target_root, cosignature_of, schema_ref,
-			delegate_did, status, web3_receipts
+			delegate_did, status, web3_receipts, source_log_did
 		)
 		SELECT
 			sequence_number, canonical_hash, log_time,
 			signer_did, target_root, cosignature_of, schema_ref,
-			NULLIF(delegate_did, ''), status, web3_receipts
+			NULLIF(delegate_did, ''), status, web3_receipts,
+			NULLIF(source_log_did, '')
 		FROM unnest(
 			$1::bigint[], $2::bytea[], $3::timestamptz[],
 			$4::text[], $5::bytea[], $6::bytea[], $7::bytea[],
-			$8::text[], $9::smallint[], $10::bytea[]
+			$8::text[], $9::smallint[], $10::bytea[], $11::text[]
 		) AS t(
 			sequence_number, canonical_hash, log_time,
 			signer_did, target_root, cosignature_of, schema_ref,
-			delegate_did, status, web3_receipts
+			delegate_did, status, web3_receipts, source_log_did
 		)
 		ON CONFLICT (canonical_hash) WHERE status <> 2 DO NOTHING
 		RETURNING sequence_number, canonical_hash`,
 		seqs, hashes, logTimes, signers,
 		targets, cosigs, schemas, delegateDIDs, statuses, web3Receipts,
+		sourceLogDIDs,
 	)
 	if err != nil {
 		return InsertBatchResult{}, fmt.Errorf("store/entries: insert batch (n=%d): %w", len(rows), err)

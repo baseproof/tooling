@@ -352,6 +352,13 @@ type Handlers struct {
 	// public, max-age=300.
 	NetworkAnchors http.HandlerFunc
 
+	// AnchorsBySource serves GET /v1/network/anchors/by-source/{log_did} —
+	// one read-page of the cosigned-anchor entries the named CHILD log has
+	// anchored into THIS log. DISCOVERY, NOT AUTHORITY: consumers re-verify
+	// inclusion + parent quorum from the returned bytes; an anchor this
+	// projection misses fails toward alarm, never false compliance.
+	AnchorsBySource http.HandlerFunc
+
 	// NetworkLabels serves GET /v1/network/labels — materialized
 	// projection of on-log WitnessIdentityLabelV1 entries.
 	// v1.32.0 SDK adoption. NOT AUTHORITATIVE; the on-log walk
@@ -637,6 +644,9 @@ func NewServer(
 	}
 	if handlers.NetworkAnchors != nil {
 		mux.HandleFunc("GET /v1/network/anchors", handlers.NetworkAnchors)
+	}
+	if handlers.AnchorsBySource != nil {
+		mux.HandleFunc("GET /v1/network/anchors/by-source/{log_did}", handlers.AnchorsBySource)
 	}
 	if handlers.NetworkLabels != nil {
 		mux.HandleFunc("GET /v1/network/labels", handlers.NetworkLabels)

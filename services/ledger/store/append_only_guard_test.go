@@ -56,6 +56,11 @@ var appendOnlyTables = []string{
 	"tree_heads",
 	"tree_head_sigs",
 	"equivocation_proofs",
+	// anchor_confirmations: verified_at is FIRST-SEEN and immutable (the
+	// lazy-fresh defense's persistence half) — a refreshable row would let
+	// one stale anchor read permanently fresh. INSERT ON CONFLICT DO NOTHING
+	// is the only legal write.
+	"anchor_confirmations",
 }
 
 // TestAppendOnlyGuard pins the H4 contract: no Go file in the
