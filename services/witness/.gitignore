@@ -1,0 +1,3 @@
+# Prebuilt one-shot binaries (go build output) — never committed.
+/gen-fixtures
+/genesis-endorse
