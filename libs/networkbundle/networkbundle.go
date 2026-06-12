@@ -1,14 +1,24 @@
-// Package networkbundle builds the SDK's protocol.NetworkBundle — the "name the
-// network, gather the proof" handle — from a genesis bootstrap document. It is
-// purely agnostic platform logic (only SDK types), so it lives in the tooling
-// platform where the unified CLI and the platform e2e both consume it, rather
-// than in any one domain network.
+// Package networkbundle is the single home of "the network bundle" — both of
+// its halves:
 //
-// The NetworkBundle carries the network's trust root (network id, genesis witness
-// DIDs, quorum, bootstrap hash), the derived witness key set, the read endpoint,
-// and the per-network governance vocabulary. The genesis bootstrap itself is NOT
-// embedded — it is fetched + hash-verified at use — so the bundle stays small and
-// static.
+//   - The WIRE document (manifest.go): the baseproof-network-manifest/v1
+//     Manifest served at GET /v1/network/bundle and published on-log — how to
+//     consume ONE exchange on ONE network (identity by reference, endpoints,
+//     admission posture, roles, datatypes, the operation DAG). Network-specific
+//     capability lives HERE, as data; clients materialize behavior from it.
+//     Relocated from the judicial-network's netmanifest package so the platform
+//     ledger and every domain composer serve the SAME schema (the format string
+//     is unchanged).
+//
+//   - The TRUST-OBJECT assembly (this file): Build constructs the SDK's
+//     in-memory protocol.NetworkBundle — the "name the network, gather the
+//     proof" handle — from a genesis bootstrap document. The genesis bootstrap
+//     itself is NOT embedded — it is fetched + hash-verified at use — so the
+//     handle stays small and static.
+//
+// Purely agnostic platform logic (SDK + libs/policy + libs/prereq types only),
+// so it lives in the tooling platform where the unified CLI, the platform
+// ledger, and every domain network consume it.
 package networkbundle
 
 import (
