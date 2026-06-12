@@ -36,6 +36,7 @@ import (
 	"github.com/baseproof/baseproof/crypto/signatures"
 	"github.com/baseproof/baseproof/network"
 
+	"github.com/baseproof/tooling/libs/rotationdraft"
 	"github.com/baseproof/tooling/services/witness/internal/witkey"
 )
 
@@ -43,20 +44,54 @@ func main() {
 	bootstrap := flag.String("bootstrap", "", "path to the UNENDORSED constitution (network-bootstrap doc) to endorse (REQUIRED)")
 	key := flag.String("key", os.Getenv("WITNESS_KEY_FILE"), "path to this endorser's secp256k1 key PEM (witkey) (REQUIRED; default $WITNESS_KEY_FILE)")
 	kind := flag.String("kind", kindGenesisWitness,
-		`what is being endorsed: "genesis-witness" (default — this host is a genesis `+
-			`witness endorsing the constitution) or "genesis-auditor" (this host is a `+
-			"declared genesis auditor; requires -auditor-did). The payload kind is part "+
-			"of what is SIGNED, so an unknown kind refuses rather than guessing — new "+
-			"consent kinds (e.g. rotation consent) are added here explicitly, never "+
-			"smuggled through an old one.")
+		`what is being signed: "genesis-witness" (default — this host is a genesis `+
+			`witness endorsing the constitution), "genesis-auditor" (a declared genesis `+
+			`auditor; requires -auditor-did), or "rotation-consent" (this host consents `+
+			`to a relayed -draft witness rotation). The payload kind is part of what is `+
+			`SIGNED, so an unknown kind refuses rather than smuggling through an old one.`)
 	auditorDID := flag.String("auditor-did", "",
 		"the endorsing auditor's registered DID (genesis-auditor kind only — an "+
 			"auditor DID is not derivable from its key, so it must be stated and is "+
 			"checked against the constitution's genesis_auditors declaration)")
 	out := flag.String("out", "", "path to write the endorsement JSON (default: stdout)")
+	draft := flag.String("draft", "", "path to a relayed rotation-draft (REQUIRED for -kind rotation-consent)")
 	flag.Parse()
 
-	if *bootstrap == "" || *key == "" {
+	if *key == "" {
+		fmt.Fprintln(os.Stderr, "usage: genesis-endorse -key <key.pem> { -kind genesis-witness|genesis-auditor -bootstrap <unendorsed.json> [-auditor-did did:…] | -kind rotation-consent -draft <rotation-draft.json> } [-out <file>]")
+		os.Exit(2)
+	}
+
+	// rotation-consent is the on-going-ceremony leg: it signs a relayed DRAFT
+	// (not the genesis constitution) and emits a Consent (not a
+	// GenesisEndorsement), so it branches before the genesis path.
+	if *kind == kindRotationConsent {
+		if *draft == "" {
+			fmt.Fprintln(os.Stderr, "usage: genesis-endorse -kind rotation-consent -key <key.pem> -draft <rotation-draft.json> [-out <consent.json>]")
+			os.Exit(2)
+		}
+		priv, err := witkey.LoadPEM(*key)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "genesis-endorse: load key %s: %v\n", *key, err)
+			os.Exit(1)
+		}
+		consent, did, err := signRotationConsent(priv, *draft)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "genesis-endorse: %v\n", err)
+			os.Exit(1)
+		}
+		if *out == "" {
+			body, _ := json.MarshalIndent(consent, "", "  ")
+			fmt.Println(string(body))
+		} else if err := rotationdraft.Save(*out, consent); err != nil {
+			fmt.Fprintf(os.Stderr, "genesis-endorse: write %s: %v\n", *out, err)
+			os.Exit(1)
+		}
+		fmt.Fprintf(os.Stderr, "genesis-endorse: rotation-consent by %s over new_set_hash %s\n", did, consent.NewSetHashHex)
+		return
+	}
+
+	if *bootstrap == "" {
 		fmt.Fprintln(os.Stderr, "usage: genesis-endorse -bootstrap <unendorsed.json> -key <key.pem> [-kind genesis-witness|genesis-auditor] [-auditor-did did:…] [-out <endorsement.json>]")
 		os.Exit(2)
 	}
@@ -86,8 +121,9 @@ func main() {
 // consent kind (e.g. rotation consent) is an explicit addition here, never a
 // silent fall-through into the wrong payload.
 const (
-	kindGenesisWitness = "genesis-witness"
-	kindGenesisAuditor = "genesis-auditor"
+	kindGenesisWitness  = "genesis-witness"
+	kindGenesisAuditor  = "genesis-auditor"
+	kindRotationConsent = "rotation-consent"
 )
 
 // endorse loads the endorser's key + the unendorsed constitution, dispatches on
