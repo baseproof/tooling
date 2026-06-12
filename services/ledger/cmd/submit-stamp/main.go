@@ -41,7 +41,7 @@ nonce changes the hash that needs to be matched.
 package main
 
 import (
-	"bytes"
+	"context"
 	"crypto/ecdsa"
 	"crypto/sha256"
 	"encoding/hex"
@@ -61,6 +61,7 @@ import (
 	sdkdid "github.com/baseproof/baseproof/did"
 	"github.com/baseproof/baseproof/types"
 
+	"github.com/baseproof/tooling/libs/cli"
 	"github.com/baseproof/tooling/services/ledger/internal/clienttls"
 	"github.com/baseproof/tooling/services/ledger/internal/retryhttp"
 )
@@ -146,15 +147,15 @@ func main() {
 		return
 	}
 
-	body, status, err := postAndRead(*ledgerURL+"/v1/entries", *token, wire)
+	// POST through the shared agnostic transport (libs/cli.PostEntry): the same
+	// /v1/entries write the peer tools use, but returning the RAW 202 SCT body so
+	// this tool can decode + verify the SCT below. A non-202 surfaces the ledger's
+	// admission verdict verbatim (Mode A token / Mode B stamp refusal).
+	body, err := cli.PostEntry(context.Background(), hc, *ledgerURL, *token, wire)
 	if err != nil {
 		log.Fatalf("submit-stamp: %v", err)
 	}
-	fmt.Printf("HTTP %d %s\n", status, http.StatusText(status))
-	if status != http.StatusAccepted {
-		fmt.Printf("body: %s\n", body)
-		os.Exit(1)
-	}
+	fmt.Println("HTTP 202 Accepted")
 	printSCTResponse(body, *ledgerDID)
 }
 
@@ -390,23 +391,3 @@ func buildModeBWire(
 	return nil, fmt.Errorf("submit-stamp: nonce exhausted at %d iterations (difficulty=%d too high?)", maxIter, difficulty)
 }
 
-// postAndRead POSTs wire bytes and returns the response body and
-// status. Returns a transport error only on actual transport failure;
-// the caller decides what to do with non-2xx statuses.
-func postAndRead(url, token string, wire []byte) ([]byte, int, error) {
-	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(wire))
-	if err != nil {
-		return nil, 0, err
-	}
-	req.Header.Set("Content-Type", "application/octet-stream")
-	if token != "" {
-		req.Header.Set("Authorization", "Bearer "+token)
-	}
-	resp, err := hc.Do(req)
-	if err != nil {
-		return nil, 0, err
-	}
-	defer func() { _ = resp.Body.Close() }()
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
-	return body, resp.StatusCode, nil
-}

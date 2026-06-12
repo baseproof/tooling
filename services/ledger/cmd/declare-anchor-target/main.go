@@ -32,14 +32,12 @@
 package main
 
 import (
-	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"flag"
 	"fmt"
-	"io"
 	"log"
-	"net/http"
 	"os"
 	"strings"
 	"time"
@@ -54,6 +52,7 @@ import (
 	"github.com/baseproof/baseproof/types"
 	secp "github.com/decred/dcrd/dcrec/secp256k1/v4"
 
+	"github.com/baseproof/tooling/libs/cli"
 	"github.com/baseproof/tooling/services/ledger/internal/retryhttp"
 )
 
@@ -137,26 +136,18 @@ func main() {
 		log.Fatalf("declare-anchor-target: serialize: %v", err)
 	}
 
+	// One-shot POST through the shared agnostic transport (libs/cli): the
+	// hand-rolled /v1/entries write lived in every direct-to-ledger tool; this
+	// is the SubmitWire half (POST → canonical_hash; a non-202 surfaces the
+	// ledger's admission verdict verbatim). retryhttp keeps the startup-race
+	// resilience the peer CLIs share.
 	hc := retryhttp.Client(30*time.Second, nil)
-	req, err := http.NewRequest(http.MethodPost, strings.TrimSuffix(*ledgerURL, "/")+"/v1/entries", bytes.NewReader(wire))
+	hash, err := cli.SubmitWire(context.Background(), hc, *ledgerURL, *token, wire)
 	if err != nil {
-		log.Fatalf("declare-anchor-target: build request: %v", err)
+		log.Fatalf("declare-anchor-target: %v", err)
 	}
-	req.Header.Set("Content-Type", "application/octet-stream")
-	if *token != "" {
-		req.Header.Set("Authorization", "Bearer "+*token)
-	}
-	resp, err := hc.Do(req)
-	if err != nil {
-		log.Fatalf("declare-anchor-target: POST: %v", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-	if resp.StatusCode != http.StatusAccepted {
-		log.Fatalf("declare-anchor-target: ledger returned %d: %s", resp.StatusCode, body)
-	}
-	fmt.Printf("declare-anchor-target: ACCEPTED\n  target    = %s\n  parent    = %s\n  admission = %s\n  read      = %s\n  signer    = %s\n",
-		*targetID, *targetLogDID, *admissionURL, *readURL, signerDID)
+	fmt.Printf("declare-anchor-target: ACCEPTED (canonical_hash=%s)\n  target    = %s\n  parent    = %s\n  admission = %s\n  read      = %s\n  signer    = %s\n",
+		hash, *targetID, *targetLogDID, *admissionURL, *readURL, signerDID)
 	fmt.Println("  NEXT: the ledger's walker projects this at boot (LEDGER_ANCHOR_TARGET_SCHEMA); the env parent canary can then be retired.")
 }
 

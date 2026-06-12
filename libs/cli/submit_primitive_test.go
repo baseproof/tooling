@@ -88,6 +88,52 @@ func TestSubmitWireAndWait_LedgerRejectionSurfaced(t *testing.T) {
 	}
 }
 
+func TestPostEntry_ReturnsFullSCTBody(t *testing.T) {
+	// PostEntry hands back the WHOLE 202 SCT — the fields a verifier (submit-stamp)
+	// needs — not just the canonical_hash SubmitWire extracts.
+	full := map[string]any{
+		"version": 1, "signer_did": "did:test:ledger", "log_did": "did:test:log",
+		"canonical_hash": "ab12", "signature": "deadbeef",
+	}
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/entries" {
+			http.NotFound(w, r)
+			return
+		}
+		gotAuth = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusAccepted)
+		_ = json.NewEncoder(w).Encode(full)
+	}))
+	defer srv.Close()
+
+	body, err := PostEntry(context.Background(), srv.Client(), srv.URL+"/", "tok-2", []byte("wire"))
+	if err != nil {
+		t.Fatalf("PostEntry: %v", err)
+	}
+	var got map[string]any
+	if jErr := json.Unmarshal(body, &got); jErr != nil {
+		t.Fatalf("PostEntry returned a non-JSON body: %v", jErr)
+	}
+	if got["signature"] != "deadbeef" || got["log_did"] != "did:test:log" {
+		t.Fatalf("PostEntry dropped SCT fields that SubmitWire discards: %v", got)
+	}
+	if gotAuth != "Bearer tok-2" {
+		t.Fatalf("token not sent as Bearer: %q", gotAuth)
+	}
+}
+
+func TestPostEntry_RejectionSurfaced(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte("mode-B stamp invalid"))
+	}))
+	defer srv.Close()
+	if _, err := PostEntry(context.Background(), srv.Client(), srv.URL, "", []byte("w")); err == nil || !strings.Contains(err.Error(), "mode-B stamp invalid") {
+		t.Fatalf("a non-202 must surface the ledger's verdict verbatim, got: %v", err)
+	}
+}
+
 func readAll(r *http.Request) ([]byte, error) {
 	defer r.Body.Close()
 	buf := make([]byte, 0, 256)

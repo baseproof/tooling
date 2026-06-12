@@ -86,8 +86,10 @@ services:
 
   ledger-node-a:
     build:
-      context: ../../
-      dockerfile: scripts/local/Dockerfile
+      # Repo-root context so the Dockerfile can COPY the sibling libs/ module
+      # (ledger's `replace => ../../libs` target). Same shape as services/witness.
+      context: ../../../../
+      dockerfile: services/ledger/scripts/local/Dockerfile
     image: ledger:integration
     container_name: baseproof-int-ledger-node-a
     environment:
