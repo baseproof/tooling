@@ -52,10 +52,10 @@ func runAssemble(args []string) {
 		log.Fatalf("genesis-ceremony assemble: read %s: %v", *unendorsed, err)
 	}
 	var doc network.BootstrapDocument
-	if err := json.Unmarshal(raw, &doc); err != nil {
+	if err = json.Unmarshal(raw, &doc); err != nil {
 		log.Fatalf("genesis-ceremony assemble: parse %s: %v", *unendorsed, err)
 	}
-	if _, err := doc.IDs(); err != nil {
+	if _, err = doc.IDs(); err != nil {
 		log.Fatalf("genesis-ceremony assemble: %s does not validate: %v", *unendorsed, err)
 	}
 

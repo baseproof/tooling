@@ -69,6 +69,21 @@ func runBuild(args []string) {
 			"anchor of this network's heads (e.g. 24h). 0 = no commitment. Bound into "+
 			"the NetworkID; the ledger derives its anchor-publisher cadence from it "+
 			"and auditors monitor it (network.CheckAnchoring).")
+	anchoringTargets := fs.String("anchoring-targets", "",
+		"comma-separated parent NetworkIDs (64 lowercase hex each) — the "+
+			"constitutional corroborator set: WHICH networks may anchor this one. "+
+			"Content-addressed to each parent's constitution, so the set survives "+
+			"the parents' witness rotations and endpoint churn and cannot be "+
+			"re-pointed post-genesis (changing WHICH is changing this network's "+
+			"identity). The tool sorts the list (set semantics — flag order does "+
+			"not change the NetworkID) and rejects duplicates; requires "+
+			"-anchoring-max-interval. WHERE the targets live is on-log, amendable "+
+			"state (BP-ENTRY-ANCHOR-TARGET-V1), never constitutional.")
+	anchoringMinDistinct := fs.Uint("anchoring-min-distinct", 0,
+		"minimum DISTINCT corroborator targets that must each hold a fresh anchor "+
+			"for the commitment to be satisfied (the residual defense's diversity "+
+			"floor). Required with -anchoring-targets; must be 1..len(targets). "+
+			"Pin slack absorbs parent churn (e.g. 4 targets, require 2).")
 	out := fs.String("out", "unendorsed.json",
 		"path to write the UNENDORSED constitution")
 	_ = fs.Parse(args)
@@ -115,9 +130,13 @@ func runBuild(args []string) {
 		log.Fatalf("genesis-ceremony build: -auditor-endorsement-policy=require with no -genesis-auditors is unsatisfiable")
 	}
 
+	anchoring, aErr := anchoringPolicyFromFlag(*anchoringMaxInterval, *anchoringTargets, *anchoringMinDistinct)
+	if aErr != nil {
+		log.Fatalf("genesis-ceremony build: %v", aErr)
+	}
 	doc := buildBootstrapDoc(*logDID, *networkName, *gating, *endorsementPolicy,
 		dids, quorumK, *admissionAuthority, uint8(*minSignatures), auditors, effectiveAuditorPolicy,
-		anchoringPolicyFromFlag(*anchoringMaxInterval))
+		anchoring)
 
 	// Validate + derive the identity NOW: the NetworkID is fixed by these
 	// canonical bytes — the ceremony signs it, so it must be final and printable

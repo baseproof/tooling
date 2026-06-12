@@ -24,6 +24,7 @@ package main
 import (
 	"crypto/ecdsa"
 	"encoding/hex"
+	"strings"
 	"testing"
 	"time"
 
@@ -205,9 +206,12 @@ func TestCeremony_AnchoringCommitment_NetworkIDBound(t *testing.T) {
 	_, wd := mintWitnessIdentity(t)
 	base := buildBootstrapDoc("did:web:ceremony.example", "anchored-net", "require", "require",
 		[]string{wd}, 1, "0x0123456789abcdef0123456789abcdef01234567", 1, nil, "", nil)
+	policy, err := anchoringPolicyFromFlag(24*time.Hour, "", 0)
+	if err != nil {
+		t.Fatalf("interval-only policy: %v", err)
+	}
 	anchored := buildBootstrapDoc("did:web:ceremony.example", "anchored-net", "require", "require",
-		[]string{wd}, 1, "0x0123456789abcdef0123456789abcdef01234567", 1, nil, "",
-		anchoringPolicyFromFlag(24*time.Hour))
+		[]string{wd}, 1, "0x0123456789abcdef0123456789abcdef01234567", 1, nil, "", policy)
 
 	if anchored.GenesisAnchoring == nil || anchored.GenesisAnchoring.MaxIntervalSeconds != 86400 {
 		t.Fatalf("anchoring flag did not round-trip: %+v", anchored.GenesisAnchoring)
@@ -223,7 +227,76 @@ func TestCeremony_AnchoringCommitment_NetworkIDBound(t *testing.T) {
 	if idsBase.NetworkID == idsAnchored.NetworkID {
 		t.Fatal("the anchoring commitment did NOT change the NetworkID — it is not canonical-bytes material, so it could be stripped post-genesis")
 	}
-	if p := anchoringPolicyFromFlag(0); p != nil {
-		t.Fatalf("zero interval must emit no commitment, got %+v", p)
+	if p, err := anchoringPolicyFromFlag(0, "", 0); err != nil || p != nil {
+		t.Fatalf("zero interval must emit no commitment, got %+v err=%v", p, err)
+	}
+}
+
+// TestCeremony_AnchoringTargets pins the Tier-1 producer mapping
+// (-anchoring-targets / -anchoring-min-distinct → GenesisAnchoringPolicy):
+//
+//   - the corroborator set binds the NetworkID (WHICH is identity);
+//   - flag ORDER is not operator input — the tool sorts, so the same set in
+//     any order mints the SAME NetworkID (the SDK's strictly-ascending
+//     canonical-array rule, round-tripped);
+//   - duplicates and targets-without-an-interval are refused at the flag
+//     boundary; out-of-range min-distinct is refused by the SDK at IDs().
+func TestCeremony_AnchoringTargets(t *testing.T) {
+	_, wd := mintWitnessIdentity(t)
+	t1 := strings.Repeat("1", 64)
+	t2 := strings.Repeat("2", 64)
+	mint := func(policy *network.GenesisAnchoringPolicy) network.BootstrapDocument {
+		return buildBootstrapDoc("did:web:ceremony.example", "targeted-net", "require", "require",
+			[]string{wd}, 1, "0x0123456789abcdef0123456789abcdef01234567", 1, nil, "", policy)
+	}
+
+	ordered, err := anchoringPolicyFromFlag(24*time.Hour, t1+","+t2, 1)
+	if err != nil {
+		t.Fatalf("ordered targets: %v", err)
+	}
+	reversed, err := anchoringPolicyFromFlag(24*time.Hour, t2+","+t1, 1)
+	if err != nil {
+		t.Fatalf("reversed targets: %v", err)
+	}
+	intervalOnly, err := anchoringPolicyFromFlag(24*time.Hour, "", 0)
+	if err != nil {
+		t.Fatalf("interval-only: %v", err)
+	}
+
+	idsOrdered, err := mint(ordered).IDs()
+	if err != nil {
+		t.Fatalf("targets constitution does not validate: %v", err)
+	}
+	idsReversed, err := mint(reversed).IDs()
+	if err != nil {
+		t.Fatalf("reversed-targets constitution does not validate: %v", err)
+	}
+	idsIntervalOnly, err := mint(intervalOnly).IDs()
+	if err != nil {
+		t.Fatalf("interval-only constitution does not validate: %v", err)
+	}
+
+	if idsOrdered.NetworkID != idsReversed.NetworkID {
+		t.Fatal("flag order changed the NetworkID — the tool failed to canonicalize the target set")
+	}
+	if idsOrdered.NetworkID == idsIntervalOnly.NetworkID {
+		t.Fatal("the corroborator set did NOT change the NetworkID — WHICH is not identity-bound")
+	}
+
+	// Flag-boundary refusals.
+	if _, err := anchoringPolicyFromFlag(24*time.Hour, t1+","+t1, 1); err == nil {
+		t.Fatal("duplicate target accepted — the corroborator set must be a set")
+	}
+	if _, err := anchoringPolicyFromFlag(0, t1, 1); err == nil {
+		t.Fatal("targets without -anchoring-max-interval accepted — there is no commitment to scope")
+	}
+
+	// SDK-boundary refusal: quota outside 1..len(targets) cannot mint.
+	overQuota, err := anchoringPolicyFromFlag(24*time.Hour, t1+","+t2, 3)
+	if err != nil {
+		t.Fatalf("flag mapping must pass quota through to the SDK: %v", err)
+	}
+	if _, err := mint(overQuota).IDs(); err == nil {
+		t.Fatal("min-distinct > len(targets) minted a NetworkID — the SDK range rule did not round-trip")
 	}
 }

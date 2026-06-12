@@ -42,6 +42,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -176,18 +177,46 @@ func buildBootstrapDoc(logDID, networkName, gating, endorsementPolicy string, ge
 	}
 }
 
-// anchoringPolicyFromFlag turns the -anchoring-max-interval duration into the
-// constitutional commitment (0 ⇒ none). The SDK's validate() re-asserts
-// mode=require + a positive bound inside doc.IDs(), so a malformed commitment
-// can never be locked into a NetworkID.
-func anchoringPolicyFromFlag(maxInterval time.Duration) *network.GenesisAnchoringPolicy {
+// anchoringPolicyFromFlag turns the anchoring flag trio into the
+// constitutional commitment (interval 0 with nothing else ⇒ none) — the ONE
+// home for the producer-side mapping, shared by build and dev.
+//
+// Targets (-anchoring-targets, CSV of parent NetworkIDs) are the corroborator
+// SET (WHICH networks may anchor us): element order is not operator input, so
+// the tool SORTS the parsed list into the strictly-ascending form the SDK's
+// canonical-bytes rule demands — two operators with the same set in different
+// flag order mint the SAME NetworkID. Duplicates are REJECTED, not silently
+// collapsed (a pasted-twice target is a ceremony input error; the SDK's
+// strictly-ascending validate() would refuse it post-sort anyway). Nothing
+// else is normalized: case, length, and hex validity stay the SDK's rules,
+// re-asserted inside doc.IDs() — this tool cannot mint what the SDK refuses,
+// and cannot quietly rewrite what the operator typed.
+//
+// minDistinct passes through untouched: it is canonical-bytes material with no
+// sensible default (the SDK demands 1 ≤ minDistinct ≤ len(targets) when
+// targets exist, and rejects a non-zero value without targets as
+// unsatisfiable).
+func anchoringPolicyFromFlag(maxInterval time.Duration, targetsCSV string, minDistinct uint) (*network.GenesisAnchoringPolicy, error) {
+	targets := splitDIDs(targetsCSV) // same CSV discipline as -witness-dids: trim, drop empties
 	if maxInterval <= 0 {
-		return nil
+		if len(targets) > 0 || minDistinct != 0 {
+			return nil, fmt.Errorf("-anchoring-targets/-anchoring-min-distinct without -anchoring-max-interval: there is no anchoring commitment to scope")
+		}
+		return nil, nil
 	}
-	return &network.GenesisAnchoringPolicy{
+	sort.Strings(targets)
+	policy := &network.GenesisAnchoringPolicy{
 		Mode:               network.GenesisEndorsementRequire,
 		MaxIntervalSeconds: uint64(maxInterval / time.Second),
+		MinDistinctTargets: minDistinct,
 	}
+	for i, t := range targets {
+		if i > 0 && t == targets[i-1] {
+			return nil, fmt.Errorf("-anchoring-targets: duplicate target %q (the corroborator set is a set)", t)
+		}
+		policy.Targets = append(policy.Targets, network.AnchorTarget{NetworkID: t})
+	}
+	return policy, nil
 }
 
 // resolveGenesisQuorumK turns the -quorum flag into the constitutional

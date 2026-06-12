@@ -300,7 +300,7 @@ func main() {
 		"cmd/ledger-reader/main.go":            true,
 		"cmd/rebuild-tiles/main.go":            true,
 		"cmd/seed-session/main.go":             true,
-		"cmd/genesis-ceremony/main.go":          true,
+		"cmd/genesis-ceremony/main.go":         true,
 		"cmd/submit-stamp/main.go":             true,
 		"cmd/ledger/boot/teardown/teardown.go": true,
 	}

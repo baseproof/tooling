@@ -76,6 +76,13 @@ func runDev(args []string) {
 			"network.LoadVerifiedBootstrap before it is written.")
 	anchoringMaxInterval := fs.Duration("anchoring-max-interval", 0,
 		"constitutional ANCHORING commitment bound (see `genesis-ceremony build -h`); 0 = none")
+	anchoringTargets := fs.String("anchoring-targets", "",
+		"comma-separated parent NetworkIDs — the constitutional corroborator set "+
+			"(see `genesis-ceremony build -h`); sorted, duplicates rejected; "+
+			"requires -anchoring-max-interval")
+	anchoringMinDistinct := fs.Uint("anchoring-min-distinct", 0,
+		"minimum distinct fresh targets satisfying the commitment "+
+			"(see `genesis-ceremony build -h`); required with -anchoring-targets")
 	_ = fs.Parse(args)
 
 	if *witnessCount < 1 {
@@ -157,7 +164,11 @@ func runDev(args []string) {
 			ifGenerated(ledgerGen), *outLedgerKey, ledgerDID)
 	}
 
-	doc := buildBootstrapDoc(*logDID, *networkName, *gating, *endorsementPolicy, genesisDIDs, quorumK, genesisAuthorityAddr, uint8(*minSignatures), nil, "", anchoringPolicyFromFlag(*anchoringMaxInterval))
+	anchoring, aErr := anchoringPolicyFromFlag(*anchoringMaxInterval, *anchoringTargets, *anchoringMinDistinct)
+	if aErr != nil {
+		log.Fatalf("genesis-ceremony dev: %v", aErr)
+	}
+	doc := buildBootstrapDoc(*logDID, *networkName, *gating, *endorsementPolicy, genesisDIDs, quorumK, genesisAuthorityAddr, uint8(*minSignatures), nil, "", anchoring)
 	// mintServedBootstrap runs the SDK validation (doc.IDs()), the genesis
 	// self-endorsement ceremony when the policy requires it, and the
 	// first-contact round-trip (network.LoadVerifiedBootstrap) over the EXACT
