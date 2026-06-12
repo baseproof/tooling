@@ -220,7 +220,30 @@ Step 2:  baseproof network bundle publish --manifest m.json --anchor <log@seq> -
 	bpf.Duration("timeout", 30*time.Second, "per-request HTTP timeout")
 	bundle.AddCommand(bGet, bVerify, bPublish)
 
-	n.AddCommand(add, list, use, show, remove, bundle)
+	rotation := &cobra.Command{Use: "rotation", Short: "Witness-set rotation ceremony (draft → relay for consent → finalize → submit)"}
+	rDraft := &cobra.Command{Use: "draft", Short: "Draft a rotation against the live current set", Args: cobra.NoArgs, RunE: forward(cli.RunNetwork, "rotation", "draft")}
+	rdf := rDraft.Flags()
+	rdf.String("bundle", "", "client bundle JSON (else --network or the active network)")
+	rdf.StringP("network", "n", "", "stored network name (else $BASEPROOF_NETWORK, else the active network)")
+	rdf.String("new-set", "", "comma-separated did:key witnesses for the NEW set — REQUIRED")
+	rdf.String("out", "", "write the rotation-draft here — REQUIRED")
+	rdf.StringP("output", "o", "table", "output format: table|json")
+	rdf.Duration("timeout", 15*time.Second, "per-request HTTP timeout")
+	rFin := &cobra.Command{Use: "finalize", Short: "Merge a draft + collected consents into the on-log rotation", Args: cobra.NoArgs, RunE: forward(cli.RunNetwork, "rotation", "finalize")}
+	rff := rFin.Flags()
+	rff.String("draft", "", "the rotation-draft — REQUIRED")
+	rff.String("consents", "", "comma-separated consent files, ANY order (membership routing buckets them) — REQUIRED")
+	rff.String("out", "", "write the finalized rotation here — REQUIRED")
+	rff.StringP("output", "o", "table", "output format: table|json")
+	rSub := &cobra.Command{Use: "submit <finalized-rotation.json>", Short: "Submit the finalized rotation to the network's rotation door", Args: cobra.ExactArgs(1), RunE: forward(cli.RunNetwork, "rotation", "submit")}
+	rsf := rSub.Flags()
+	rsf.String("bundle", "", "client bundle JSON (else --network or the active network)")
+	rsf.StringP("network", "n", "", "stored network name (else $BASEPROOF_NETWORK, else the active network)")
+	rsf.StringP("output", "o", "table", "output format: table|json")
+	rsf.Duration("timeout", 30*time.Second, "per-request HTTP timeout")
+	rotation.AddCommand(rDraft, rFin, rSub)
+
+	n.AddCommand(add, list, use, show, remove, bundle, rotation)
 	return n
 }
 

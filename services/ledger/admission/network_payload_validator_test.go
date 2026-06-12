@@ -307,30 +307,52 @@ func validWitnessRotation(t *testing.T) []byte {
 	return b
 }
 
-func TestVerifyNetworkPayloadEntry_WitnessRotation_KindGated(t *testing.T) {
-	// A structurally valid rotation passes the firewall (trust is
-	// ProcessRotation's job, not admission's).
-	ok := &envelope.Entry{DomainPayload: validWitnessRotation(t)}
-	if err := admission.VerifyNetworkPayloadEntry(ok); err != nil {
-		t.Fatalf("valid rotation must pass the structural gate: %v", err)
-	}
-
-	// Kind-matching but structurally broken: refused BEFORE sequencing —
-	// zero set hash is the SDK's named violation.
-	var probe map[string]any
-	if err := json.Unmarshal(validWitnessRotation(t), &probe); err != nil {
-		t.Fatal(err)
-	}
-	probe["current_set_hash"] = strings.Repeat("00", 32)
-	broken, _ := json.Marshal(probe)
-	err := admission.VerifyNetworkPayloadEntry(&envelope.Entry{DomainPayload: broken})
+// D1 — the AUTHORSHIP gate: an externally-submitted rotation record is
+// refused OUTRIGHT, even when perfectly well-formed. The rebuild contract
+// decides this: witness_sets is a cache of the log, and the only legitimate
+// on-log author is the rotation door's appender (which bypasses admission by
+// construction) — so every sequenced rotation record is authoritative and a
+// log rebuild never needs an off-log allowlist.
+func TestVerifyNetworkPayloadEntry_WitnessRotation_AuthorshipGate(t *testing.T) {
+	// A WELL-FORMED rotation: still refused, with the named rejection that
+	// points the operator at the single intent entry point.
+	err := admission.VerifyNetworkPayloadEntry(&envelope.Entry{DomainPayload: validWitnessRotation(t)})
 	if !errors.Is(err, admission.ErrNetworkPayloadInvalid) {
-		t.Fatalf("a kind-matching invalid rotation must refuse with the typed sentinel: %v", err)
+		t.Fatalf("a well-formed external rotation must refuse with the typed sentinel: %v", err)
+	}
+	if !strings.Contains(err.Error(), "authored only by the rotation door") ||
+		!strings.Contains(err.Error(), "/v1/network/rotation") {
+		t.Fatalf("the rejection must name the authorship rule and the intent entry point: %v", err)
 	}
 
-	// The one-compare contract: a non-rotation payload carrying any other
-	// kind string is untouched by this case.
+	// A malformed rotation-kind payload: the same authorship refusal (the
+	// kind alone decides; no decode work is spent on a refused class).
+	bad := []byte(`{"kind":"BP-ENTRY-WITNESS-ROTATION-PAYLOAD-V1"}`)
+	if err := admission.VerifyNetworkPayloadEntry(&envelope.Entry{DomainPayload: bad}); !errors.Is(err, admission.ErrNetworkPayloadInvalid) {
+		t.Fatalf("a malformed rotation-kind payload must refuse: %v", err)
+	}
+
+	// The one-compare contract: any other kind passes through untouched.
 	if err := admission.VerifyNetworkPayloadEntry(&envelope.Entry{DomainPayload: []byte(`{"kind":"something-else","x":1}`)}); err != nil {
 		t.Fatalf("non-rotation kinds must pass through: %v", err)
+	}
+}
+
+// E1 — the one-compare claim, measured: for a non-rotation payload the
+// rotation case adds NO work beyond the pre-existing kind probe. Pinned as
+// an allocation ceiling (the probe's json.Unmarshal dominates; the rotation
+// case is a string compare on the already-decoded kind). This assertion
+// joins #102's perf gate (criterion 1) when that suite lands — until then it
+// fails here if anyone makes the non-matching path allocate.
+func TestVerifyNetworkPayloadEntry_NonRotationOverhead_OneCompare(t *testing.T) {
+	entry := &envelope.Entry{DomainPayload: []byte(`{"kind":"unrelated-kind","payload":"x"}`)}
+	allocs := testing.AllocsPerRun(2000, func() {
+		_ = admission.VerifyNetworkPayloadEntry(entry)
+	})
+	// The kind probe itself costs a handful of allocations (one Unmarshal
+	// into a one-field struct). Anything beyond ~8 means a refused-class
+	// decode leaked onto the hot path.
+	if allocs > 8 {
+		t.Fatalf("non-rotation path allocates %.0f/op — the rotation case must stay one compare", allocs)
 	}
 }

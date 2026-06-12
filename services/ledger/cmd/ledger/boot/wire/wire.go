@@ -1231,6 +1231,7 @@ func composeHandlers(
 		NetworkIdentity:    buildNetworkIdentityHandler(cfg.GenesisBootstrapDocument, d.Logger),
 		NetworkMirrors:     api.NewNetworkMirrorsHandler(cfg.NetworkMirrors),
 		NetworkBundle:      networkBundleHandler,
+		NetworkRotation:    rotationDoorHandler(d),
 		WitnessesCurrent:   api.NewWitnessesCurrentHandler(witnessHistoryFetcher),
 		WitnessesBySetHash: api.NewWitnessesBySetHashHandler(witnessHistoryFetcher),
 		WitnessesAtSeq:     api.NewWitnessesAtSeqHandler(witnessHistoryFetcher),
@@ -1282,6 +1283,17 @@ func buildNetworkBootstrapHandler(doc network.BootstrapDocument) (http.HandlerFu
 // graph's siblings, and the admission posture. nil on a pre-bootstrap node
 // (route unmounted); a compose/validate failure — including a ManifestAnchor
 // configured without a PublicURL to resolve it from — is boot-fatal.
+// rotationDoorHandler mounts POST /v1/network/rotation onto the single
+// ProcessRotation chokepoint. d.RotationHandler is nil when the rotation
+// pipeline is unwired (dev/integration) — the door is then simply not
+// served, matching the fail-closed posture of the rest of the surface.
+func rotationDoorHandler(d *deps.AppDeps) http.Handler {
+	if d.RotationHandler == nil {
+		return nil
+	}
+	return api.NewRotationHandler(d.RotationHandler)
+}
+
 func buildNetworkBundleHandler(cfg Config, logger *slog.Logger) (http.Handler, error) {
 	epoch := uint64(0)
 	if cfg.EpochWindowSeconds > 0 {

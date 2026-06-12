@@ -110,21 +110,22 @@ func VerifyNetworkPayloadEntry(entry *envelope.Entry) error {
 			return fmt.Errorf("%w: AuditorScopeAmendmentV1: %s", ErrNetworkPayloadInvalid, err)
 		}
 	case witness.WitnessRotationPayloadKindV1:
-		// PRE-6: an externally-submitted witness-rotation entry is held to the
-		// SDK's structural doors BEFORE sequencing — a sequenced-but-invalid
-		// rotation is log pollution (the fail-closed-sequencing precedent the
-		// signer-rotation gate set). Decode + ValidateWitnessRotation are
-		// structure-only; the FULL cryptographic recipe (set-hash rebind, OLD
-		// K-of-N quorum, optional NEW dual-sign) remains ProcessRotation's job
-		// at projection time — admission stays a malformed-payload firewall,
-		// never a trust gate. Non-rotation entries pay exactly the kind probe.
-		r, err := witness.DecodeWitnessRotationPayload(entry.DomainPayload)
-		if err != nil {
-			return fmt.Errorf("%w: WitnessRotationV1: %s", ErrNetworkPayloadInvalid, err)
-		}
-		if err := witness.ValidateWitnessRotation(r); err != nil {
-			return fmt.Errorf("%w: WitnessRotationV1: %s", ErrNetworkPayloadInvalid, err)
-		}
+		// PRE-6 D1 — the AUTHORSHIP gate (upgraded from the structural gate):
+		// externally-submitted rotation records are refused OUTRIGHT. The
+		// rebuild contract decides this, not taste: witness_sets is a cache of
+		// the log, so a well-formed-but-unauthorized rotation that sequenced
+		// inertly would make a future rebuild either replay it (rebuilt state
+		// ≠ live state) or need an off-log author allowlist to skip it. The
+		// ONLY legitimate author of an on-log rotation record is the rotation
+		// door's appender (ProcessRotation → wal.Committer.Submit, which
+		// bypasses this admission gate by construction) — so every rotation
+		// record on the log is authoritative and rebuilds stay deterministic.
+		// Operators rotate via POST /v1/network/rotation, the single intent
+		// entry point. Same fail-closed-sequencing class as #76: a
+		// sequenced-but-unauthorized record is log pollution wearing valid
+		// syntax. Non-rotation entries pay exactly the kind probe.
+		return fmt.Errorf("%w: WitnessRotationV1: rotation records are authored only by the rotation door's appender — submit the finalized rotation to POST /v1/network/rotation instead",
+			ErrNetworkPayloadInvalid)
 	}
 	return nil
 }

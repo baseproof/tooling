@@ -389,6 +389,14 @@ type Handlers struct {
 	// drift detection). Constructed by NewNetworkBundleHandler.
 	NetworkBundle http.Handler
 
+	// NetworkRotation serves POST /v1/network/rotation — the public,
+	// DoS-bounded inbound door for an operator-driven witness rotation.
+	// It decodes a finalized rotation payload and feeds the single
+	// ProcessRotation chokepoint (full crypto recipe + persist + swap).
+	// nil ⇒ unmounted (the rotation pipeline is not wired on this node).
+	// Constructed by NewRotationHandler.
+	NetworkRotation http.Handler
+
 	// Bundle serves GET /v1/bundle/{seq}?smt_key=hex — the
 	// baseproof-bundle/v1 wire format assembled from this binary's
 	// in-process composition of BootstrapDocument + entry bytes +
@@ -667,6 +675,9 @@ func NewServer(
 	}
 	if handlers.NetworkBundle != nil {
 		mux.Handle("GET /v1/network/bundle", handlers.NetworkBundle)
+	}
+	if handlers.NetworkRotation != nil {
+		mux.Handle("POST /v1/network/rotation", handlers.NetworkRotation)
 	}
 	if handlers.Bundle != nil {
 		mux.HandleFunc("GET /v1/bundle/{seq}", handlers.Bundle)
