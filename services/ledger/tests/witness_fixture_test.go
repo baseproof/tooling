@@ -28,6 +28,7 @@
 package tests
 
 import (
+	"crypto/ecdsa"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -48,6 +49,7 @@ type witnessFixture struct {
 	servers []*httptest.Server
 	signers []cosign.WitnessSigner
 	pubKeys []types.WitnessPublicKey
+	privs   []*ecdsa.PrivateKey
 }
 
 // newWitnessFixture spins up n httptest cosign servers under the
@@ -95,6 +97,7 @@ func newWitnessFixture(t *testing.T, netID cosign.NetworkID, n int) *witnessFixt
 			PublicKey: pub,
 			SchemeTag: signatures.SchemeECDSA,
 		})
+		wf.privs = append(wf.privs, priv)
 	}
 	t.Cleanup(wf.close)
 	return wf
@@ -116,6 +119,15 @@ func (wf *witnessFixture) URLs() []string {
 func (wf *witnessFixture) PublicKeys() []types.WitnessPublicKey {
 	out := make([]types.WitnessPublicKey, len(wf.pubKeys))
 	copy(out, wf.pubKeys)
+	return out
+}
+
+// PrivateKeys returns the n witnesses' signing keys, for ceremonies
+// where the test plays a witness host (e.g. signing a rotation
+// consent with a CURRENT-set member's key).
+func (wf *witnessFixture) PrivateKeys() []*ecdsa.PrivateKey {
+	out := make([]*ecdsa.PrivateKey, len(wf.privs))
+	copy(out, wf.privs)
 	return out
 }
 
