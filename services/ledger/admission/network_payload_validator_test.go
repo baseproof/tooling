@@ -38,13 +38,13 @@ package admission_test
 import (
 	"encoding/json"
 	"errors"
-	"github.com/baseproof/baseproof/types"
-	"github.com/baseproof/baseproof/witness"
 	"strings"
 	"testing"
 
 	"github.com/baseproof/baseproof/core/envelope"
 	"github.com/baseproof/baseproof/network"
+	"github.com/baseproof/baseproof/types"
+	"github.com/baseproof/baseproof/witness"
 
 	"github.com/baseproof/tooling/services/ledger/admission"
 )
