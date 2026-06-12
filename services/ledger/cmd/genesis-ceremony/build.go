@@ -64,6 +64,11 @@ func runBuild(args []string) {
 			"declares the auditors without an endorsement requirement. Defaults to "+
 			`"require" when -genesis-auditors is set (safety machinery defaults ON), `+
 			"unset otherwise.")
+	anchoringMaxInterval := fs.Duration("anchoring-max-interval", 0,
+		"constitutional ANCHORING commitment: the maximum staleness of an external "+
+			"anchor of this network's heads (e.g. 24h). 0 = no commitment. Bound into "+
+			"the NetworkID; the ledger derives its anchor-publisher cadence from it "+
+			"and auditors monitor it (network.CheckAnchoring).")
 	out := fs.String("out", "unendorsed.json",
 		"path to write the UNENDORSED constitution")
 	_ = fs.Parse(args)
@@ -111,7 +116,8 @@ func runBuild(args []string) {
 	}
 
 	doc := buildBootstrapDoc(*logDID, *networkName, *gating, *endorsementPolicy,
-		dids, quorumK, *admissionAuthority, uint8(*minSignatures), auditors, effectiveAuditorPolicy)
+		dids, quorumK, *admissionAuthority, uint8(*minSignatures), auditors, effectiveAuditorPolicy,
+		anchoringPolicyFromFlag(*anchoringMaxInterval))
 
 	// Validate + derive the identity NOW: the NetworkID is fixed by these
 	// canonical bytes — the ceremony signs it, so it must be final and printable

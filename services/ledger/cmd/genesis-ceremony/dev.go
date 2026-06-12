@@ -74,6 +74,8 @@ func runDev(args []string) {
 			`it can run the full ceremony at mint). "off" emits no policy and no endorsements `+
 			"(legacy/dev escape hatch). Either way the output must pass "+
 			"network.LoadVerifiedBootstrap before it is written.")
+	anchoringMaxInterval := fs.Duration("anchoring-max-interval", 0,
+		"constitutional ANCHORING commitment bound (see `genesis-ceremony build -h`); 0 = none")
 	_ = fs.Parse(args)
 
 	if *witnessCount < 1 {
@@ -155,7 +157,7 @@ func runDev(args []string) {
 			ifGenerated(ledgerGen), *outLedgerKey, ledgerDID)
 	}
 
-	doc := buildBootstrapDoc(*logDID, *networkName, *gating, *endorsementPolicy, genesisDIDs, quorumK, genesisAuthorityAddr, uint8(*minSignatures), nil, "")
+	doc := buildBootstrapDoc(*logDID, *networkName, *gating, *endorsementPolicy, genesisDIDs, quorumK, genesisAuthorityAddr, uint8(*minSignatures), nil, "", anchoringPolicyFromFlag(*anchoringMaxInterval))
 	// mintServedBootstrap runs the SDK validation (doc.IDs()), the genesis
 	// self-endorsement ceremony when the policy requires it, and the
 	// first-contact round-trip (network.LoadVerifiedBootstrap) over the EXACT

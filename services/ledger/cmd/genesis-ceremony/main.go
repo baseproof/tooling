@@ -43,6 +43,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/baseproof/baseproof/crypto/signatures"
 	sdkdid "github.com/baseproof/baseproof/did"
@@ -106,7 +107,7 @@ Run "genesis-ceremony <mode> -h" for per-mode flags.
 // canonical-bytes material exactly like the witness set, and
 // auditorPolicy="require" demands a valid endorsement from EVERY genesis
 // auditor at first contact (network.VerifyGenesisAuditorEndorsements).
-func buildBootstrapDoc(logDID, networkName, gating, endorsementPolicy string, genesisDIDs []string, quorumK int, genesisAuthorityAddr string, minSignatures uint8, auditors []network.GenesisAuditor, auditorPolicy string) network.BootstrapDocument {
+func buildBootstrapDoc(logDID, networkName, gating, endorsementPolicy string, genesisDIDs []string, quorumK int, genesisAuthorityAddr string, minSignatures uint8, auditors []network.GenesisAuditor, auditorPolicy string, anchoring *network.GenesisAnchoringPolicy) network.BootstrapDocument {
 	// GenesisEndorsementPolicy is canonical-bytes material: "require" is hashed
 	// into the NetworkID, so it cannot be stripped post-mint without minting a
 	// DIFFERENT network — the fail-closed half of issue #77. "off" emits no
@@ -165,6 +166,27 @@ func buildBootstrapDoc(logDID, networkName, gating, endorsementPolicy string, ge
 		// genesis_auditors is rejected by the SDK as unsatisfiable.
 		GenesisAuditors:                 auditors,
 		GenesisAuditorEndorsementPolicy: genesisAuditorPolicy,
+		// PR-4: the founders' constitutional ANCHORING commitment — INSIDE the
+		// canonical bytes (NetworkID-bound), so "we anchor within this cadence"
+		// cannot be argued away after genesis. nil ⇒ no commitment declared.
+		// The ledger derives its publisher cadence from this bound
+		// (reconcileAnchorCadence); auditors monitor it via the SDK's
+		// network.CheckAnchoring.
+		GenesisAnchoring: anchoring,
+	}
+}
+
+// anchoringPolicyFromFlag turns the -anchoring-max-interval duration into the
+// constitutional commitment (0 ⇒ none). The SDK's validate() re-asserts
+// mode=require + a positive bound inside doc.IDs(), so a malformed commitment
+// can never be locked into a NetworkID.
+func anchoringPolicyFromFlag(maxInterval time.Duration) *network.GenesisAnchoringPolicy {
+	if maxInterval <= 0 {
+		return nil
+	}
+	return &network.GenesisAnchoringPolicy{
+		Mode:               network.GenesisEndorsementRequire,
+		MaxIntervalSeconds: uint64(maxInterval / time.Second),
 	}
 }
 

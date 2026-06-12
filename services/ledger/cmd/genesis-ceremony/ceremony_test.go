@@ -25,6 +25,7 @@ import (
 	"crypto/ecdsa"
 	"encoding/hex"
 	"testing"
+	"time"
 
 	"github.com/baseproof/baseproof/crypto/signatures"
 	"github.com/baseproof/baseproof/network"
@@ -50,7 +51,7 @@ func mintWitnessIdentity(t *testing.T) (*ecdsa.PrivateKey, string) {
 func coordinatorDoc(t *testing.T, dids []string, k int, auditors []network.GenesisAuditor, auditorPolicy string) network.BootstrapDocument {
 	t.Helper()
 	doc := buildBootstrapDoc("did:web:ceremony.example", "multi-host-net", "require", "require",
-		dids, k, "0x0123456789abcdef0123456789abcdef01234567", 1, auditors, auditorPolicy)
+		dids, k, "0x0123456789abcdef0123456789abcdef01234567", 1, auditors, auditorPolicy, nil)
 	if _, err := doc.IDs(); err != nil {
 		t.Fatalf("unendorsed constitution must validate: %v", err)
 	}
@@ -192,5 +193,37 @@ func TestCeremony_NetworkIDStableAcrossCeremony(t *testing.T) {
 	if before.NetworkID != after.NetworkID {
 		t.Fatalf("NetworkID drifted across the ceremony: %x → %x (endorsements leaked into the canonical bytes)",
 			before.NetworkID, after.NetworkID)
+	}
+}
+
+// TestCeremony_AnchoringCommitment_NetworkIDBound pins PR-4's producer half:
+// the anchoring commitment is canonical-bytes material — a constitution WITH
+// the commitment is a DIFFERENT network than one without (so "we anchor" can
+// never be argued away post-genesis), the flag round-trips through the SDK
+// validator, and a zero interval emits no commitment key at all.
+func TestCeremony_AnchoringCommitment_NetworkIDBound(t *testing.T) {
+	_, wd := mintWitnessIdentity(t)
+	base := buildBootstrapDoc("did:web:ceremony.example", "anchored-net", "require", "require",
+		[]string{wd}, 1, "0x0123456789abcdef0123456789abcdef01234567", 1, nil, "", nil)
+	anchored := buildBootstrapDoc("did:web:ceremony.example", "anchored-net", "require", "require",
+		[]string{wd}, 1, "0x0123456789abcdef0123456789abcdef01234567", 1, nil, "",
+		anchoringPolicyFromFlag(24*time.Hour))
+
+	if anchored.GenesisAnchoring == nil || anchored.GenesisAnchoring.MaxIntervalSeconds != 86400 {
+		t.Fatalf("anchoring flag did not round-trip: %+v", anchored.GenesisAnchoring)
+	}
+	idsBase, err := base.IDs()
+	if err != nil {
+		t.Fatalf("base IDs: %v", err)
+	}
+	idsAnchored, err := anchored.IDs()
+	if err != nil {
+		t.Fatalf("anchored constitution does not validate: %v", err)
+	}
+	if idsBase.NetworkID == idsAnchored.NetworkID {
+		t.Fatal("the anchoring commitment did NOT change the NetworkID — it is not canonical-bytes material, so it could be stripped post-genesis")
+	}
+	if p := anchoringPolicyFromFlag(0); p != nil {
+		t.Fatalf("zero interval must emit no commitment, got %+v", p)
 	}
 }

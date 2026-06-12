@@ -831,6 +831,15 @@ func loadConfig() (*Config, error) {
 			return nil, kErr
 		}
 		cfg.WitnessQuorumK = k
+
+		// PR-4: the anchoring cadence DERIVES from the constitutional
+		// commitment (consumers derive, never restate). The publisher's
+		// self-interval is computed from GenesisAnchoring.MaxIntervalSeconds;
+		// the one operator knob (LEDGER_PARENT_ANCHOR_INTERVAL) demotes to a
+		// cross-check — set looser than the constitutional bound is fatal.
+		if aErr := reconcileAnchorCadence(doc, cfg); aErr != nil {
+			return nil, aErr
+		}
 	}
 
 	// Part II.10 — load the federation graph file (if any). Failure
@@ -989,6 +998,44 @@ func (cfg *Config) Validate() error {
 			cfg.WitnessQuorumK, len(cfg.WitnessEndpoints))
 	}
 
+	return nil
+}
+
+// reconcileAnchorCadence derives the anchor publisher's cadence from the
+// constitution's GenesisAnchoring commitment (PR-4). The commitment pins the
+// MAXIMUM staleness (MaxIntervalSeconds); the publisher must run comfortably
+// inside it, so the self-interval becomes clamp(bound/3, 10s, 1h) — and never
+// above the bound itself. No constitutional commitment ⇒ everything stays as
+// configured (the 1h operational default).
+//
+// LEDGER_PARENT_ANCHOR_INTERVAL is the one operator-settable cadence. Under a
+// constitutional commitment it demotes to a cross-check: unset inherits the
+// derived self-interval (existing publisher behavior); set within the bound is
+// honored (an operator may anchor MORE often); set LOOSER than the bound is
+// fatal — an off-log env var must never stretch a NetworkID-bound commitment.
+func reconcileAnchorCadence(doc network.BootstrapDocument, cfg *Config) error {
+	policy := doc.GenesisAnchoring
+	if policy == nil {
+		return nil
+	}
+	bound := time.Duration(policy.MaxIntervalSeconds) * time.Second
+	derived := bound / 3
+	if derived < 10*time.Second {
+		derived = 10 * time.Second
+	}
+	if derived > time.Hour {
+		derived = time.Hour
+	}
+	if derived > bound {
+		derived = bound
+	}
+	cfg.AnchorInterval = derived
+	if cfg.ParentAnchorInterval > bound {
+		return fmt.Errorf("LEDGER_PARENT_ANCHOR_INTERVAL=%s is LOOSER than the constitutional "+
+			"anchoring bound %s (genesis_anchoring.max_interval_seconds=%d) — an off-log env "+
+			"cannot stretch a NetworkID-bound commitment; unset it or set it within the bound",
+			cfg.ParentAnchorInterval, bound, policy.MaxIntervalSeconds)
+	}
 	return nil
 }
 
