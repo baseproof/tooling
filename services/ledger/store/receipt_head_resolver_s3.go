@@ -103,7 +103,7 @@ func sdkHeadToAPI(h *sdktypes.CosignedTreeHead) *CosignedTreeHead {
 		TreeSize:    h.TreeSize,
 		RootHash:    h.RootHash,
 		SMTRoot:     h.SMTRoot,
-		ReceiptRoot: h.TreeHead.ReceiptRoot,
+		ReceiptRoot: h.ReceiptRoot,
 		Signatures:  sigs,
 	}
 }

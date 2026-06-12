@@ -148,7 +148,7 @@ func appendAtZero(ctx context.Context, submitter Submitter, seqs SeqIndex, cfg C
 		return nil, err
 	}
 
-	if err := submitter.Submit(ctx, identity, canonical, time.Now().UTC().UnixMicro(), nil); err != nil {
+	if err = submitter.Submit(ctx, identity, canonical, time.Now().UTC().UnixMicro(), nil); err != nil {
 		return nil, fmt.Errorf("genesis: submit record to WAL: %w", err)
 	}
 
