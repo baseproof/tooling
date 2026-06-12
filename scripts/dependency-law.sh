@@ -88,6 +88,23 @@ for d in $MODDIRS; do
   if [ -n "$hits" ]; then violate "$d links the custodial store"; fi
 done
 
+# (d) The journal-first rotation-resolution kit has ONE home (libs/witnessrotation):
+# the resolver, both journal implementations, and the trust-root type were lifted
+# there (FED-1 PR-1); a copy re-growing anywhere else is the seam-fork this law
+# exists to catch.
+echo "== rotation-resolution kit: one home (libs/witnessrotation) =="
+kit_dupes=$( grep -rln \
+  -e 'type PostgresWitnessRotationJournal ' \
+  -e 'type JournalWitnessSetResolver ' \
+  -e 'type MemoryRotationJournal ' \
+  -e 'type LogTrustRoot ' \
+  --include='*.go' . 2>/dev/null | grep -v './libs/witnessrotation/' || true )
+if [ -n "$kit_dupes" ]; then
+  while IFS= read -r f; do [ -n "$f" ] && violate "rotation-resolution kit type re-declared outside libs/witnessrotation: $f"; done <<<"$kit_dupes"
+else
+  note "ok  kit types declared only in libs/witnessrotation"
+fi
+
 # LAW 5 extends LAW 1 from imports to VOCABULARY: the agnostic layer must not
 # speak a domain's language even when it links no domain module. Forbids domain
 # lexemes (judicial|court|judge|case_|JN) in libs/ EXPORTED IDENTIFIERS and

@@ -52,6 +52,7 @@ import (
 	"github.com/baseproof/tooling/libs/sdkguard"
 	"github.com/baseproof/tooling/libs/tracing"
 	"github.com/baseproof/tooling/libs/witnessrotation"
+	"github.com/baseproof/tooling/libs/witnessrotation/journalpg"
 	"github.com/baseproof/tooling/services/auditor/internal/app"
 	"github.com/baseproof/tooling/services/auditor/internal/horizon"
 	"github.com/baseproof/tooling/services/auditor/internal/store"
@@ -596,7 +597,7 @@ func run(ctx context.Context, cfg config, logger *slog.Logger) error {
 		// witness-set reconstruction (ZT-SCN-02). Shares the gossip-store db;
 		// never pruned. Wired into the reconciler so every verified rotation is
 		// journaled as it arrives.
-		rotJournal, err := store.NewPostgresWitnessRotationJournal(db)
+		rotJournal, err := journalpg.NewPostgresWitnessRotationJournal(db)
 		if err != nil {
 			return fmt.Errorf("auditor: rotation journal: %w", err)
 		}
@@ -613,7 +614,7 @@ func run(ctx context.Context, cfg config, logger *slog.Logger) error {
 		for k, v := range witnessSets {
 			genesisByOriginator[k] = v
 		}
-		var trustRoots []store.LogTrustRoot
+		var trustRoots []witnessrotation.LogTrustRoot
 		originatorByLog := make(map[string]string, len(resolvedPeers))
 		baseURLByLog := make(map[string]string, len(resolvedPeers))
 		for _, rp := range resolvedPeers {
@@ -624,7 +625,7 @@ func run(ctx context.Context, cfg config, logger *slog.Logger) error {
 			if _, dup := originatorByLog[rp.configuredDID]; dup {
 				continue
 			}
-			trustRoots = append(trustRoots, store.LogTrustRoot{
+			trustRoots = append(trustRoots, witnessrotation.LogTrustRoot{
 				LogDID:  rp.configuredDID,
 				Aliases: []string{rp.originatorDID},
 				Genesis: gen,
@@ -632,7 +633,7 @@ func run(ctx context.Context, cfg config, logger *slog.Logger) error {
 			originatorByLog[rp.configuredDID] = rp.originatorDID
 			baseURLByLog[rp.configuredDID] = rp.baseURL
 		}
-		journalResolver, err := store.NewJournalWitnessSetResolver(rotJournal, trustRoots)
+		journalResolver, err := witnessrotation.NewJournalWitnessSetResolver(rotJournal, trustRoots)
 		if err != nil {
 			return fmt.Errorf("auditor: journal witness-set resolver: %w", err)
 		}

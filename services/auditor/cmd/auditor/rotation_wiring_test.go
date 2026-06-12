@@ -23,7 +23,6 @@ import (
 	"github.com/baseproof/baseproof/witness"
 
 	"github.com/baseproof/tooling/libs/witnessrotation"
-	"github.com/baseproof/tooling/services/auditor/internal/store"
 )
 
 func mintSet(t *testing.T) *cosign.WitnessKeySet {
@@ -63,7 +62,7 @@ func TestReseedWitnessSets_RestartAfterRotation(t *testing.T) {
 	genA, curA := mintSet(t), mintSet(t) // log A rotated: genesis ≠ current
 	genB := mintSet(t)                   // log B: chain unreadable → keep genesis
 
-	roots := []store.LogTrustRoot{
+	roots := []witnessrotation.LogTrustRoot{
 		{LogDID: "did:web:log-a", Aliases: []string{"did:key:orig-a"}, Genesis: genA},
 		{LogDID: "did:web:log-b", Aliases: []string{"did:key:orig-b"}, Genesis: genB},
 	}

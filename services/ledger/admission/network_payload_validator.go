@@ -124,6 +124,12 @@ func VerifyNetworkPayloadEntry(entry *envelope.Entry) error {
 		// entry point. Same fail-closed-sequencing class as #76: a
 		// sequenced-but-unauthorized record is log pollution wearing valid
 		// syntax. Non-rotation entries pay exactly the kind probe.
+		//
+		// #107 (foreign rotation ingestion) names this gate a HARD
+		// dependency: witness_sets ← our log ONLY is the domestic half of
+		// the federation two-projection symmetry (foreign_witness_sets ←
+		// each peer's log only). Weaken this arm and the rebuild law is
+		// broken at home before federation even starts.
 		return fmt.Errorf("%w: WitnessRotationV1: rotation records are authored only by the rotation door's appender — submit the finalized rotation to POST /v1/network/rotation instead",
 			ErrNetworkPayloadInvalid)
 	}
