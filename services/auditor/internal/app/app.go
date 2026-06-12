@@ -235,6 +235,20 @@ type Deps struct {
 	// RotationConsistencyInterval is the cadence of the consistency audit.
 	// Required when RotationConsistencySource is non-nil.
 	RotationConsistencyInterval time.Duration
+
+	// AnchoringCheck runs ONE constitutional-anchoring scan
+	// (libs/monitoring.CheckConstitutionalAnchoring composed in main: the
+	// network's policy + pin + rotation-replayed current set + per-parent
+	// anchorfeed collectors — constitutional Targets when declared, else the
+	// legacy trust-root config). Emits the SDK ladder (absent/stale/under-
+	// quota) and the distinct cannot-corroborate Warning; per-target ages
+	// ride Details as counters. Optional — nil (or interval <= 0) skips
+	// registration.
+	AnchoringCheck func(ctx context.Context) ([]sdkmonitoring.Alert, error)
+
+	// AnchoringCheckInterval is the cadence of the anchoring scan. Required
+	// when AnchoringCheck is non-nil; ignored otherwise.
+	AnchoringCheckInterval time.Duration
 }
 
 // Pipeline is the constructed auditor: a puller feeding a
@@ -376,8 +390,9 @@ func Build(d Deps) (*Pipeline, error) {
 	registerCustody := d.CustodyChainSource != nil && d.CustodyChainInterval > 0
 	registerRotationScan := d.RotationScan != nil && d.RotationScanInterval > 0
 	registerRotationConsistency := d.RotationConsistencySource != nil && d.RotationConsistencyInterval > 0
+	registerAnchoring := d.AnchoringCheck != nil && d.AnchoringCheckInterval > 0
 	var scheduler *monitoring.Scheduler
-	if registerPrune || horizonAuditor != nil || registerURLDrift || registerGovernance || registerCommitment || registerCustody || registerRotationScan || registerRotationConsistency {
+	if registerPrune || horizonAuditor != nil || registerURLDrift || registerGovernance || registerCommitment || registerCustody || registerRotationScan || registerRotationConsistency || registerAnchoring {
 		scheduler = monitoring.NewScheduler(monitoring.SchedulerConfig{Logger: d.Logger})
 		if registerPrune {
 			interval := d.PruneInterval
@@ -478,6 +493,18 @@ func Build(d Deps) (*Pipeline, error) {
 				},
 			}); err != nil {
 				return nil, fmt.Errorf("auditor/app: register derivation_commitment_compliance: %w", err)
+			}
+		}
+		if registerAnchoring {
+			// PR-4b: the constitutional anchoring monitor — the verified-
+			// evidence path (two distinct reasons: the SDK ladder vs
+			// cannot-corroborate; per-target ages as counters, never pages).
+			if err := scheduler.Register(monitoring.Job{
+				Name:     "constitutional_anchoring",
+				Interval: d.AnchoringCheckInterval,
+				Run:      d.AnchoringCheck,
+			}); err != nil {
+				return nil, fmt.Errorf("auditor/app: register constitutional_anchoring: %w", err)
 			}
 		}
 		if registerRotationScan {

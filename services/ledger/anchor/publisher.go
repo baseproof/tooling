@@ -100,6 +100,16 @@ type PublisherConfig struct {
 	// rates. Defaults to Interval when zero.
 	ParentLogDID string
 
+	// ParentTargets is the MULTI-PARENT fan-out (PR-4d): one entry per
+	// derived constitutional target (WHICH from the constitution, WHERE from
+	// its declaration ∪ canary — deriveParentEndpoints). When non-empty it
+	// REPLACES the single-parent fields below for publishing: every tick
+	// anchors this log's head into EVERY target, each with its own submit +
+	// optional confirm; one failing parent never starves the others (each
+	// failure logs toward alarm and retries next tick). The legacy
+	// single-parent fields remain for pre-targets constitutions.
+	ParentTargets []ParentTarget
+
 	// ConfirmParentAnchor is the optional READ-BACK (anchor/confirm.go):
 	// after a successful parent submit, confirm the anchor actually landed
 	// (by-source discovery -> parent read-back -> durable
@@ -145,6 +155,20 @@ type CosignedHeadProvider interface {
 	LatestCosigned(ctx context.Context) (*types.CosignedTreeHead, error)
 }
 
+// ParentTarget is one derived publish destination in the multi-parent
+// fan-out: a constitutional target's current location plus its egress.
+type ParentTarget struct {
+	// LogDID is the parent log (the anchor entry's Destination).
+	LogDID string
+	// AdmissionURL is the parent's /v1/entries endpoint (diagnostics; the
+	// egress itself is SubmitFn).
+	AdmissionURL string
+	// SubmitFn is this target's egress. Required.
+	SubmitFn func(entry *envelope.Entry) error
+	// Confirm is this target's optional read-back (anchor/confirm.go).
+	Confirm func(ctx context.Context, head types.CosignedTreeHead) error
+}
+
 // Publisher periodically anchors remote tree heads to the local log.
 // When ParentLogDID + ParentAdmissionURL + ParentSubmitFn are wired,
 // it additionally anchors THIS log's head on the parent (II.9).
@@ -166,10 +190,15 @@ type Publisher struct {
 // parent ticker stays disabled; Run logs the partial-config
 // diagnostic at startup so operators notice.
 func (p *Publisher) parentEnabled() bool {
+	if p.cosignedHead == nil {
+		return false
+	}
+	if len(p.cfg.ParentTargets) > 0 {
+		return true
+	}
 	return p.cfg.ParentLogDID != "" &&
 		p.cfg.ParentAdmissionURL != "" &&
-		p.cfg.ParentSubmitFn != nil &&
-		p.cosignedHead != nil
+		p.cfg.ParentSubmitFn != nil
 }
 
 // NewPublisher creates an anchor publisher. LogDID in cfg MUST be non-empty —
@@ -404,40 +433,71 @@ func (p *Publisher) publishParentAnchor(ctx context.Context) error {
 		return nil
 	}
 
+	// Effective fan-out: the derived multi-parent list, or the legacy
+	// single-parent fields synthesized as one target.
+	targets := p.cfg.ParentTargets
+	if len(targets) == 0 {
+		targets = []ParentTarget{{
+			LogDID:       p.cfg.ParentLogDID,
+			AdmissionURL: p.cfg.ParentAdmissionURL,
+			SubmitFn:     p.cfg.ParentSubmitFn,
+			Confirm:      p.cfg.ConfirmParentAnchor,
+		}}
+	}
+
+	var firstErr error
+	for _, t := range targets {
+		if err := p.publishToParent(ctx, t, head); err != nil {
+			// One failing parent never starves the others: log toward
+			// alarm, keep fanning out, retry everything next tick.
+			p.logger.Warn("anchor: parent publish failed",
+				"parent_log_did", t.LogDID, "error", err)
+			if firstErr == nil {
+				firstErr = err
+			}
+		}
+	}
+	return firstErr
+}
+
+// publishToParent anchors head into one parent: build → submit → (optional)
+// read-back confirm.
+func (p *Publisher) publishToParent(ctx context.Context, t ParentTarget, head *types.CosignedTreeHead) error {
+	if t.SubmitFn == nil {
+		return fmt.Errorf("parent %s: no submit egress wired", t.LogDID)
+	}
 	entry, err := anchor.BuildCosignedAnchorEntry(anchor.CosignedAnchorParams{
 		SignerDID:      p.cfg.LedgerDID,
-		Destination:    p.cfg.ParentLogDID,
+		Destination:    t.LogDID,
 		SourceLogDID:   p.cfg.LogDID,
 		Head:           *head,
-		LedgerEndpoint: p.cfg.ParentAdmissionURL,
+		LedgerEndpoint: t.AdmissionURL,
 		NetworkID:      p.cfg.NetworkID,
 		EventTime:      time.Now().UTC().UnixMicro(),
 	})
 	if err != nil {
 		return fmt.Errorf("build parent anchor entry: %w", err)
 	}
-
-	if err := p.cfg.ParentSubmitFn(entry); err != nil {
+	if err := t.SubmitFn(entry); err != nil {
 		return fmt.Errorf("submit parent anchor: %w", err)
 	}
-
 	p.logger.Info("parent anchor published",
-		"parent_log_did", p.cfg.ParentLogDID,
+		"parent_log_did", t.LogDID,
 		"tree_size", head.TreeSize,
 		"cosignatures", len(head.Signatures))
 
 	// Read-back: close the 202-and-forget. Failure here is NOT a publish
 	// failure — the anchor was submitted; it is published-but-unconfirmed,
 	// logged toward alarm and retried next tick (first-seen is idempotent).
-	if p.cfg.ConfirmParentAnchor != nil {
-		if cErr := p.cfg.ConfirmParentAnchor(ctx, *head); cErr != nil {
+	if t.Confirm != nil {
+		if cErr := t.Confirm(ctx, *head); cErr != nil {
 			p.logger.Warn("anchor: parent anchor published but UNCONFIRMED",
-				"parent_log_did", p.cfg.ParentLogDID,
+				"parent_log_did", t.LogDID,
 				"tree_size", head.TreeSize,
 				"error", cErr)
 		} else {
 			p.logger.Info("anchor: parent anchor confirmed (read-back)",
-				"parent_log_did", p.cfg.ParentLogDID,
+				"parent_log_did", t.LogDID,
 				"tree_size", head.TreeSize)
 		}
 	}

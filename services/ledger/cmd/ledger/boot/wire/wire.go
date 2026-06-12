@@ -840,6 +840,7 @@ func composeBuilderLoop(
 		)
 	}
 
+	var parentTargets []anchor.ParentTarget
 	// PR-4d — the derivation chain for the publisher's parent target:
 	// WHICH from the constitution; WHERE from the on-log declaration
 	// projection; env only as the pre-first-declaration canary, cross-checked
@@ -862,14 +863,38 @@ func composeBuilderLoop(
 			if depErr != nil {
 				panic(fmt.Sprintf("anchoring WHERE derivation refused boot: %v", depErr))
 			}
-			if len(eps) > 0 {
-				cfg.ParentLogDID = eps[0].LogDID
-				cfg.ParentAdmissionURL = eps[0].AdmissionURL
+			confirmStore := store.NewAnchorConfirmationStore(d.PgPool.DB)
+			for _, ep := range eps {
+				ep := ep
+				submit := anchor.SignAndSubmit(d.LedgerSignerPriv, d.LedgerDID,
+					anchor.SubmitToHTTPEndpoint(d.OutboundHTTPClient, ep.AdmissionURL))
+				var confirm func(ctx context.Context, head types.CosignedTreeHead) error
+				if ep.ReadBaseURL != "" {
+					if pf, pfErr := sdklog.NewHTTPEntryFetcher(sdklog.HTTPEntryFetcherConfig{
+						BaseURL: ep.ReadBaseURL, LogDID: ep.LogDID, Client: d.OutboundHTTPClient,
+					}); pfErr == nil {
+						confirm, _ = anchor.NewParentAnchorConfirmer(anchor.ParentReadBackConfig{
+							ParentLogDID: ep.LogDID,
+							OwnLogDID:    cfg.LogDID,
+							OwnNetworkID: cfg.NetworkID,
+							FetchSeqs: func(fctx context.Context) ([]uint64, error) {
+								return anchorfeed.FetchBySourceSeqs(fctx, d.OutboundHTTPClient, ep.ReadBaseURL, cfg.LogDID, 256)
+							},
+							ParentFetcher: pf,
+							Recorder:      confirmStore,
+						})
+					}
+				}
+				parentTargets = append(parentTargets, anchor.ParentTarget{
+					LogDID:       ep.LogDID,
+					AdmissionURL: ep.AdmissionURL,
+					SubmitFn:     submit,
+					Confirm:      confirm,
+				})
 				d.Logger.Info("anchoring WHERE: publisher parent derived",
-					"target", eps[0].TargetNetworkID[:16],
-					"parent_log_did", eps[0].LogDID,
-					"from_declaration", eps[0].FromDeclaration,
-					"derived_targets", len(eps))
+					"target", ep.TargetNetworkID[:16],
+					"parent_log_did", ep.LogDID,
+					"from_declaration", ep.FromDeclaration)
 			}
 		}
 	}
@@ -918,6 +943,7 @@ func composeBuilderLoop(
 			ParentAnchorInterval: cfg.ParentAnchorInterval,
 			ParentSubmitFn:       parentSubmitFn,
 			ConfirmParentAnchor:  confirmParent,
+			ParentTargets:        parentTargets,
 		},
 		tesseraAdapter,
 		treeHeadStoreCosignedAdapter{store: d.TreeHeadStore},

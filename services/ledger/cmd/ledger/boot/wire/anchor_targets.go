@@ -28,6 +28,7 @@ package wire
 import (
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/baseproof/baseproof/log/discover"
@@ -90,6 +91,10 @@ type parentEndpoint struct {
 	TargetNetworkID string // 64-hex constitutional id
 	LogDID          string
 	AdmissionURL    string
+	// ReadBaseURL is the parent's read origin for the by-source read-back:
+	// the declaration's BaseproofAnchorRead endpoint when declared, else the
+	// canary admission URL's origin.
+	ReadBaseURL     string
 	FromDeclaration bool // false = the pre-first-declaration canary
 }
 
@@ -140,6 +145,7 @@ func deriveParentEndpoints(
 			TargetNetworkID: t.NetworkID,
 			LogDID:          decl.LogDID,
 			AdmissionURL:    decl.AdmissionURL(),
+			ReadBaseURL:     decl.ReadURL(),
 			FromDeclaration: true,
 		})
 	}
@@ -154,6 +160,7 @@ func deriveParentEndpoints(
 				TargetNetworkID: id,
 				LogDID:          envParentDID,
 				AdmissionURL:    envParentURL,
+				ReadBaseURL:     strings.TrimSuffix(envParentURL, "/v1/entries"),
 				FromDeclaration: false,
 			})
 			continue
