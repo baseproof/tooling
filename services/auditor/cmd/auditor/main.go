@@ -747,6 +747,29 @@ func run(ctx context.Context, cfg config, logger *slog.Logger) error {
 		if err != nil {
 			return fmt.Errorf("auditor: build DID registry: %w", err)
 		}
+		// PR-4b: the constitutional anchoring monitor — composed from the
+		// verified bootstrap (policy + pin + genesis witness set) and the
+		// AUDITOR_ANCHOR_PARENTS read sources; nil when unconfigured (logged
+		// loudly if the constitution declares targets).
+		anchoringIDs, idErr := bootstrapDoc.IDs()
+		if idErr != nil {
+			return fmt.Errorf("auditor: bootstrap IDs: %w", idErr)
+		}
+		anchoringCheck, anchoringInterval, acErr := buildAnchoringCheck(
+			os.Getenv("AUDITOR_ANCHOR_PARENTS"),
+			envDuration("AUDITOR_ANCHORING_INTERVAL", 0),
+			bootstrapDoc.GenesisAnchoring,
+			[32]byte(nid),
+			anchoringIDs.DID,
+			witnessDIDs,
+			cfg.quorumK,
+			peerHTTPClient,
+			logger,
+		)
+		if acErr != nil {
+			return fmt.Errorf("auditor: anchoring monitor: %w", acErr)
+		}
+
 		pipe, err := app.Build(app.Deps{
 			Store:           st,
 			RotationJournal: rotJournal,
@@ -813,6 +836,8 @@ func run(ctx context.Context, cfg config, logger *slog.Logger) error {
 			// the safety/liveness consistency audit. Disabled by default —
 			// gated on the respective AUDITOR_ROTATION_* intervals > 0.
 			RotationScan:                rotationScan,
+			AnchoringCheck:              anchoringCheck,
+			AnchoringCheckInterval:      anchoringInterval,
 			RotationScanInterval:        cfg.rotationScanInterval,
 			RotationConsistencySource:   rotationConsistencySource,
 			RotationConsistencyInterval: cfg.rotationConsistencyInterval,
