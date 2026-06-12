@@ -1,80 +1,82 @@
-// FILE PATH: services/auditor/internal/store/witness_rotation_journal.go
-//
-// PostgresWitnessRotationJournal — AT-1: the durable, per-log witness-set
-// rotation chain that powers historical witness-set reconstruction
-// (ZT-SCN-02, the Year-15 scenario).
-//
-// # WHY THIS EXISTS
-//
-// The auditor's libs/auditing WitnessSetRegistry tracks only the LIVE
-// (current) witness set per log — it applies each verified rotation in place
-// and forgets the chain. That makes "what set was authoritative at position N
-// in year 1?" unanswerable, which defeats ZT-SCN-02: a bundle sealed in year 1
-// must verify in year 15 against the YEAR-1 quorum, never silently against the
-// long-rotated modern set.
-//
-// This journal is the materialized projection of the on-log rotation entries
-// (the LOG is the source of truth; the self-contained WitnessRotationFinding is
-// the verifiable carrier the reconciler hands us). It persists each verified
-// rotation as a position-bearing types.WitnessRotationRecord so the SDK's
-// witness.WitnessSetAt can deterministically reconstruct the authoritative set
-// at any historical asOf — even with the ledger, witnesses, and the
-// auditor-of-the-day all gone (ZT-SCN-07).
-//
-// # SCHEMA
-//
-//	witness_rotation_records (
-//	  log_did          TEXT        NOT NULL,
-//	  effective_seq    BIGINT      NOT NULL,   -- EffectivePos.Sequence (PROVEN)
-//	  rotation_payload BYTEA       NOT NULL,   -- witness.EncodeWitnessRotationPayload bytes
-//	  recorded_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
-//	  PRIMARY KEY (log_did, effective_seq)
-//	)
-//
-// A rotation's (log_did, effective_seq) IS its identity — re-receiving the same
-// rotation (gossip is at-least-once) is an idempotent no-op (ON CONFLICT DO
-// NOTHING). The wire payload is stored verbatim (the SDK codec round-trips it
-// byte-exactly), not a re-encoded struct, so the 15-year record is stable
-// across SDK refactors (ZT-SCN-12 spirit).
-//
-// # RETENTION — REBUILDABLE CACHE, NOT BEDROCK
-//
-// Unlike the heads journal (permanent, ZT-IMM-02/03), this table is a
-// materialized PROJECTION of the on-log rotation entries — the LOG is the
-// source of truth. The rows are SAFE TO DELETE (see PurgeFor): the chain is
-// rebuilt by re-walking the log — re-ingesting the on-log
-// BP-ENTRY-WITNESS-ROTATION-PAYLOAD-V1 entries (carried verbatim in their
-// self-contained findings), re-verifying each, and re-recording via the
-// idempotent RecordRotation. It is a CQRS read-model (ZT-CQRS-03), not
-// permanent bedrock — losing it costs a rebuild, never evidence. (The chain is
-// tiny anyway: rotations are rare relative to the 10B-entry log.)
-//
-// KEY DEPENDENCIES:
-//   - libs/monitoring: RotationJournal (the reconciler seam this satisfies).
-//   - baseproof/witness: EncodeWitnessRotationPayload / DecodeWitnessRotationPayload
-//     (the canonical wire codec) and WitnessSetAt (the reconstruction primitive).
-//   - baseproof/crypto/cosign: WitnessKeySet (the genesis seed + the result).
-//   - baseproof/types: WitnessRotationRecord, LogPosition.
-package store
+/*
+FILE PATH: libs/witnessrotation/journalpg/journal.go
+
+PostgresWitnessRotationJournal — the durable, per-log witness-set rotation
+chain that powers historical witness-set reconstruction (ZT-SCN-02, the
+Year-15 scenario). Lifted from the auditor's internal store (AT-1) so every
+chain custodian — the auditor today, any future durable consumer — imports
+ONE implementation instead of copying it.
+
+# WHY THIS EXISTS
+
+A live WitnessSetRegistry tracks only the CURRENT witness set per log — it
+applies each verified rotation in place and forgets the chain. That makes
+"what set was authoritative at position N in year 1?" unanswerable, which
+defeats ZT-SCN-02: a bundle sealed in year 1 must verify in year 15 against
+the YEAR-1 quorum, never silently against the long-rotated modern set.
+
+This journal is the materialized projection of the on-log rotation entries
+(the LOG is the source of truth; the self-contained WitnessRotationFinding is
+the verifiable carrier the reconciler hands us). It persists each verified
+rotation as a position-bearing types.WitnessRotationRecord so the SDK's
+witness.WitnessSetAt can deterministically reconstruct the authoritative set
+at any historical asOf — even with the ledger, witnesses, and the
+auditor-of-the-day all gone (ZT-SCN-07).
+
+# SCHEMA
+
+	witness_rotation_records (
+	  log_did          TEXT        NOT NULL,
+	  effective_seq    BIGINT      NOT NULL,   -- EffectivePos.Sequence (PROVEN)
+	  rotation_payload BYTEA       NOT NULL,   -- witness.EncodeWitnessRotationPayload bytes
+	  recorded_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+	  PRIMARY KEY (log_did, effective_seq)
+	)
+
+A rotation's (log_did, effective_seq) IS its identity — re-receiving the same
+rotation (gossip is at-least-once) is an idempotent no-op (ON CONFLICT DO
+NOTHING). The wire payload is stored verbatim (the SDK codec round-trips it
+byte-exactly), not a re-encoded struct, so the 15-year record is stable
+across SDK refactors (ZT-SCN-12 spirit).
+
+# RETENTION — REBUILDABLE CACHE, NOT BEDROCK
+
+Unlike a heads journal (permanent, ZT-IMM-02/03), this table is a
+materialized PROJECTION of the on-log rotation entries — the LOG is the
+source of truth. The rows are SAFE TO DELETE (see PurgeFor): the chain is
+rebuilt by re-walking the log — re-ingesting the on-log
+BP-ENTRY-WITNESS-ROTATION-PAYLOAD-V1 entries (carried verbatim in their
+self-contained findings), re-verifying each, and re-recording via the
+idempotent RecordRotation. It is a CQRS read-model (ZT-CQRS-03), not
+permanent bedrock — losing it costs a rebuild, never evidence. (The chain is
+tiny anyway: rotations are rare relative to the 10B-entry log.)
+
+The package depends only on database/sql — the CALLER owns the driver and
+the pool (the auditor shares its gossip-store *sql.DB).
+*/
+package journalpg
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"time"
 
-	"database/sql"
-
 	"github.com/baseproof/baseproof/crypto/cosign"
 	"github.com/baseproof/baseproof/types"
 	"github.com/baseproof/baseproof/witness"
+
 	"github.com/baseproof/tooling/libs/monitoring"
 	"github.com/baseproof/tooling/libs/witnessrotation"
 )
 
+// ErrInvalidConfig wraps construction faults.
+var ErrInvalidConfig = errors.New("witnessrotation/journalpg: invalid config")
+
 // PostgresWitnessRotationJournal persists the verified witness-set rotation
 // chain per log. Construct via NewPostgresWitnessRotationJournal; call Migrate
-// at boot. Mirrors PostgresHeadsJournal (idempotent Migrate, NEVER DELETE).
+// at boot. Mirrors the heads journal (idempotent Migrate, NEVER DELETE).
 type PostgresWitnessRotationJournal struct {
 	db *sql.DB
 }
@@ -89,8 +91,8 @@ var (
 )
 
 // NewPostgresWitnessRotationJournal wraps an open pool. The store does NOT take
-// ownership — the caller (auditor boot wire) owns it and shares it with the
-// gossip PostgresStore + heads journal.
+// ownership — the caller (e.g. auditor boot wire) owns it and shares it with
+// its other stores.
 func NewPostgresWitnessRotationJournal(db *sql.DB) (*PostgresWitnessRotationJournal, error) {
 	if db == nil {
 		return nil, fmt.Errorf("%w: nil *sql.DB", ErrInvalidConfig)
@@ -188,8 +190,8 @@ func (j *PostgresWitnessRotationJournal) RecordsFor(ctx context.Context, logDID 
 // (ZT-SCN-02). The walk re-verifies each rotation under the prior set, so the
 // result is trustless given a trusted genesis.
 //
-//   - genesisSet: the year-1 set from the network bootstrap (FS-ACT-01's public
-//     genesis witness list); the auditor holds these in app.WitnessSets.
+//   - genesisSet: the year-1 set from the network bootstrap (the public
+//     genesis witness list).
 //   - asOf: MANDATORY (ZT-IMM-01) — the SDK rejects a null LogPosition. Pass the
 //     position the evidence was sealed at (e.g., the bundle entry's position),
 //     never an implicit "latest".

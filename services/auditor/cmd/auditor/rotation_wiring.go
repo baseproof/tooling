@@ -17,11 +17,10 @@ import (
 	sdkmonitoring "github.com/baseproof/baseproof/monitoring"
 
 	"github.com/baseproof/tooling/libs/witnessrotation"
-	"github.com/baseproof/tooling/services/auditor/internal/store"
 )
 
 // currentSetResolver is the narrow seam boot-time anchor reconstruction needs.
-// *store.JournalWitnessSetResolver satisfies it.
+// *witnessrotation.JournalWitnessSetResolver satisfies it.
 type currentSetResolver interface {
 	CurrentSet(ctx context.Context, logDID string) (*cosign.WitnessKeySet, error)
 }
@@ -34,7 +33,7 @@ type currentSetResolver interface {
 // never-rotated log; loudly logged otherwise).
 func reseedWitnessSets(
 	ctx context.Context,
-	roots []store.LogTrustRoot,
+	roots []witnessrotation.LogTrustRoot,
 	resolver currentSetResolver,
 	witnessSets map[string]*cosign.WitnessKeySet,
 	originatorByLog map[string]string,

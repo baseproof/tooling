@@ -1,42 +1,38 @@
 // FILE PATH: services/auditor/internal/store/journal_resolver_test.go
 //
-// Tests for the journal-first position-aware resolver — including the GAP it
-// closes: the shipped auditor never wired a HeadWitnessSetResolver, so every
-// inbound head was verified against the LIVE current-set snapshot. At a
-// rotation boundary the ledger legitimately keeps emitting heads cosigned by
-// the OUTGOING set for a while (the operationally-fuzzy cosign switch); the
-// snapshot path REJECTS those transitional heads (a false fork alarm), while
-// head-anchored journal resolution accepts them against their own era set.
-// TestJournalResolver_TransitionalHead_BoundaryRegression pins both halves.
-//
-// Reuses genWitnessSet/cosignHead/fullTreeHead/rotTestNetID
-// (witness_rotation_journal_test.go); newKitHWS/dualSignedRotation live at the
-// bottom of this file (relocated from the deleted scan-per-resolution
-// resolver's tests).
+// STHHeadSource tests (the auditor-owned evidence-store adapter) + the
+// CONSUMER-side conformance asserts for the lifted journal-first resolution
+// machinery: the auditor's seams are the auditor's to prove satisfied
+// (the resolver's own behavior suite lives with it in libs/witnessrotation).
 package store
 
 import (
 	"context"
-	"crypto/ecdsa"
 	"testing"
 	"time"
 
 	"github.com/baseproof/baseproof/crypto/cosign"
+	"github.com/baseproof/baseproof/crypto/signatures"
 	"github.com/baseproof/baseproof/gossip"
 	"github.com/baseproof/baseproof/gossip/findings"
 	"github.com/baseproof/baseproof/types"
 	"github.com/baseproof/baseproof/witness/witnesstest"
+
 	"github.com/baseproof/tooling/libs/auditing/gossipverify"
 	"github.com/baseproof/tooling/libs/witnessrotation"
+	"github.com/baseproof/tooling/libs/witnessrotation/journalpg"
 	"github.com/baseproof/tooling/services/auditor/internal/equivocation"
 )
 
-// Static conformance: the resolver satisfies BOTH consumer seams, and the STH
-// adapter satisfies the scan reconciler's fallback seam.
+// Static conformance — the auditor's consumer seams, satisfied by the LIFTED
+// machinery: the verify path's head-anchored resolver, the equivocation
+// slasher's era resolver, the scan reconciler's fallback source, and both
+// reconciler journal seams on the durable journal.
 var (
-	_ gossipverify.HeadWitnessSetResolver = (*JournalWitnessSetResolver)(nil)
-	_ equivocation.EraWitnessSetResolver  = (*JournalWitnessSetResolver)(nil)
+	_ gossipverify.HeadWitnessSetResolver = (*witnessrotation.JournalWitnessSetResolver)(nil)
+	_ equivocation.EraWitnessSetResolver  = (*witnessrotation.JournalWitnessSetResolver)(nil)
 	_ witnessrotation.VerifiedHeadSource  = (*STHHeadSource)(nil)
+	_ witnessrotation.RotationJournal     = (*journalpg.PostgresWitnessRotationJournal)(nil)
 )
 
 const (
@@ -44,135 +40,55 @@ const (
 	jrOriginator = "did:key:zJournalOriginator" // the gossip alias the verify path uses
 )
 
-// memRecordSource is an in-memory RotationRecordSource.
-type memRecordSource struct {
-	byLog map[string][]types.WitnessRotationRecord
+// rotTestNetID is a fixed non-zero network id (NewWitnessKeySet rejects zero).
+func rotTestNetID() cosign.NetworkID {
+	var n cosign.NetworkID
+	for i := range n {
+		n[i] = byte(i + 1)
+	}
+	return n
 }
 
-func (m *memRecordSource) RecordsFor(_ context.Context, logDID string) ([]types.WitnessRotationRecord, error) {
-	return m.byLog[logDID], nil
-}
-
-// twoEraFixture journals one verified rotation s0→s1 (at seq 100, keyed by the
-// CANONICAL log DID, exactly as the gossip reconciler records it) and returns
-// the resolver plus both era kits.
-func twoEraFixture(t *testing.T) (*JournalWitnessSetResolver, witnessSetKitHWS, witnessSetKitHWS) {
+// genWitnessSet mints an n-key, k-quorum ECDSA witness set via the SDK fixture
+// kit (the kit's private keys sign rotations / cosign heads under the set).
+func genWitnessSet(t *testing.T, n, k int, netID cosign.NetworkID) *witnesstest.Set {
 	t.Helper()
-	netID := rotTestNetID()
-	s0, s1 := newKitHWS(t, 3, 2, netID), newKitHWS(t, 3, 2, netID)
-	src := &memRecordSource{byLog: map[string][]types.WitnessRotationRecord{
-		jrLogDID: {{
-			Rotation:     dualSignedRotation(t, s0, s1, 2, netID),
-			EffectivePos: types.LogPosition{LogDID: jrLogDID, Sequence: 100},
-		}},
-	}}
-	r, err := NewJournalWitnessSetResolver(src, []LogTrustRoot{{
-		LogDID:  jrLogDID,
-		Aliases: []string{jrOriginator},
-		Genesis: s0.set,
-	}})
-	if err != nil {
-		t.Fatalf("NewJournalWitnessSetResolver: %v", err)
-	}
-	return r, s0, s1
+	return witnesstest.NewSet(t, netID, n, k)
 }
 
-// TestJournalResolver_TransitionalHead_BoundaryRegression is the Gap-1 proof:
-// a post-rotation head still cosigned by the OUTGOING set fails the live
-// current-set snapshot check (the pre-fix behavior — a false alarm), and
-// resolves correctly era-anchored through the journal.
-func TestJournalResolver_TransitionalHead_BoundaryRegression(t *testing.T) {
-	r, s0, s1 := twoEraFixture(t)
-	netID := rotTestNetID()
-
-	// The transitional head: TreeSize 150 (> the rotation at 100) but cosigned
-	// by the OUTGOING set s0 — the fuzzy-window shape the SDK documents.
-	th := fullTreeHead(150)
-	transitional := cosignHead(t, th, s0.keys, s0.privs, 2, netID)
-
-	// (a) The position-blind snapshot path (production before the fix): the
-	// live set is s1 after ApplyVerifiedRotation, and the transitional head
-	// does NOT satisfy it — the false rejection this resolver exists to fix.
-	s1Set, err := cosign.NewWitnessKeySet(s1.keys, netID, 2, nil)
-	if err != nil {
-		t.Fatalf("NewWitnessKeySet: %v", err)
-	}
-	if cosign.VerifyTreeHeadCosignatures(transitional, s1Set) >= s1Set.Quorum() {
-		t.Fatal("test fixture broken: the transitional head must NOT satisfy the new set")
-	}
-
-	// (b) Head-anchored journal resolution: the head identifies its own era.
-	got, err := r.SetForHead(context.Background(), jrOriginator, transitional)
-	if err != nil {
-		t.Fatalf("SetForHead(transitional): %v", err)
-	}
-	if got.SetHash() != s0.set.SetHash() {
-		t.Fatal("transitional head must resolve to the OUTGOING era set")
-	}
-
-	// (c) And a new-set head resolves to the new era — most-recent-first.
-	adopted := cosignHead(t, fullTreeHead(160), s1.keys, s1.privs, 2, netID)
-	got, err = r.SetForHead(context.Background(), jrOriginator, adopted)
-	if err != nil {
-		t.Fatalf("SetForHead(adopted): %v", err)
-	}
-	if got.SetHash() == s0.set.SetHash() {
-		t.Fatal("adopted head must resolve to the NEW era set")
-	}
-
-	// (d) Fail-closed: a head cosigned by keys on NO chain is rejected.
-	rogue := newKitHWS(t, 3, 2, netID)
-	offChain := cosignHead(t, fullTreeHead(170), rogue.keys, rogue.privs, 2, netID)
-	if _, err := r.SetForHead(context.Background(), jrOriginator, offChain); err == nil {
-		t.Fatal("off-chain head must fail closed")
-	}
+// buildRotation mints a valid rotation old → next through the production
+// assembly path: the first sigCount OLD members authorize and every joiner
+// countersigns (Step-6 consent), so witness.VerifyRotation accepts it under
+// every current rule.
+func buildRotation(t *testing.T, old, next *witnesstest.Set, sigCount int, netID cosign.NetworkID) types.WitnessRotation {
+	t.Helper()
+	return witnesstest.MintRotation(t, netID, old, next, sigCount)
 }
 
-// TestJournalResolver_SetAt_AliasAndEraCorrect: SetAt resolves era-correct sets
-// when queried BY THE GOSSIP ALIAS with an alias-named asOf — proving the
-// canonicalization rewrite (the raw SDK walk would reject the alias asOf with
-// ErrAsOfLogMismatch against canonical-keyed records).
-func TestJournalResolver_SetAt_AliasAndEraCorrect(t *testing.T) {
-	r, s0, _ := twoEraFixture(t)
-
-	before, err := r.SetAt(context.Background(), jrOriginator,
-		types.LogPosition{LogDID: jrOriginator, Sequence: 99})
-	if err != nil {
-		t.Fatalf("SetAt(99): %v", err)
+// cosignHead produces a K-of-N cosigned tree head signed by the supplied set's
+// private keys — a real witness-cosigned head for the decode round-trip.
+func cosignHead(t *testing.T, head types.TreeHead, ws *witnesstest.Set, sigCount int, netID cosign.NetworkID) types.CosignedTreeHead {
+	t.Helper()
+	payload := cosign.NewTreeHeadPayload(head)
+	sigs := make([]types.WitnessSignature, sigCount)
+	for i := 0; i < sigCount; i++ {
+		sb, err := cosign.SignECDSA(payload, netID, cosign.HashAlgoSHA256, ws.Privs[i])
+		if err != nil {
+			t.Fatalf("SignECDSA head: %v", err)
+		}
+		sigs[i] = types.WitnessSignature{PubKeyID: ws.Keys[i].ID, SchemeTag: signatures.SchemeECDSA, SigBytes: sb}
 	}
-	if before.SetHash() != s0.set.SetHash() {
-		t.Fatal("asOf before the rotation must resolve the genesis set")
-	}
-
-	at, err := r.SetAt(context.Background(), jrOriginator,
-		types.LogPosition{LogDID: jrOriginator, Sequence: 100})
-	if err != nil {
-		t.Fatalf("SetAt(100): %v", err)
-	}
-	if at.SetHash() == s0.set.SetHash() {
-		t.Fatal("asOf at the rotation boundary (inclusive) must resolve the NEW set")
-	}
+	return types.CosignedTreeHead{TreeHead: head, Signatures: sigs}
 }
 
-// TestJournalResolver_CurrentSet_BootReconstruction: CurrentSet replays the
-// full chain — the value a restart must seed the live registry with.
-func TestJournalResolver_CurrentSet_BootReconstruction(t *testing.T) {
-	r, s0, _ := twoEraFixture(t)
-	cur, err := r.CurrentSet(context.Background(), jrLogDID)
-	if err != nil {
-		t.Fatalf("CurrentSet: %v", err)
-	}
-	if cur.SetHash() == s0.set.SetHash() {
-		t.Fatal("CurrentSet after one rotation must NOT be the genesis set")
-	}
-}
-
-// TestJournalResolver_UnknownLog_FailsClosed: a log with no configured trust
-// root must never resolve.
-func TestJournalResolver_UnknownLog_FailsClosed(t *testing.T) {
-	r, _, _ := twoEraFixture(t)
-	if _, err := r.CurrentSet(context.Background(), "did:web:stranger"); err == nil {
-		t.Fatal("unknown log must fail closed")
+// fullTreeHead returns a TreeHead with all commitment roots populated — cosign's
+// dual-commitment binding rejects an all-zero RootHash/SMTRoot.
+func fullTreeHead(size uint64) types.TreeHead {
+	return types.TreeHead{
+		RootHash:    [32]byte{0x01, 0xC0, 0x5C},
+		SMTRoot:     [32]byte{0x02, 0x5A, 0x7B},
+		ReceiptRoot: [32]byte{0x03, 0x4C, 0x7D},
+		TreeSize:    size,
 	}
 }
 
@@ -192,8 +108,8 @@ func (m *memSTHSource) LatestSTHWithTime(_ context.Context, originator string) (
 // the originator key the evidence store uses.
 func TestSTHHeadSource_DecodesAndTranslates(t *testing.T) {
 	netID := rotTestNetID()
-	s0 := newKitHWS(t, 3, 2, netID)
-	head := cosignHead(t, fullTreeHead(42), s0.keys, s0.privs, 2, netID)
+	s0 := witnesstest.NewSet(t, netID, 3, 2)
+	head := cosignHead(t, fullTreeHead(42), s0, 2, netID)
 	finding, err := findings.NewCosignedTreeHeadFinding(head, "https://ledger.example")
 	if err != nil {
 		t.Fatalf("NewCosignedTreeHeadFinding: %v", err)
@@ -231,30 +147,4 @@ func TestSTHHeadSource_DecodesAndTranslates(t *testing.T) {
 	if _, ok, _ := hs.LatestVerifiedHead(context.Background(), "did:web:stranger"); ok {
 		t.Fatal("unknown log must report no head")
 	}
-}
-
-// witnessSetKitHWS bundles a fixture-kit set; set/keys/privs alias the kit's
-// fields. Relocated here when the scan-per-resolution
-// HistoricalWitnessSetResolver was deleted (superseded by this journal-first
-// resolver).
-type witnessSetKitHWS struct {
-	ws    *witnesstest.Set
-	set   *cosign.WitnessKeySet
-	keys  []types.WitnessPublicKey
-	privs []*ecdsa.PrivateKey
-}
-
-func newKitHWS(t *testing.T, n, k int, netID cosign.NetworkID) witnessSetKitHWS {
-	ws := genWitnessSet(t, n, k, netID)
-	return witnessSetKitHWS{ws: ws, set: ws.KeySet, keys: ws.Keys, privs: ws.Privs}
-}
-
-// dualSignedRotation mints an ON-LOG-encodable rotation (both scheme tags set
-// + both signature slices non-empty) through the production assembly path:
-// the first sigCount OLD members authorize, every joiner countersigns
-// (Step-6 consent), and the result passes EncodeWitnessRotationPayload's
-// dual-signed structural validation by construction.
-func dualSignedRotation(t *testing.T, old, nw witnessSetKitHWS, sigCount int, netID cosign.NetworkID) types.WitnessRotation {
-	t.Helper()
-	return witnesstest.MintRotation(t, netID, old.ws, nw.ws, sigCount)
 }

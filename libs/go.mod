@@ -5,6 +5,7 @@ go 1.25.11
 require (
 	github.com/baseproof/baseproof v0.0.4-rc9
 	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.4.1
+	github.com/lib/pq v1.12.3
 	github.com/miekg/pkcs11 v1.1.2
 	github.com/rs/zerolog v1.35.1
 	github.com/transparency-dev/tessera v1.0.2

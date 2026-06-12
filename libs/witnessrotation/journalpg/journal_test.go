@@ -1,4 +1,4 @@
-// FILE PATH: services/auditor/internal/store/witness_rotation_journal_test.go
+// FILE PATH: libs/witnessrotation/journalpg/journal_test.go
 //
 // AT-1 tests — ZT-SCN-02 (Historical Bundle Verification, the Year-15
 // scenario). A witness set rotates S0 → S1 → S2 over time. Evidence cosigned
@@ -11,13 +11,16 @@
 //     historical set with witness.WitnessSetAt, and proves the verify-against-
 //     historical-not-modern mandate.
 //   - TestPostgresWitnessRotationJournal_RoundTrip_ZTSCN02 (AUDITOR_TEST_PG_DSN-
-//     gated) proves the DURABLE materialization: RecordRotation → the store's
-//     WitnessSetAt accessor reconstructs the same historical set off Postgres.
-package store
+//     gated — the CI matrix's shared test-PG env) proves the DURABLE
+//     materialization: RecordRotation → the store's WitnessSetAt accessor
+//     reconstructs the same historical set off Postgres.
+//   - TestJournalParity_MemoryMirrorsPostgres locks the cross-implementation
+//     contract: the in-memory journal and the durable journal expose
+//     byte-identical chains for the same scenario (one seam, two custodians).
+package journalpg
 
 import (
 	"context"
-	"crypto/ecdsa"
 	"database/sql"
 	"fmt"
 	"os"
@@ -27,92 +30,34 @@ import (
 	_ "github.com/lib/pq"
 
 	"github.com/baseproof/baseproof/crypto/cosign"
-	"github.com/baseproof/baseproof/crypto/signatures"
 	"github.com/baseproof/baseproof/types"
 	"github.com/baseproof/baseproof/witness"
 	"github.com/baseproof/baseproof/witness/witnesstest"
+
+	"github.com/baseproof/tooling/libs/witnessrotation"
+	"github.com/baseproof/tooling/libs/witnessrotation/internal/rottest"
 )
 
-// rotTestNetID is a fixed non-zero network id (NewWitnessKeySet rejects zero).
-func rotTestNetID() cosign.NetworkID {
-	var n cosign.NetworkID
-	for i := range n {
-		n[i] = byte(i + 1)
-	}
-	return n
-}
-
-// genWitnessSet mints an n-key, k-quorum ECDSA witness set via the SDK fixture
-// kit (the kit's private keys sign rotations / cosign heads under the set).
-func genWitnessSet(t *testing.T, n, k int, netID cosign.NetworkID) *witnesstest.Set {
-	t.Helper()
-	return witnesstest.NewSet(t, netID, n, k)
-}
-
-// buildRotation mints a valid rotation old → next through the production
-// assembly path: the first sigCount OLD members authorize and every joiner
-// countersigns (Step-6 consent), so witness.VerifyRotation accepts it under
-// every current rule.
-func buildRotation(t *testing.T, old, next *witnesstest.Set, sigCount int, netID cosign.NetworkID) types.WitnessRotation {
-	t.Helper()
-	return witnesstest.MintRotation(t, netID, old, next, sigCount)
-}
-
-// cosignHead produces a K-of-N cosigned tree head signed by the supplied set's
-// private keys — a real witness-cosigned head for the verify step.
-func cosignHead(
-	t *testing.T, head types.TreeHead,
-	keys []types.WitnessPublicKey, privs []*ecdsa.PrivateKey, sigCount int, netID cosign.NetworkID,
-) types.CosignedTreeHead {
-	t.Helper()
-	payload := cosign.NewTreeHeadPayload(head)
-	sigs := make([]types.WitnessSignature, sigCount)
-	for i := 0; i < sigCount; i++ {
-		sb, err := cosign.SignECDSA(payload, netID, cosign.HashAlgoSHA256, privs[i])
-		if err != nil {
-			t.Fatalf("SignECDSA head: %v", err)
-		}
-		sigs[i] = types.WitnessSignature{
-			PubKeyID:  keys[i].ID,
-			SchemeTag: signatures.SchemeECDSA,
-			SigBytes:  sb,
-		}
-	}
-	return types.CosignedTreeHead{TreeHead: head, Signatures: sigs}
-}
-
-// fullTreeHead returns a TreeHead with all commitment roots populated — cosign's
-// dual-commitment binding rejects an all-zero RootHash/SMTRoot.
-func fullTreeHead(size uint64) types.TreeHead {
-	return types.TreeHead{
-		RootHash:    [32]byte{0x01, 0xC0, 0x5C},
-		SMTRoot:     [32]byte{0x02, 0x5A, 0x7B},
-		ReceiptRoot: [32]byte{0x03, 0x4C, 0x7D},
-		TreeSize:    size,
-	}
-}
-
-// scn02Chain builds the S0→S1→S2 rotation chain shared by both tests:
+// scn02Chain builds the S0→S1→S2 rotation chain shared by the tests:
 // genesis S0, rotate to S1 at effective seq 100, to S2 at effective seq 200.
 type scn02Chain struct {
 	netID      cosign.NetworkID
 	logDID     string
 	s0, s1, s2 *cosign.WitnessKeySet
-	k1         []types.WitnessPublicKey
-	p1         []*ecdsa.PrivateKey
 	records    []types.WitnessRotationRecord
+	s1Kit      *witnesstest.Set
 }
 
 func buildSCN02Chain(t *testing.T, logDID string) scn02Chain {
 	t.Helper()
 	const n, k = 5, 3
-	netID := rotTestNetID()
-	s0 := genWitnessSet(t, n, k, netID)
-	s1 := genWitnessSet(t, n, k, netID)
-	s2 := genWitnessSet(t, n, k, netID)
+	netID := rottest.NetID()
+	s0 := witnesstest.NewSet(t, netID, n, k)
+	s1 := witnesstest.NewSet(t, netID, n, k)
+	s2 := witnesstest.NewSet(t, netID, n, k)
 
-	r1 := buildRotation(t, s0, s1, k, netID) // S0 authorizes S1
-	r2 := buildRotation(t, s1, s2, k, netID) // S1 authorizes S2
+	r1 := witnesstest.MintRotation(t, netID, s0, s1, k) // S0 authorizes S1
+	r2 := witnesstest.MintRotation(t, netID, s1, s2, k) // S1 authorizes S2
 
 	records := []types.WitnessRotationRecord{
 		{Rotation: r1, EffectivePos: types.LogPosition{LogDID: logDID, Sequence: 100}},
@@ -121,13 +66,13 @@ func buildSCN02Chain(t *testing.T, logDID string) scn02Chain {
 	return scn02Chain{
 		netID: netID, logDID: logDID,
 		s0: s0.KeySet, s1: s1.KeySet, s2: s2.KeySet,
-		k1: s1.Keys, p1: s1.Privs,
+		s1Kit:   s1,
 		records: records,
 	}
 }
 
 func TestWitnessSetAt_ReconstructsHistoricalSet_ZTSCN02(t *testing.T) {
-	c := buildSCN02Chain(t, "did:web:ledger.zt-scn-02.test")
+	c := buildSCN02Chain(t, "did:web:source-log.zt-scn-02.test")
 
 	at := func(seq uint64) *cosign.WitnessKeySet {
 		set, err := witness.WitnessSetAt(c.s0, c.records, types.LogPosition{LogDID: c.logDID, Sequence: seq})
@@ -157,8 +102,8 @@ func TestWitnessSetAt_ReconstructsHistoricalSet_ZTSCN02(t *testing.T) {
 	// verify against the RECONSTRUCTED S1 — and MUST NOT verify against the
 	// modern set S2. "Never silently fail by evaluating historical data
 	// against modern keys."
-	head := fullTreeHead(150)
-	s1Cosigned := cosignHead(t, head, c.k1, c.p1, 3, c.netID)
+	head := rottest.FullTreeHead(150)
+	s1Cosigned := rottest.CosignHead(t, head, c.s1Kit.Keys, c.s1Kit.Privs, 3, c.netID)
 
 	reconstructedS1 := at(150)
 	if vc := cosign.VerifyTreeHeadCosignatures(s1Cosigned, reconstructedS1); vc < 3 {
@@ -170,11 +115,9 @@ func TestWitnessSetAt_ReconstructsHistoricalSet_ZTSCN02(t *testing.T) {
 	}
 }
 
-// TestPostgresWitnessRotationJournal_RoundTrip_ZTSCN02 proves the DURABLE
-// materialization: rotations journaled to Postgres, then reconstructed off the
-// store via its WitnessSetAt accessor — same verdict as the in-memory chain.
-// Gated on AUDITOR_TEST_PG_DSN (skips otherwise).
-func TestPostgresWitnessRotationJournal_RoundTrip_ZTSCN02(t *testing.T) {
+// openTestPG opens the CI matrix's shared test Postgres, skipping when unset.
+func openTestPG(t *testing.T) *sql.DB {
+	t.Helper()
 	dsn := os.Getenv("AUDITOR_TEST_PG_DSN")
 	if dsn == "" {
 		t.Skip("AUDITOR_TEST_PG_DSN unset — skipping live Postgres integration")
@@ -183,8 +126,15 @@ func TestPostgresWitnessRotationJournal_RoundTrip_ZTSCN02(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sql.Open: %v", err)
 	}
-	defer func() { _ = db.Close() }()
+	t.Cleanup(func() { _ = db.Close() })
+	return db
+}
 
+// TestPostgresWitnessRotationJournal_RoundTrip_ZTSCN02 proves the DURABLE
+// materialization: rotations journaled to Postgres, then reconstructed off the
+// store via its WitnessSetAt accessor — same verdict as the in-memory chain.
+func TestPostgresWitnessRotationJournal_RoundTrip_ZTSCN02(t *testing.T) {
+	db := openTestPG(t)
 	ctx := context.Background()
 	j, err := NewPostgresWitnessRotationJournal(db)
 	if err != nil {
@@ -196,7 +146,7 @@ func TestPostgresWitnessRotationJournal_RoundTrip_ZTSCN02(t *testing.T) {
 
 	// Unique per-run logDID: the journal is append-only (NEVER DELETE), so
 	// isolate runs by identity rather than cleanup.
-	logDID := fmt.Sprintf("did:web:ledger.zt-scn-02.test/%d", time.Now().UnixNano())
+	logDID := fmt.Sprintf("did:web:source-log.zt-scn-02.test/%d", time.Now().UnixNano())
 	c := buildSCN02Chain(t, logDID)
 
 	for _, rec := range c.records {
@@ -221,8 +171,8 @@ func TestPostgresWitnessRotationJournal_RoundTrip_ZTSCN02(t *testing.T) {
 
 	// The reconstructed historical set verifies an S1-cosigned head; the
 	// modern set (seq 250) does not — ZT-SCN-02 through the durable path.
-	head := fullTreeHead(150)
-	s1Cosigned := cosignHead(t, head, c.k1, c.p1, 3, c.netID)
+	head := rottest.FullTreeHead(150)
+	s1Cosigned := rottest.CosignHead(t, head, c.s1Kit.Keys, c.s1Kit.Privs, 3, c.netID)
 	if vc := cosign.VerifyTreeHeadCosignatures(s1Cosigned, got); vc < 3 {
 		t.Fatalf("durably-reconstructed S1 failed to verify the S1-cosigned head: validCount=%d", vc)
 	}
@@ -259,5 +209,89 @@ func TestPostgresWitnessRotationJournal_RoundTrip_ZTSCN02(t *testing.T) {
 	}
 	if rebuilt.SetHash() != c.s1.SetHash() {
 		t.Fatalf("after rebuild, reconstruction must be S1 again; got %x want %x", rebuilt.SetHash(), c.s1.SetHash())
+	}
+}
+
+// TestJournalParity_MemoryMirrorsPostgres locks the one-seam-two-custodians
+// contract: for the same recorded scenario (out-of-order delivery, idempotent
+// re-delivery, null-pos refusal), the in-memory journal and the durable
+// journal return BYTE-IDENTICAL chains and identical refusals — so a consumer
+// wired against either resolves identically.
+func TestJournalParity_MemoryMirrorsPostgres(t *testing.T) {
+	db := openTestPG(t)
+	ctx := context.Background()
+	pg, err := NewPostgresWitnessRotationJournal(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := pg.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	mem := witnessrotation.NewMemoryRotationJournal()
+
+	logDID := fmt.Sprintf("did:web:source-log.parity.test/%d", time.Now().UnixNano())
+	c := buildSCN02Chain(t, logDID)
+
+	type journal interface {
+		RecordRotation(ctx context.Context, record types.WitnessRotationRecord) error
+		RecordsFor(ctx context.Context, logDID string) ([]types.WitnessRotationRecord, error)
+	}
+	for name, j := range map[string]journal{"pg": pg, "memory": mem} {
+		// Out of order + duplicate — both must converge to the same chain.
+		if err := j.RecordRotation(ctx, c.records[1]); err != nil {
+			t.Fatalf("%s: record r2: %v", name, err)
+		}
+		if err := j.RecordRotation(ctx, c.records[0]); err != nil {
+			t.Fatalf("%s: record r1: %v", name, err)
+		}
+		if err := j.RecordRotation(ctx, c.records[1]); err != nil {
+			t.Fatalf("%s: duplicate r2: %v", name, err)
+		}
+		// Null position refuses identically.
+		bad := c.records[0]
+		bad.EffectivePos = types.LogPosition{}
+		if err := j.RecordRotation(ctx, bad); err == nil {
+			t.Fatalf("%s: null EffectivePos must refuse", name)
+		}
+	}
+
+	pgChain, err := pg.RecordsFor(ctx, logDID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	memChain, err := mem.RecordsFor(ctx, logDID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pgChain) != 2 || len(memChain) != 2 {
+		t.Fatalf("chain lengths: pg=%d mem=%d, want 2/2", len(pgChain), len(memChain))
+	}
+	for i := range pgChain {
+		if pgChain[i].EffectivePos != memChain[i].EffectivePos {
+			t.Fatalf("record %d positions diverge: pg=%+v mem=%+v", i, pgChain[i].EffectivePos, memChain[i].EffectivePos)
+		}
+		pgBytes, err := witness.EncodeWitnessRotationPayload(pgChain[i].Rotation)
+		if err != nil {
+			t.Fatal(err)
+		}
+		memBytes, err := witness.EncodeWitnessRotationPayload(memChain[i].Rotation)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(pgBytes) != string(memBytes) {
+			t.Fatalf("record %d canonical bytes diverge between implementations", i)
+		}
+	}
+
+	// And the resolver reaches the same era verdicts off either journal.
+	for name, src := range map[string]witnessrotation.RotationRecordSource{"pg": pg, "memory": mem} {
+		r, err := witnessrotation.NewJournalWitnessSetResolver(src, []witnessrotation.LogTrustRoot{{LogDID: logDID, Genesis: c.s0}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := r.SetAt(ctx, logDID, types.LogPosition{LogDID: logDID, Sequence: 150})
+		if err != nil || got.SetHash() != c.s1.SetHash() {
+			t.Fatalf("%s-backed resolver at seq 150: %v", name, err)
+		}
 	}
 }

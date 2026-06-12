@@ -15,8 +15,12 @@ import (
 	"testing"
 	"time"
 
+	_ "github.com/lib/pq"
+
 	"github.com/baseproof/baseproof/gossip"
 	"github.com/baseproof/baseproof/types"
+
+	"github.com/baseproof/tooling/libs/witnessrotation/journalpg"
 )
 
 func openPGOrSkip(t *testing.T) *sql.DB {
@@ -80,7 +84,7 @@ func TestPG_RotationAT2_ScanCursor(t *testing.T) {
 func TestPG_RotationAT2_LatestRecordedAt(t *testing.T) {
 	db := openPGOrSkip(t)
 	ctx := context.Background()
-	j, err := NewPostgresWitnessRotationJournal(db)
+	j, err := journalpg.NewPostgresWitnessRotationJournal(db)
 	if err != nil {
 		t.Fatalf("NewPostgresWitnessRotationJournal: %v", err)
 	}
