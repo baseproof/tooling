@@ -840,6 +840,40 @@ func composeBuilderLoop(
 		)
 	}
 
+	// PR-4d — the derivation chain for the publisher's parent target:
+	// WHICH from the constitution; WHERE from the on-log declaration
+	// projection; env only as the pre-first-declaration canary, cross-checked
+	// fatal once a declaration exists; a constitutional target with no
+	// endpoint anywhere refuses boot. (Pre-targets constitutions skip all of
+	// this — the legacy env path is untouched.) Publish fan-out beyond the
+	// first derived target rides the multi-parent publisher extension; the
+	// chain itself — and its fatals — are fully in force here.
+	if cfg.GenesisBootstrapDocument.GenesisAnchoring != nil && len(cfg.GenesisBootstrapDocument.GenesisAnchoring.Targets) > 0 {
+		if atPos, ok := parseSchemaEnv("LEDGER_ANCHOR_TARGET_SCHEMA"); ok {
+			derivationQuery := indexes.NewPostgresQueryAPI(ctx, pool, compositeReader, cfg.LogDID)
+			src := buildAnchorTargetDeclarationSource(derivationQuery, atPos)
+			recs, srcErr := src(ctx)
+			if srcErr != nil {
+				recs = nil // walk unavailable: derivation proceeds on canary-only terms
+			}
+			asOf := types.LogPosition{LogDID: cfg.LogDID, Sequence: ^uint64(0)}
+			_, declared, _ := projectAnchorTargetGraph(cfg.GenesisBootstrapDocument, cfg.LogDID, recs, asOf)
+			eps, depErr := deriveParentEndpoints(cfg.GenesisBootstrapDocument, declared, cfg.ParentLogDID, cfg.ParentAdmissionURL)
+			if depErr != nil {
+				panic(fmt.Sprintf("anchoring WHERE derivation refused boot: %v", depErr))
+			}
+			if len(eps) > 0 {
+				cfg.ParentLogDID = eps[0].LogDID
+				cfg.ParentAdmissionURL = eps[0].AdmissionURL
+				d.Logger.Info("anchoring WHERE: publisher parent derived",
+					"target", eps[0].TargetNetworkID[:16],
+					"parent_log_did", eps[0].LogDID,
+					"from_declaration", eps[0].FromDeclaration,
+					"derived_targets", len(eps))
+			}
+		}
+	}
+
 	// PR-4b read-back: close the parent submit's 202-and-forget. The
 	// confirmer pages the parent's by-source discovery for OUR anchors,
 	// reads them back through the parent log handle (SDK MultiLog), and
@@ -1532,6 +1566,37 @@ func buildProtocolVersionAmendmentSource(
 // L3 fetcher adapters.
 // ────────────────────────────────────────────────────────────────
 
+// buildAnchorTargetDeclarationSource walks BP-ENTRY-ANCHOR-TARGET-V1
+// declarations (PR-4d / Tier 1.5): the on-log WHERE for each constitutional
+// anchor target. Same schema-position discipline as its sibling walkers.
+func buildAnchorTargetDeclarationSource(
+	q *indexes.PostgresQueryAPI,
+	schemaPos types.LogPosition,
+) func(ctx context.Context) ([]network.AnchorTargetDeclarationRecord, error) {
+	return func(ctx context.Context) ([]network.AnchorTargetDeclarationRecord, error) {
+		entries, err := q.QueryBySchemaRef(schemaPos)
+		if err != nil {
+			return nil, err
+		}
+		recs := make([]network.AnchorTargetDeclarationRecord, 0, len(entries))
+		for i := range entries {
+			e, err := envelope.Deserialize(entries[i].CanonicalBytes)
+			if err != nil {
+				continue
+			}
+			p, err := network.DecodeAnchorTargetDeclarationPayload(e.DomainPayload)
+			if err != nil {
+				continue
+			}
+			recs = append(recs, network.AnchorTargetDeclarationRecord{
+				EffectivePos: entries[i].Position,
+				Payload:      p,
+			})
+		}
+		return recs, nil
+	}
+}
+
 func buildWitnessEndpointDeclarationSource(
 	q *indexes.PostgresQueryAPI,
 	schemaPos types.LogPosition,
@@ -1661,8 +1726,9 @@ func buildAuthoritativeResolver(
 	labelPos, hasLabelSchema := parseSchemaEnv("LEDGER_WITNESS_LABEL_SCHEMA")
 	auditorPos, hasAuditorSchema := parseSchemaEnv("LEDGER_AUDITOR_REGISTRATION_SCHEMA")
 	amendPos, hasAmendmentSchema := parseSchemaEnv("LEDGER_AUDITOR_SCOPE_AMENDMENT_SCHEMA")
+	anchorTargetPos, hasAnchorTargetSchema := parseSchemaEnv("LEDGER_ANCHOR_TARGET_SCHEMA")
 
-	if !hasWitnessEPSchema && !hasLabelSchema && !hasAuditorSchema && !hasAmendmentSchema {
+	if !hasWitnessEPSchema && !hasLabelSchema && !hasAuditorSchema && !hasAmendmentSchema && !hasAnchorTargetSchema {
 		logger.Info("v1.33.0: AuthoritativeResolver disabled (no schema env vars set); resolver wire-up skipped")
 		return nil, nil
 	}
@@ -1733,6 +1799,25 @@ func buildAuthoritativeResolver(
 			resolver.AuditorScopeAmendmentRecords = recs
 			logger.Info("v1.33.0: AuditorScopeAmendment records loaded",
 				"count", len(recs))
+		}
+	}
+	if hasAnchorTargetSchema {
+		// PR-4d — closes #94: the FederationGraph finally has a producer.
+		// ResolvePeer's on-log branch becomes the live path; the env canary
+		// is reachable only in the genuine pre-first-declaration window
+		// (logAnchorTargetPosture says which one we're in, honestly).
+		src := buildAnchorTargetDeclarationSource(q, anchorTargetPos)
+		recs, err := src(ctx)
+		if err != nil {
+			logger.Warn("PR-4d: AnchorTargetDeclaration source initial fetch failed", "error", err)
+		} else {
+			asOf := types.LogPosition{LogDID: ourLogDID, Sequence: ^uint64(0)}
+			graph, declared, undeclared := projectAnchorTargetGraph(doc, ourLogDID, recs, asOf)
+			if graph != nil {
+				resolver.FederationGraph = *graph
+			}
+			logAnchorTargetPosture(logger, graph, declared, undeclared,
+				os.Getenv("LEDGER_PARENT_ADMISSION_URL"), time.Now())
 		}
 	}
 
