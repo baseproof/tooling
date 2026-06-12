@@ -67,11 +67,13 @@ import (
 	sdkdid "github.com/baseproof/baseproof/did"
 	"github.com/baseproof/baseproof/exchange/policy"
 	sdklog "github.com/baseproof/baseproof/log"
+
 	"github.com/baseproof/baseproof/log/discover"
 	"github.com/baseproof/baseproof/network"
 	"github.com/baseproof/baseproof/storage"
 	"github.com/baseproof/baseproof/types"
 	"github.com/baseproof/baseproof/witness"
+	"github.com/baseproof/tooling/libs/anchorfeed"
 
 	"go.opentelemetry.io/otel"
 
@@ -184,7 +186,6 @@ type Config struct {
 
 	NetworkPeers   api.WireFederationGraph
 	NetworkMirrors api.WireMirrorManifest
-	NetworkAnchors api.WireAnchorChain
 }
 
 // walEntryTrace adapts the WAL committer to builder.EntryTraceReader: it resolves
@@ -839,6 +840,36 @@ func composeBuilderLoop(
 		)
 	}
 
+	// PR-4b read-back: close the parent submit's 202-and-forget. The
+	// confirmer pages the parent's by-source discovery for OUR anchors,
+	// reads them back through the parent log handle (SDK MultiLog), and
+	// records the durable first-seen confirmation. Wired only when the
+	// parent's read base is knowable (the admission URL's origin) — the 4d
+	// derivation chain replaces this env-derived base with the on-log
+	// declaration's read endpoint.
+	var confirmParent func(ctx context.Context, head types.CosignedTreeHead) error
+	if parentSubmitFn != nil && cfg.ParentAdmissionURL != "" {
+		parentReadBase := strings.TrimSuffix(cfg.ParentAdmissionURL, "/v1/entries")
+		parentFetcher, pfErr := sdklog.NewHTTPEntryFetcher(sdklog.HTTPEntryFetcherConfig{
+			BaseURL: parentReadBase,
+			LogDID:  cfg.ParentLogDID,
+			Client:  d.OutboundHTTPClient,
+		})
+		if pfErr != nil {
+			return nil, nil // unreachable: all three fields are non-empty here
+		}
+		confirmParent, _ = anchor.NewParentAnchorConfirmer(anchor.ParentReadBackConfig{
+			ParentLogDID: cfg.ParentLogDID,
+			OwnLogDID:    cfg.LogDID,
+			OwnNetworkID: cfg.NetworkID,
+			FetchSeqs: func(fctx context.Context) ([]uint64, error) {
+				return anchorfeed.FetchBySourceSeqs(fctx, d.OutboundHTTPClient, parentReadBase, cfg.LogDID, 256)
+			},
+			ParentFetcher: parentFetcher,
+			Recorder:      store.NewAnchorConfirmationStore(d.PgPool.DB),
+		})
+	}
+
 	anchorPub := anchor.NewPublisher(
 		anchor.PublisherConfig{
 			LedgerDID:     cfg.LedgerDID,
@@ -852,6 +883,7 @@ func composeBuilderLoop(
 			ParentAdmissionURL:   cfg.ParentAdmissionURL,
 			ParentAnchorInterval: cfg.ParentAnchorInterval,
 			ParentSubmitFn:       parentSubmitFn,
+			ConfirmParentAnchor:  confirmParent,
 		},
 		tesseraAdapter,
 		treeHeadStoreCosignedAdapter{store: d.TreeHeadStore},
@@ -1131,8 +1163,12 @@ func composeHandlers(
 		WitnessesCurrent:   api.NewWitnessesCurrentHandler(witnessHistoryFetcher),
 		WitnessesBySetHash: api.NewWitnessesBySetHashHandler(witnessHistoryFetcher),
 		WitnessesAtSeq:     api.NewWitnessesAtSeqHandler(witnessHistoryFetcher),
-		NetworkAnchors:     api.NewNetworkAnchorsHandler(cfg.NetworkAnchors),
-		AnchorsBySource:    api.NewAnchorsBySourceHandler(queryDeps),
+		// PR-4b: the anchor chain is DERIVED from the publisher read-back's
+		// durable confirmations — never an operator file (the hand-curated
+		// LEDGER_NETWORK_ANCHORS_FILE is deleted). Empty chain = valid
+		// (a log that has never anchored anywhere).
+		NetworkAnchors:  api.NewNetworkAnchorsHandler(anchorChainProvider(store.NewAnchorConfirmationStore(d.PgPool.DB), cfg.LogDID)),
+		AnchorsBySource: api.NewAnchorsBySourceHandler(queryDeps),
 
 		// v1.32.0 L3 — materialized walker-projection endpoints.
 		NetworkLabels:           api.NewNetworkLabelsHandler(d.WitnessLabelsFetcher),
@@ -2464,5 +2500,30 @@ func buildIdentityDeps(d *deps.AppDeps) api.IdentityDeps {
 		Credits:     d.CreditStore,
 		DIDResolver: legacyResolver,
 		Verifier:    registry,
+	}
+}
+
+// anchorChainProvider derives the /v1/network/anchors chain from the durable
+// read-back confirmations: one hop per parent, freshest first-seen. The
+// WitnessSetHash field is served zero — the parent's set hash at admission is
+// the parent's state, not ours; consumers fetch it live via the parent's
+// /v1/network/witnesses/* (the SDK walker re-verifies every hop regardless).
+func anchorChainProvider(s *store.AnchorConfirmationStore, logDID string) func(ctx context.Context) (api.WireAnchorChain, error) {
+	zeroSetHash := strings.Repeat("0", 64)
+	return func(ctx context.Context) (api.WireAnchorChain, error) {
+		latest, err := s.LatestPerParent(ctx)
+		if err != nil {
+			return api.WireAnchorChain{}, err
+		}
+		chain := api.WireAnchorChain{LogDID: logDID}
+		for _, c := range latest {
+			chain.Hops = append(chain.Hops, api.WireAnchorChainEntry{
+				ParentLogDID:         c.ParentLogDID,
+				WitnessSetHash:       zeroSetHash,
+				LatestAnchorSeq:      c.ParentSeq,
+				LatestAnchorTreeSize: c.AnchoredTreeSize,
+			})
+		}
+		return chain, nil
 	}
 }

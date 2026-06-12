@@ -10,18 +10,18 @@ DESCRIPTION:
 	logs onto which THIS log's tree heads have been anchored
 	(plan §I.4 / §II.9 federation-upward direction).
 
-	Operator-supplied via LEDGER_NETWORK_ANCHORS_FILE (JSON
-	matching api.WireAnchorChain). The information is genuinely
-	cross-log — LatestAnchorSeq + LatestAnchorTreeSize point at
-	the anchor entry's position on the PARENT's log, which THIS
-	ledger does not authoritatively know without querying the
-	parent. Operator-curated metadata closes the gap; SDK
-	consumers re-verify each hop against on-log anchor entries
-	(the FindCrossLogPath walker's responsibility).
+	RE-ROOTED FROM CONFIRMATIONS (PR-4b): the chain is served from the
+	durable anchor_confirmations rows the publisher's READ-BACK writes —
+	LatestAnchorSeq is the position the parent ACTUALLY assigned, learned
+	by reading our anchor back through the parent's by-source page, never
+	operator-curated. The hand-edited LEDGER_NETWORK_ANCHORS_FILE is
+	deleted: a chain file nobody verifies is exactly the
+	env-as-authority pattern the WHERE design demotes.
 
-	Empty path / zero LogDID → handler 404 ("not configured").
-	The SDK's I.4 FetchAnchorChain treats 404 as "no chain
-	available" and falls through to its archive-fallback path.
+	An EMPTY chain (no confirmations yet) serves Hops: [] with 200 — a
+	log that has never anchored anywhere is a valid state, not a
+	misconfiguration. 404 only when the handler itself is unwired (a
+	read-only binary with no confirmation store).
 
 KEY ARCHITECTURAL DECISIONS:
 
@@ -41,6 +41,7 @@ KEY ARCHITECTURAL DECISIONS:
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 
@@ -77,19 +78,23 @@ type WireAnchorChain struct {
 }
 
 // NewNetworkAnchorsHandler returns the GET /v1/network/anchors
-// handler. The captured chain is loaded at boot from
-// LEDGER_NETWORK_ANCHORS_FILE. Empty LogDID (no file configured)
-// triggers a 404 — the chain is structurally unavailable.
+// handler, serving the chain the provider derives from the durable
+// anchor_confirmations rows (one hop per parent, freshest first-seen). A
+// provider error is a 500 — the chain is real state, not a static file.
 //
 // Cache-Control: public, max-age=300 — same staleness floor as
 // /v1/network/peers + /v1/network/mirrors. Anchor cadence is
 // operationally measured in minutes/hours; live confirmation of
 // each hop is the SDK I.4 walker's job.
-func NewNetworkAnchorsHandler(chain WireAnchorChain) http.HandlerFunc {
-	configured := chain.LogDID != ""
+func NewNetworkAnchorsHandler(provider func(ctx context.Context) (WireAnchorChain, error)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !configured {
+		if provider == nil {
 			http.Error(w, "anchor chain not configured", http.StatusNotFound)
+			return
+		}
+		chain, err := provider(r.Context())
+		if err != nil {
+			http.Error(w, "anchor chain unavailable", http.StatusInternalServerError)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")

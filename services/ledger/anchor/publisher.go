@@ -98,7 +98,16 @@ type PublisherConfig struct {
 	// publishing. Independent of Interval (the AnchorSources
 	// cadence) so operators can run the two loops at different
 	// rates. Defaults to Interval when zero.
-	ParentLogDID         string
+	ParentLogDID string
+
+	// ConfirmParentAnchor is the optional READ-BACK (anchor/confirm.go):
+	// after a successful parent submit, confirm the anchor actually landed
+	// (by-source discovery -> parent read-back -> durable
+	// anchor_confirmations row). Best-effort per tick: a failure is logged
+	// as published-but-unconfirmed (the alarm direction) and retried on the
+	// next publish — RecordFirstSeen is idempotent. Nil = no read-back
+	// (tests / source-only publishers).
+	ConfirmParentAnchor  func(ctx context.Context, head types.CosignedTreeHead) error
 	ParentAdmissionURL   string
 	ParentAnchorInterval time.Duration
 
@@ -416,6 +425,22 @@ func (p *Publisher) publishParentAnchor(ctx context.Context) error {
 		"parent_log_did", p.cfg.ParentLogDID,
 		"tree_size", head.TreeSize,
 		"cosignatures", len(head.Signatures))
+
+	// Read-back: close the 202-and-forget. Failure here is NOT a publish
+	// failure — the anchor was submitted; it is published-but-unconfirmed,
+	// logged toward alarm and retried next tick (first-seen is idempotent).
+	if p.cfg.ConfirmParentAnchor != nil {
+		if cErr := p.cfg.ConfirmParentAnchor(ctx, *head); cErr != nil {
+			p.logger.Warn("anchor: parent anchor published but UNCONFIRMED",
+				"parent_log_did", p.cfg.ParentLogDID,
+				"tree_size", head.TreeSize,
+				"error", cErr)
+		} else {
+			p.logger.Info("anchor: parent anchor confirmed (read-back)",
+				"parent_log_did", p.cfg.ParentLogDID,
+				"tree_size", head.TreeSize)
+		}
+	}
 	return nil
 }
 
