@@ -180,3 +180,76 @@ func TestResolveBundle_EnvAndFlagPrecedence(t *testing.T) {
 		t.Fatal("an env pointing at a missing network must error, not fall back")
 	}
 }
+
+// ─── PRE-0b: --pin at first contact ──────────────────────────────────
+
+func TestNetworkAdd_PinFlag_FirstContactVerified(t *testing.T) {
+	t.Setenv("BASEPROOF_CONFIG_DIR", t.TempDir())
+	idA := strings.Repeat(pinIDa, 32)
+
+	// The right pin: first contact is VERIFICATION, not TOFU.
+	if err := addNet(t, "alpha", "--from", pinBundle(t, pinIDa, "https://a1"), "--pin", idA); err != nil {
+		t.Fatalf("matching --pin must accept: %v", err)
+	}
+
+	// The wrong pin: refused BEFORE anything is written.
+	err := addNet(t, "beta", "--from", pinBundle(t, pinIDb, "https://b1"), "--pin", idA)
+	if err == nil || !strings.Contains(err.Error(), "refusing first contact") {
+		t.Fatalf("a source claiming a different id than --pin must refuse: %v", err)
+	}
+	if _, lerr := loadNetwork("beta"); lerr == nil {
+		t.Fatal("refused first contact must leave no stored bundle")
+	}
+	if pins, _ := loadPins(); pins["beta"].NetworkID != "" {
+		t.Fatal("refused first contact must leave no pin")
+	}
+
+	// Malformed pin: rejected with the format named.
+	err = addNet(t, "gamma", "--from", pinBundle(t, pinIDa, "https://c1"), "--pin", "not-hex")
+	if err == nil || !strings.Contains(err.Error(), "64-hex") {
+		t.Fatalf("a malformed --pin must name the expected format: %v", err)
+	}
+}
+
+// ─── PRE-0b: remove with the pin tombstone ───────────────────────────
+
+func TestNetworkRemove_PinTombstonesClosingTheResetSideDoor(t *testing.T) {
+	t.Setenv("BASEPROOF_CONFIG_DIR", t.TempDir())
+	if err := addNet(t, "alpha", "--from", pinBundle(t, pinIDa, "https://a1")); err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	if err := RunNetwork(context.Background(), []string{"remove", "alpha"}); err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+	if _, err := loadNetwork("alpha"); err == nil {
+		t.Fatal("remove must delete the stored bundle")
+	}
+	// The side door: remove + re-add with a DIFFERENT identity must STILL
+	// refuse — the pin tombstones.
+	if err := addNet(t, "alpha", "--from", pinBundle(t, pinIDb, "https://evil")); err == nil {
+		t.Fatal("remove+add must not reset the trust pin")
+	}
+	// Same identity re-adds fine.
+	if err := addNet(t, "alpha", "--from", pinBundle(t, pinIDa, "https://a2")); err != nil {
+		t.Fatalf("same-identity re-add after remove: %v", err)
+	}
+}
+
+func TestNetworkRemove_ClearsActiveAndRejectsUnknown(t *testing.T) {
+	t.Setenv("BASEPROOF_CONFIG_DIR", t.TempDir())
+	if err := addNet(t, "alpha", "--from", pinBundle(t, pinIDa, "https://a1")); err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	if err := setActiveNetwork("alpha"); err != nil {
+		t.Fatal(err)
+	}
+	if err := RunNetwork(context.Background(), []string{"remove", "alpha"}); err != nil {
+		t.Fatalf("remove active: %v", err)
+	}
+	if cfg, _ := loadConfig(); cfg.ActiveNetwork != "" {
+		t.Errorf("removing the active network must clear the active pointer, got %q", cfg.ActiveNetwork)
+	}
+	if err := RunNetwork(context.Background(), []string{"remove", "ghost"}); err == nil {
+		t.Error("removing an unknown name must error")
+	}
+}

@@ -11,6 +11,7 @@ import (
 	"flag"
 	"fmt"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -32,8 +33,10 @@ func RunNetwork(ctx context.Context, args []string) error {
 		return networkUse(rest)
 	case "show":
 		return networkShow(rest)
+	case "remove":
+		return networkRemove(rest)
 	default:
-		return fmt.Errorf("network: unknown subcommand %q (add|list|use|show)", sub)
+		return fmt.Errorf("network: unknown subcommand %q (add|list|use|show|remove)", sub)
 	}
 }
 
@@ -58,6 +61,7 @@ func networkAdd(ctx context.Context, args []string) error {
 		logDID     = fs.String("log-did", "", "log DID (--from-ledger; else taken from /v1/log-info)")
 		use        = fs.Bool("use", false, "set this network active after adding")
 		repin      = fs.Bool("repin", false, "explicitly replace this name's pinned trust root if the offered network id differs (prints old → new; without it, a mismatch refuses)")
+		pin        = fs.String("pin", "", "REQUIRE the added network's id to equal this 64-hex id (the out-of-band expected identity); first contact stops being trust-on-first-use")
 		timeout    = fs.Duration("timeout", 30*time.Second, "per-request HTTP timeout")
 	)
 	if err := fs.Parse(args); err != nil {
@@ -85,6 +89,20 @@ func networkAdd(ctx context.Context, args []string) error {
 		return err
 	}
 
+	// Operator-supplied expected identity (--pin): the out-of-band check that
+	// turns first contact from trust-on-first-use into verification. Checked
+	// BEFORE anything is written, against whatever the source claimed.
+	if *pin != "" {
+		want := strings.ToLower(strings.TrimSpace(*pin))
+		if len(want) != 64 || !isHex(want) {
+			return fmt.Errorf("network add: --pin must be the 64-hex network id (got %q)", *pin)
+		}
+		if b.NetworkID != want {
+			return fmt.Errorf("network add: the source claims network id %s but --pin expects %s — refusing first contact",
+				short(b.NetworkID), short(want))
+		}
+	}
+
 	// Trust-boundary moment: a known name may only ever mean ONE network.
 	// The prior identity is the pin if one exists, else the already-stored
 	// bundle's id (stores predating pins.json get the same protection). A
@@ -105,7 +123,7 @@ func networkAdd(ctx context.Context, args []string) error {
 	case priorID == "" || priorID == b.NetworkID:
 		// first contact, or an identity-preserving refresh
 	case *repin:
-		fmt.Printf("network: REPINNING %q  %s → %s\n", name, short(priorID), short(b.NetworkID))
+		fmt.Fprintf(os.Stderr, "network: REPINNING %q  %s → %s\n", name, short(priorID), short(b.NetworkID))
 	default:
 		return fmt.Errorf("network add: %q is pinned to network id %s, but the offered bundle claims %s — refusing: a different network is claiming a known name. If the identity change is genuine, re-run with --repin",
 			name, short(priorID), short(b.NetworkID))
@@ -119,14 +137,14 @@ func networkAdd(ctx context.Context, args []string) error {
 		if err := savePins(pins); err != nil {
 			return err
 		}
-		fmt.Printf("network: pinned %q to network id %s — verify this id out-of-band before trusting writes\n", name, b.NetworkID)
+		fmt.Fprintf(os.Stderr, "network: pinned %q to network id %s — verify this id out-of-band before trusting writes\n", name, b.NetworkID)
 	}
-	fmt.Printf("network: added %q  (id %s, endpoint %s)\n", name, short(b.NetworkID), b.Endpoint)
+	fmt.Fprintf(os.Stderr, "network: added %q  (id %s, endpoint %s)\n", name, short(b.NetworkID), b.Endpoint)
 	if *use {
 		if err := setActiveNetwork(name); err != nil {
 			return err
 		}
-		fmt.Printf("network: %q is now active\n", name)
+		fmt.Fprintf(os.Stderr, "network: %q is now active\n", name)
 	}
 	return nil
 }
@@ -138,8 +156,49 @@ func networkUse(args []string) error {
 	if err := setActiveNetwork(args[0]); err != nil {
 		return err
 	}
-	fmt.Printf("network: %q is now active\n", args[0])
+	fmt.Fprintf(os.Stderr, "network: %q is now active\n", args[0])
 	return nil
+}
+
+// networkRemove deletes a stored network's BUNDLE — but the pin TOMBSTONES:
+// the identity record survives removal, so re-adding the same name with a
+// different network id still refuses. Otherwise remove+add would be a
+// pin-reset side door around the --repin ceremony.
+func networkRemove(args []string) error {
+	if len(args) != 1 {
+		return fmt.Errorf("usage: baseproof network remove <name>")
+	}
+	name := args[0]
+	p, err := networkFile(name)
+	if err != nil {
+		return err
+	}
+	if err := os.Remove(p); err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("network remove: no stored network %q", name)
+		}
+		return fmt.Errorf("network remove: %w", err)
+	}
+	// A dangling active pointer would break every verb with a confusing
+	// error; clear it loudly instead.
+	if cfg, cErr := loadConfig(); cErr == nil && cfg.ActiveNetwork == name {
+		if sErr := saveConfig(cliConfig{}); sErr != nil {
+			return fmt.Errorf("network remove: clear active network: %w", sErr)
+		}
+		fmt.Fprintf(os.Stderr, "network: %q was the active network — no network is active now\n", name)
+	}
+	fmt.Fprintf(os.Stderr, "network: removed %q (its trust pin remains — re-adding this name with a DIFFERENT network id will refuse; use `network add --repin` if the identity change is genuine)\n", name)
+	return nil
+}
+
+// isHex reports whether s is entirely lowercase hex digits.
+func isHex(s string) bool {
+	for _, c := range s {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 func networkList() error {

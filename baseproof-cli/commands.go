@@ -150,13 +150,20 @@ func networkCmd() *cobra.Command {
 	af.String("log-did", "", "log DID (--from-ledger; else taken from /v1/log-info)")
 	af.Bool("use", false, "set this network active after adding")
 	af.Bool("repin", false, "explicitly replace this name's pinned trust root if the offered network id differs (else a mismatch refuses)")
+	af.String("pin", "", "REQUIRE the added network's id to equal this 64-hex id (out-of-band expected identity)")
 	af.Duration("timeout", 30*time.Second, "per-request HTTP timeout")
 
 	list := &cobra.Command{Use: "list", Short: "List stored networks", Args: cobra.NoArgs, RunE: forward(cli.RunNetwork, "list")}
 	use := &cobra.Command{Use: "use <name>", Short: "Set the active network", Args: cobra.ExactArgs(1), RunE: forward(cli.RunNetwork, "use")}
 	show := &cobra.Command{Use: "show [name]", Short: "Show a network (default: active)", Args: cobra.MaximumNArgs(1), RunE: forward(cli.RunNetwork, "show")}
+	remove := &cobra.Command{
+		Use:   "remove <name>",
+		Short: "Remove a stored network (its trust pin remains — tombstoned)",
+		Args:  cobra.ExactArgs(1),
+		RunE:  forward(cli.RunNetwork, "remove"),
+	}
 
-	n.AddCommand(add, list, use, show)
+	n.AddCommand(add, list, use, show, remove)
 	return n
 }
 
