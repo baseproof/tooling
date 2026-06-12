@@ -390,4 +390,3 @@ func buildModeBWire(
 	}
 	return nil, fmt.Errorf("submit-stamp: nonce exhausted at %d iterations (difficulty=%d too high?)", maxIter, difficulty)
 }
-
