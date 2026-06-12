@@ -96,11 +96,23 @@ func (f *fakeWAL) IterateSequenced(_ context.Context, fromSeq uint64, fn func(wa
 	f.mu.Unlock()
 	sort.Slice(keys, func(i, j int) bool { return keys[i] < keys[j] })
 	for _, s := range keys {
+		// Copy the Meta VALUE while holding the lock: the map stores shared
+		// *wal.Meta pointers that MarkShipped/MarkRetry mutate concurrently
+		// from worker goroutines — dereferencing the pointer after unlock is
+		// the race the detector caught (read of meta.State vs MarkShipped's
+		// write).
 		f.mu.Lock()
 		hash, ok := f.seqs[s]
-		meta := f.metas[hash]
+		var meta wal.Meta
+		hasMeta := false
+		if ok {
+			if m := f.metas[hash]; m != nil {
+				meta = *m
+				hasMeta = true
+			}
+		}
 		f.mu.Unlock()
-		if !ok || meta == nil {
+		if !ok || !hasMeta {
 			continue
 		}
 		// Filter on State=StateSequenced (matches wal.IterateSequenced).
