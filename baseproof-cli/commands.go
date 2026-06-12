@@ -17,7 +17,7 @@ func submitCmd() *cobra.Command {
 (--amend <seq> --delegation <seq>). Amendments/delegations sign with --key-file.
 
 On a GATED network (the bundle carries a write_endpoint) the write goes THROUGH the
-JN enforcer, which runs its admission gate and mints the gate-5 WriteAuthorization
+network's write gate, which runs its admission policy and mints the gate-5 WriteAuthorization
 the ledger requires. Cosignatures come in two shapes: INLINE multi-sig
 (--cosigner-keys k1,k2 — one entry, N signatures) or a TWO-PART attestation
 (--cosign <log-did>@<seq> — a separate entry cosigning a prior primary).`,
