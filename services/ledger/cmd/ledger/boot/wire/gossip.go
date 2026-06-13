@@ -345,6 +345,14 @@ func wireRotationHandler(
 			d.Logger,
 		))
 		d.Logger.Info("rotation handler: on-log appender wired (rotations commit on-log)")
+
+		// The burn ceremony's chokepoint shares the SAME WAL submit + seq
+		// components (one on-log author, not two). QuorumManager.Current()
+		// is the CurrentSetSource the burn quorum verifies against.
+		burnAppender := witnessclient.NewProductionBurnAppender(
+			d.LedgerSignerPriv, cfg.LedgerDID, cfg.LogDID, d.WALCommitter, d.EntryStore, d.Logger)
+		d.BurnProcessor = witnessclient.NewBurnProcessor(d.QuorumManager, burnAppender)
+		d.Logger.Info("burn processor: wired (POST /v1/network/burn door is live)")
 	} else {
 		d.Logger.Warn("rotation handler: on-log appender NOT wired (missing pipeline deps); " +
 			"ProcessRotation fails closed until the sequencing pipeline + ledger signer are available")

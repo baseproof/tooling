@@ -23,6 +23,7 @@ import (
 
 	"github.com/baseproof/baseproof/crypto/cosign"
 	"github.com/baseproof/baseproof/network"
+	"github.com/baseproof/baseproof/types"
 
 	"github.com/baseproof/tooling/services/ledger/api"
 )
@@ -95,9 +96,38 @@ func (p *BurnProcessor) ProcessBurn(ctx context.Context, b network.NetworkBurn) 
 
 // DeclaredBurn serves GET /v1/burn's DECLARED leg: the authoritative,
 // quorum-verified on-log verdict. (bool, nil) always — an unverifiable
-// state never reaches this struct because ProcessBurn is the one writer.
+// state never reaches this struct because ProcessBurn (and RebuildFromLog)
+// are the only writers, both quorum-verifying before they flip it.
 func (p *BurnProcessor) DeclaredBurn(ctx context.Context) (bool, error) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	return p.declared != nil, nil
+}
+
+// RebuildFromLog seeds the declared-burn cache at boot by WALKING the log's
+// burn records — the projection-is-a-cache law (the declared state is
+// rebuildable, never seeded by hand). It runs network.ResolveBurnAt over the
+// records under `set` (the witness set authoritative at the burn's position;
+// the caller resolves it era-correctly via witness.WitnessSetAtVerified) at
+// asOf, and seeds declared ONLY for an AUTHORIZED burn. Fail-closed:
+//
+//   - no burn on/before asOf (incl. empty records): declared stays nil, nil
+//     error — normal life;
+//   - an authorized burn: declared seeded; idempotent with ProcessBurn;
+//   - ANY walk refusal (unauthorized / wrong-network / unsorted): the error
+//     surfaces — a poisoned on-log burn stream at boot is misbehavior the node
+//     must NOT paper over by booting "not burned" (the caller makes it boot-
+//     fatal, the BurnStatusAt INPUT CONTRACT at boot altitude).
+func (p *BurnProcessor) RebuildFromLog(ctx context.Context, records []network.NetworkBurnRecord, set *cosign.WitnessKeySet, asOf types.LogPosition) error {
+	st, err := network.BurnStatusAt(records, set, asOf)
+	if err != nil {
+		return fmt.Errorf("witnessclient/burn: boot rebuild refused (poisoned burn stream): %w", err)
+	}
+	if !st.Burned {
+		return nil
+	}
+	p.mu.Lock()
+	p.declared = st.Burn
+	p.mu.Unlock()
+	return nil
 }

@@ -1191,7 +1191,7 @@ func composeHandlers(
 		}),
 		// Burn status from observed gossip equivocation findings (nil GossipStore ⇒
 		// is_burned=false). For the v2 proof's burn_attestation (a fetched fact).
-		Burn:              api.NewBurnHandler(api.NewGossipBurnSource(d.GossipStore), cfg.LogDID, d.Logger),
+		Burn:              api.NewBurnHandlerWithDeclared(api.NewGossipBurnSource(d.GossipStore), burnDeclaredSource(d), cfg.LogDID, d.Logger),
 		CosignatureOf:     api.NewQueryCosignatureOfHandler(queryDeps),
 		TargetRoot:        api.NewQueryTargetRootHandler(queryDeps),
 		SignerDID:         api.NewQuerySignerDIDHandler(queryDeps),
@@ -1232,6 +1232,7 @@ func composeHandlers(
 		NetworkMirrors:     api.NewNetworkMirrorsHandler(cfg.NetworkMirrors),
 		NetworkBundle:      networkBundleHandler,
 		NetworkRotation:    rotationDoorHandler(d),
+		NetworkBurn:        burnDoorHandler(d),
 		WitnessesCurrent:   api.NewWitnessesCurrentHandler(witnessHistoryFetcher),
 		WitnessesBySetHash: api.NewWitnessesBySetHashHandler(witnessHistoryFetcher),
 		WitnessesAtSeq:     api.NewWitnessesAtSeqHandler(witnessHistoryFetcher),
@@ -1292,6 +1293,28 @@ func rotationDoorHandler(d *deps.AppDeps) http.Handler {
 		return nil
 	}
 	return api.NewRotationHandler(d.RotationHandler)
+}
+
+// burnDoorHandler mounts POST /v1/network/burn onto the single BurnProcessor
+// chokepoint (tooling#110). nil when the burn pipeline is unwired (dev/
+// integration) — the door is then not served, the same fail-closed posture
+// as the rotation door.
+func burnDoorHandler(d *deps.AppDeps) http.Handler {
+	if d.BurnProcessor == nil {
+		return nil
+	}
+	return api.NewBurnDoorHandler(d.BurnProcessor, d.Logger)
+}
+
+// burnDeclaredSource yields the AUTHORITATIVE declared-burn leg for
+// GET /v1/burn's OR-semantics, or nil (observed-only) when the burn pipeline
+// is unwired. Returning a nil interface (not a nil-pointer-in-interface) so
+// the read handler's nil check is honest.
+func burnDeclaredSource(d *deps.AppDeps) api.DeclaredBurnSource {
+	if d.BurnProcessor == nil {
+		return nil
+	}
+	return d.BurnProcessor
 }
 
 func buildNetworkBundleHandler(cfg Config, logger *slog.Logger) (http.Handler, error) {

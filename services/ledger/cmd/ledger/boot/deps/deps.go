@@ -223,6 +223,13 @@ type AppDeps struct {
 	// and ready for callers (rotation-initiating admin paths) to invoke.
 	RotationHandler *witnessclient.RotationHandler
 
+	// BurnProcessor is the single chokepoint for the network-burn ceremony
+	// door (POST /v1/network/burn): quorum-verify under the current set →
+	// on-log append → flip the declared-burn state GET /v1/burn serves. nil
+	// when the sequencing pipeline is unwired (the door is then unmounted,
+	// matching RotationHandler's fail-closed posture). tooling#110.
+	BurnProcessor *witnessclient.BurnProcessor
+
 	// WitnessEndpointResolver is the on-log authoritative
 	// witness-endpoint discovery surface used by wireWitnessCosigner
 	// to drop the LEDGER_WITNESS_ENDPOINTS backdoor — typically a
