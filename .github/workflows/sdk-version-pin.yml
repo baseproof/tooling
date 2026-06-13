@@ -14,7 +14,7 @@ permissions:
   contents: read
 
 env:
-  REQUIRED_BASEPROOF_VERSION: v0.0.5-rc1
+  REQUIRED_BASEPROOF_VERSION: v0.0.5-rc2
 
 jobs:
   sdk-version-pin:

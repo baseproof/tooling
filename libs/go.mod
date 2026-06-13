@@ -3,7 +3,7 @@ module github.com/baseproof/tooling/libs
 go 1.25.11
 
 require (
-	github.com/baseproof/baseproof v0.0.5-rc1
+	github.com/baseproof/baseproof v0.0.5-rc2
 	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.4.1
 	github.com/lib/pq v1.12.3
 	github.com/miekg/pkcs11 v1.1.2
