@@ -302,8 +302,8 @@ func TestLoadAuditorRegistryFromFile_EmptyArray(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if got == nil {
-		t.Error("empty-array manifest must return non-nil empty slice "+
-			"(distinct from path=='' nil-slice path; this is the gate-enabled-empty shape "+
+		t.Error("empty-array manifest must return non-nil empty slice " +
+			"(distinct from path=='' nil-slice path; this is the gate-enabled-empty shape " +
 			"that B3 refuses at boot)")
 	}
 	if len(got) != 0 {
