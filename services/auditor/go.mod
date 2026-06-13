@@ -3,7 +3,7 @@ module github.com/baseproof/tooling/services/auditor
 go 1.25.11
 
 require (
-	github.com/baseproof/baseproof v0.0.5-rc1
+	github.com/baseproof/baseproof v0.0.5-rc2
 	github.com/baseproof/tooling/libs v0.0.0-00010101000000-000000000000
 	github.com/lib/pq v1.12.3
 	go.opentelemetry.io/otel v1.44.0
