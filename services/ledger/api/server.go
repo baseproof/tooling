@@ -213,6 +213,11 @@ type Handlers struct {
 	// a constant.
 	Burn http.HandlerFunc
 
+	// NetworkBurn — POST /v1/network/burn (tooling#110): the burn
+	// ceremony's door. nil ⇒ unmounted (this node does not author
+	// burns), the same posture as NetworkRotation.
+	NetworkBurn http.Handler
+
 	// ── Index queries ───────────────────────────────────────
 	CosignatureOf http.HandlerFunc
 	TargetRoot    http.HandlerFunc
@@ -678,6 +683,9 @@ func NewServer(
 	}
 	if handlers.NetworkRotation != nil {
 		mux.Handle("POST /v1/network/rotation", handlers.NetworkRotation)
+	}
+	if handlers.NetworkBurn != nil {
+		mux.Handle("POST /v1/network/burn", handlers.NetworkBurn)
 	}
 	if handlers.Bundle != nil {
 		mux.HandleFunc("GET /v1/bundle/{seq}", handlers.Bundle)
