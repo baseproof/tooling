@@ -94,6 +94,15 @@ type CosignatureRule struct {
 	// values) — e.g. a bar/registration number for professional
 	// filings.
 	RequiredCredentials []string `json:"required_credentials,omitempty"`
+
+	// RequiredScope is the scope(s) a cosigner's on-log delegation must
+	// grant to cosign this event — handed to the verifying walk as the
+	// Constraint.RequiredScopes. PRE-13b #181 scope-at-publish: a GATED
+	// event (one with RequiredSignerRoles) MUST declare a non-empty
+	// RequiredScope, so the walk always has a scope to enforce. A network
+	// cannot publish a gated event whose scope is undeclared
+	// (ValidateScopeAtPublish). Empty is valid only for a non-gated event.
+	RequiredScope []string `json:"required_scope,omitempty"`
 }
 
 // PermitsFilerRole reports whether role is in the rule's
@@ -143,6 +152,18 @@ func (r *CosignatureRule) EffectiveMinCosigners() int {
 	return 0
 }
 
+// RequiresScope reports whether this event is GATED — it requires authority
+// cosigners (RequiredSignerRoles) and therefore must declare RequiredScope.
+func (r *CosignatureRule) RequiresScope() bool {
+	return len(r.RequiredSignerRoles) > 0
+}
+
+// RequiredScopes returns the scope set a cosigner's delegation must grant, for
+// the verifying walk's Constraint.RequiredScopes.
+func (r *CosignatureRule) RequiredScopes() []string {
+	return r.RequiredScope
+}
+
 // ─── Interface ──────────────────────────────────────────────────────
 
 // CosignatureMixPolicy is the seam between a verifier and the rule
@@ -167,6 +188,12 @@ var (
 
 	// ErrInvalidRule fires for missing/malformed fields at construction.
 	ErrInvalidRule = errors.New("policy/cosignature_mix: invalid rule")
+
+	// ErrGatedEventNoScope is the scope-at-publish rejection (PRE-13b #181):
+	// a gated event_type (one with RequiredSignerRoles) declared no
+	// RequiredScope, so the verifying walk would have nothing to enforce. A
+	// network cannot publish such a policy.
+	ErrGatedEventNoScope = errors.New("policy/cosignature_mix: gated event_type has no required_scope (scope-at-publish)")
 
 	// ErrDuplicateRule fires when Add or NewInMemoryPolicy receives
 	// two rules with the same EventType.
@@ -238,6 +265,32 @@ func validateRule(r CosignatureRule, known map[FilerRole]struct{}) error {
 		if c == "" {
 			return fmt.Errorf("%w: event %q required_credentials[%d] empty",
 				ErrInvalidRule, r.EventType, i)
+		}
+	}
+	return nil
+}
+
+// ValidateScopeAtPublish enforces PRE-13b #181 scope-at-publish over a rule
+// set: every GATED event_type (one with RequiredSignerRoles) MUST declare a
+// non-empty RequiredScope, and every scope entry must be non-empty. Returns
+// ErrGatedEventNoScope on the first gated-without-scope violation. Call it at
+// bundle/policy publish (freeze) so a network cannot ship a gated event whose
+// scope is undeclared — provenance is always enforced by the walk, so scope
+// must always be present for the walk to enforce. Non-gated events may omit it.
+func ValidateScopeAtPublish(rules []CosignatureRule) error {
+	for i := range rules {
+		r := &rules[i]
+		if !r.RequiresScope() {
+			continue
+		}
+		if len(r.RequiredScope) == 0 {
+			return fmt.Errorf("%w: event %q", ErrGatedEventNoScope, r.EventType)
+		}
+		for j, s := range r.RequiredScope {
+			if s == "" {
+				return fmt.Errorf("%w: event %q required_scope[%d] empty",
+					ErrInvalidRule, r.EventType, j)
+			}
 		}
 	}
 	return nil
