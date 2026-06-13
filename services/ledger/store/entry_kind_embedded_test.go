@@ -30,7 +30,7 @@ const entryKindPGPort = 54335
 const entryKindPageSQL = `SELECT sequence_number, log_time, canonical_hash
 	FROM entry_index WHERE kind = $1 AND sequence_number >= $2 ORDER BY sequence_number ASC LIMIT $3`
 const entryKindLatestSQL = `SELECT sequence_number, log_time, canonical_hash
-	FROM entry_index WHERE kind = $1 ORDER BY sequence_number DESC LIMIT 1`
+	FROM entry_index WHERE kind = $1 AND sequence_number >= $2 ORDER BY sequence_number DESC LIMIT $3`
 
 func TestEntryKindIndex_Embedded(t *testing.T) {
 	pool := embeddedpg.Start(t, entryKindPGPort) // t.Skip without a real PG
@@ -139,7 +139,7 @@ func TestEntryKindIndex_Embedded(t *testing.T) {
 	// LatestByKind's seek: the MAX-seq row of a kind (the resolver primitive).
 	latest := func(t *testing.T, kind string) (uint64, bool) {
 		t.Helper()
-		rows, err := pool.Query(ctx, entryKindLatestSQL, kind)
+		rows, err := pool.Query(ctx, entryKindLatestSQL, kind, uint64(0), 1)
 		if err != nil {
 			t.Fatal(err)
 		}

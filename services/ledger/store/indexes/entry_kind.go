@@ -33,24 +33,24 @@ func (q *PostgresQueryAPI) QueryByKind(kind string, startSeq uint64, count int) 
 }
 
 // entryKindLatestSQL serves LatestByKind: the same partial btree
-// (kind, sequence_number) walked in REVERSE for one row — index-only, O(1)
-// seek, never a scan.
+// (kind, sequence_number) walked in REVERSE, capped to one row via
+// runIndexQuery's LIMIT — index-only, O(1) seek, never a scan. The
+// startSeq parameter ($2) is the shared runIndexQuery contract; LatestByKind
+// passes 0 (no lower bound — DESC takes the true maximum).
 const entryKindLatestSQL = `SELECT sequence_number, log_time, canonical_hash
-	FROM entry_index WHERE kind = $1 ORDER BY sequence_number DESC LIMIT 1`
+	FROM entry_index WHERE kind = $1 AND sequence_number >= $2 ORDER BY sequence_number DESC`
 
 // LatestByKind returns the single most recent entry whose payload kind == kind,
 // or (zero, false, nil) when the log carries no such entry. This is the
 // AuthoritativeResolver's derivation primitive (#114 Phase B): the latest
-// schema-declaration of each family, resolved from the log in one seek.
+// schema-declaration of each family, resolved from the log in one seek. Routes
+// through the shared runIndexQuery path (close-discipline + hydrate in one
+// home) with limit 1.
 func (q *PostgresQueryAPI) LatestByKind(kind string) (types.EntryWithMetadata, bool, error) {
 	if kind == "" {
 		return types.EntryWithMetadata{}, false, nil
 	}
-	rows, err := q.db.Query(q.ctx, entryKindLatestSQL, kind)
-	if err != nil {
-		return types.EntryWithMetadata{}, false, err
-	}
-	out, err := q.scanAndHydrate(q.ctx, rows)
+	out, err := q.runIndexQuery(q.ctx, entryKindLatestSQL, kind, 0, 1)
 	if err != nil {
 		return types.EntryWithMetadata{}, false, err
 	}
