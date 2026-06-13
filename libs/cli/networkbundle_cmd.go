@@ -43,6 +43,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -216,6 +217,7 @@ func networkBundlePublish(ctx context.Context, args []string) error {
 		network       = fs.String("network", "", "stored network name (else the active network)")
 		manifestPath  = fs.String("manifest", "", "composed manifest JSON to publish (step 2; from your network's composer)")
 		anchor        = fs.String("anchor", "", "manifest anchor position <log-did>@<seq> (step 2; from step 1's output)")
+		dryRun        = fs.Bool("dry-run", false, "verify through the door and parse the anchor, then stop BEFORE signing/submitting")
 		publishAnchor = fs.Bool("publish-anchor", false, "publish the manifest ANCHOR schema entry (step 1 of 2) and wait for its sequence")
 		destination   = fs.String("destination", "", "destination DID for the anchor entry (step 1; default: the bundle's log DID)")
 		keyFile       = fs.String("signer-key", "", "32-byte hex secp256k1 signer key (REQUIRED; the publication signer)")
@@ -303,6 +305,16 @@ func networkBundlePublish(ctx context.Context, args []string) error {
 		AuthorityPath: &auth,
 		EventTime:     time.Now().UTC().UnixMicro(),
 		SchemaRef:     &anchorPos,
+	}
+	if *dryRun {
+		return emitOutput(*output, "network-bundle-publish", map[string]any{
+			"dry_run": true, "verified_through_door": true,
+			"exchange": m.Exchange, "operations": len(m.Operations),
+			"anchor": anchorPos.LogDID + "@" + strconv.FormatUint(anchorPos.Sequence, 10),
+		}, func() error {
+			tableln("dry-run: manifest verified through the door; stopping before submit")
+			return nil
+		})
 	}
 	hash, seq, err := signSubmitWait(ctx, hc, b.Endpoint, *token, header, raw, id, *timeout)
 	if err != nil {

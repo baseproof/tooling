@@ -233,6 +233,7 @@ func rotationSubmitCmd(ctx context.Context, args []string) error {
 		bundlePath = fs.String("bundle", "", "client bundle JSON (else --network or the active network)")
 		network    = fs.String("network", "", "stored network name (else the active network)")
 		output     = fs.String("output", "table", "output format: table|json")
+		dryRun     = fs.Bool("dry-run", false, "run every local verification, then stop BEFORE the POST")
 		timeout    = fs.Duration("timeout", 30*time.Second, "per-request HTTP timeout")
 	)
 	if err := fs.Parse(args); err != nil {
@@ -297,6 +298,15 @@ func rotationSubmitCmd(ctx context.Context, args []string) error {
 		return fmt.Errorf("network rotation submit: refused locally — the rotation does not verify against the live set (the door would reject it): %w", err)
 	}
 
+	if *dryRun {
+		// PRE-1 two-phase contract: the full local recipe ran (structural
+		// decode, era-drift pre-check, VerifyRotation against the live
+		// set); the write does not happen.
+		return emitOutput(*output, "rotation-submit", map[string]any{
+			"dry_run": true, "verified": true, "endpoint": b.Endpoint + "/v1/network/rotation",
+			"payload_bytes": len(payload),
+		}, func() error { tableln("dry-run: rotation verified locally; stopping before POST"); return nil })
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, b.Endpoint+"/v1/network/rotation", bytes.NewReader(payload))
 	if err != nil {
 		return err
