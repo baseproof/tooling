@@ -13,6 +13,23 @@ the judicial-network SubmitGate (writer-side) and the auditor
 The ledger only serves the projection; it does not resolve
 authority itself.
 
+# REVOCATION IS SURFACED, NOT FILTERED (PRE-13b #120, load-bearing)
+
+`status = 0` here is ENTRY-level liveness (tombstone / ghost-leaf
+exclusion), NOT delegation revocation. A revocation is itself a
+delegation entry (a grant that grants nothing / a zeroed validity
+window) carrying the SAME Header.DelegateDID — so this index RETURNS
+it, newest-first, alongside the original grant. That is correct and
+REQUIRED: the SDK resolver applies newest-grant-wins and marks the
+hop not-live from the revocation it sees here. Widening the predicate
+to "omit revoked delegations" would be a FAIL-OPEN bug — it would HIDE
+the revocation from the resolver, so the gate could not see that
+authority was withdrawn — AND it would put domain authority logic in
+the dumb ledger (forbidden). The fail-closed "revoked ⇒ authority
+gone" property lives in the SDK resolver (fed by this complete
+projection), never in this index predicate. (delegate_did_revocation_embedded_test.go
+proves the revocation entry is surfaced as the newest row.)
+
 The query hits the idx_delegate_did_latest partial compound
 index (migration 0008):
 
