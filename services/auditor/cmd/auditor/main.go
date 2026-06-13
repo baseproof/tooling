@@ -319,6 +319,7 @@ func run(ctx context.Context, cfg config, logger *slog.Logger) error {
 
 	var ready atomic.Bool
 	var feed http.Handler
+	var findingsAPI, monitorsAPI http.Handler
 	// Ladder 5 P10 (#21): done-channels for the background goroutines
 	// the pipeline branch launches. Left nil in health-only mode; the
 	// shutdown branch joins both ONLY when non-nil, so the health-only
@@ -847,6 +848,8 @@ func run(ctx context.Context, cfg config, logger *slog.Logger) error {
 			return fmt.Errorf("auditor: build pipeline: %w", err)
 		}
 		feed = pipe.Feed
+		findingsAPI = app.NewFindingsHandler(st)
+		monitorsAPI = app.NewMonitorsHandler(pipe.Scheduler)
 		// Ladder 5 P10 (#21): capture done-channels so the shutdown
 		// branch can JOIN both goroutines under shutdownWait — without
 		// this, srv.Shutdown returns and main exits while the puller
@@ -905,7 +908,7 @@ func run(ctx context.Context, cfg config, logger *slog.Logger) error {
 		Addr: cfg.listenAddr,
 		// OTel SERVER span (outermost): extracts traceparent so any traced inbound
 		// request continues its originating trace.
-		Handler:      sdklog.NewOTelHandler(newMux(&ready, feed)),
+		Handler:      sdklog.NewOTelHandler(newMux(&ready, feed, findingsAPI, monitorsAPI)),
 		ReadTimeout:  cfg.readTimeout,
 		WriteTimeout: cfg.writeTimeout,
 		IdleTimeout:  cfg.idleTimeout,
@@ -1395,13 +1398,20 @@ func parsePeers(s string) []peers.PeerFeed {
 // auditor exposes public transparency endpoints and scrape targets, so liveness
 // probes present no client cert (unlike the JN API). Readiness flips false on
 // shutdown so an orchestrator drains traffic before the process exits.
-func newMux(ready *atomic.Bool, feed http.Handler) http.Handler {
+func newMux(ready *atomic.Bool, feed http.Handler, findings, monitors http.Handler) http.Handler {
 	mux := http.NewServeMux()
 	// The custodial evidence feed — the auditor's defining external surface.
 	// Mounted only when a store is configured; third-party watchers + peers pull
 	// /v1/gossip/since from here (the enforcer never serves this).
 	if feed != nil {
 		mux.Handle("/v1/gossip/", feed)
+	}
+	// PRE-7 (tooling#115): the read surface the registry advertises.
+	if findings != nil {
+		mux.Handle("GET /v1/findings", findings)
+	}
+	if monitors != nil {
+		mux.Handle("GET /v1/monitors", monitors)
 	}
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)

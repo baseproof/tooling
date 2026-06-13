@@ -42,7 +42,7 @@ func TestBuildDIDRegistry_RegistersKeyAndWeb(t *testing.T) {
 
 func TestMux_HealthAndReadiness(t *testing.T) {
 	var ready atomic.Bool
-	h := newMux(&ready, nil)
+	h := newMux(&ready, nil, nil, nil)
 
 	// /healthz is always 200 "ok" (liveness — process is up).
 	rec := httptest.NewRecorder()
