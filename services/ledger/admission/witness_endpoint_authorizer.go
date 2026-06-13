@@ -31,15 +31,22 @@ THE FIX — three orthogonal axes (zero new crypto):
 A hijack is UNCONSTRUCTIBLE: an attacker holds no witness private key, so
 no entry can carry a verifying attestation under the target PubKeyID.
 
-SCOPE: ECDSA did:key witnesses (the genesis topology — witness.KeysFromDIDs
-is secp256k1-only). A BLS witness's signer→PubKeyID derivation tracks the
-BLS-entry-algoID follow-up (baseproof#77); until then a BLS-only
-declaration finds no matching ECDSA signer and is refused (fail-closed).
+SCOPE: did:key-expressible witnesses ride the entry Signatures section,
+verified by the VerifierRegistry — ECDSA (the genesis topology) today,
+Ed25519 / ML-DSA / SLH-DSA the moment a witness uses one. BLS is the lone
+exception BY DESIGN: its value is aggregation at finality, so it has no entry
+algoID. A BLS witness instead attests via a PurposeWitnessEndpoint cosign
+signature in the declaration payload, verified by the SINGLE existing cosign
+BLS verifier (cosign.BLSAggregateVerifier) — never a second entry verifier,
+which would duplicate the BLS chokepoint (Derive-Never-Restate). That path is
+the item-6 follow-up; until it lands a BLS-only declaration finds no matching
+entry signer and is refused (fail-closed).
 */
 package admission
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 
@@ -112,4 +119,35 @@ func AuthorizeWitnessEndpointDeclaration(
 		}
 	}
 	return fmt.Errorf("%w: PubKeyID %x", ErrWitnessEnrollmentUnattested, decl.PubKeyID[:8])
+}
+
+// AuthorizeNetworkPayloadEntry runs the authorization gate for network-payload
+// entry kinds that require one. Today only WitnessEndpointDeclarationV1 is
+// authority-gated (PRE-12 enrollment); every other kind (and any non-network
+// payload) returns nil. Mirrors VerifyNetworkPayloadEntry's kind-probe dispatch
+// and is called alongside it in the submission pipeline (step 4h).
+//
+// verifier is the production *did.VerifierRegistry; authorized is the witness
+// PubKeyID set (witness.KeysFromDIDs over GenesisWitnessSet, ∪ on-log
+// rotations). For the gated kinds a nil verifier or empty set fails closed.
+func AuthorizeNetworkPayloadEntry(
+	ctx context.Context,
+	entry *envelope.Entry,
+	verifier attestation.SignatureVerifier,
+	authorized map[[32]byte]struct{},
+) error {
+	if entry == nil || len(entry.DomainPayload) == 0 {
+		return nil
+	}
+	var probe struct {
+		Kind string `json:"kind"`
+	}
+	if err := json.Unmarshal(entry.DomainPayload, &probe); err != nil {
+		return nil // non-JSON / unprobeable — out of scope (the schema gate handles it)
+	}
+	switch probe.Kind {
+	case network.WitnessEndpointDeclarationKindV1:
+		return AuthorizeWitnessEndpointDeclaration(ctx, entry, verifier, authorized)
+	}
+	return nil
 }

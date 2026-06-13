@@ -1045,16 +1045,17 @@ func composeHandlers(
 			EpochWindowSeconds:    cfg.EpochWindowSeconds,
 			EpochAcceptanceWindow: cfg.EpochAcceptanceWindow,
 		},
-		Identity:           buildIdentityDeps(d),
-		LedgerDID:          cfg.LedgerDID,
-		LogDID:             cfg.LogDID,
-		LedgerSignerPriv:   d.LedgerSignerPriv,
-		MaxEntrySize:       cfg.MaxEntrySize,
-		Logger:             d.Logger,
-		FreshnessTolerance: policy.FreshnessInteractive,
-		BLSQuorumVerifier:  blsQuorumVerifier,
-		SchemaRegistry:     d.SchemaRegistry,
-		Gates:              admission.LoadGatesFromEnv(),
+		Identity:            buildIdentityDeps(d),
+		AuthorizedWitnesses: authorizedWitnessProvider(cfg.GenesisWitnessSet, d.Logger),
+		LedgerDID:           cfg.LedgerDID,
+		LogDID:              cfg.LogDID,
+		LedgerSignerPriv:    d.LedgerSignerPriv,
+		MaxEntrySize:        cfg.MaxEntrySize,
+		Logger:              d.Logger,
+		FreshnessTolerance:  policy.FreshnessInteractive,
+		BLSQuorumVerifier:   blsQuorumVerifier,
+		SchemaRegistry:      d.SchemaRegistry,
+		Gates:               admission.LoadGatesFromEnv(),
 		AdmissionAuthorities: admission.NewOnLogAdmissionKeyset(
 			buildAdmissionAuthoritySource(queryAPI), cfg.GenesisAdmissionAuthorities, 30*time.Second),
 		AdmissionPolicy: admission.NewOnLogAdmissionPolicy(
@@ -1832,6 +1833,38 @@ func buildAuditorScopeAmendmentSource(
 			})
 		}
 		return recs, nil
+	}
+}
+
+// authorizedWitnessProvider returns the PRE-12 witness-endpoint enrollment
+// authorization set: the witness PubKeyIDs the network trusts to self-declare
+// endpoints (admission step 4h). Genesis witnesses come from the constitution's
+// GenesisWitnessSet (did:key ECDSA, via witness.KeysFromDIDs) and are fixed for
+// the life of the constitution, so they resolve ONCE. A resolve failure yields
+// the empty set — fail-closed (every declaration refused) rather than trust a
+// partial set.
+//
+// The on-log witness-rotation chain unions in at the marked seam as the
+// steady-state extension (item 2); genesis-only is the complete authorized set
+// for a freshly bootstrapped network (the PRE-12 conformant-network case).
+func authorizedWitnessProvider(genesisDIDs []string, logger *slog.Logger) func() map[[32]byte]struct{} {
+	genesis := make(map[[32]byte]struct{})
+	if len(genesisDIDs) > 0 {
+		keys, err := witness.KeysFromDIDs(genesisDIDs)
+		if err != nil {
+			logger.Error("PRE-12: KeysFromDIDs on GenesisWitnessSet failed — witness-endpoint "+
+				"declarations are refused until the constitution's witness DIDs resolve", "error", err)
+		} else {
+			for _, k := range keys {
+				genesis[k.ID] = struct{}{}
+			}
+		}
+	}
+	return func() map[[32]byte]struct{} {
+		// item 2 seam: union the on-log rotation chain's current witness set
+		// here. The genesis set is immutable, so it is safe to return shared
+		// (the authorizer only reads membership).
+		return genesis
 	}
 }
 
