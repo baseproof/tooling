@@ -1,0 +1,38 @@
+# sdk-version-pin — the #167-lesson gate, now on the tooling side too:
+# every module in this repo must pin the SAME baseproof SDK version, and
+# bumping the pin requires bumping this file in the same commit. Prevents
+# the silent-drift failure where one module floats while five hold.
+name: sdk-version-pin
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  REQUIRED_BASEPROOF_VERSION: v0.0.5-rc1
+
+jobs:
+  sdk-version-pin:
+    name: SDK version pin (all modules)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: assert baseproof pin in every module
+        run: |
+          set -euo pipefail
+          fail=0
+          for mod in libs/go.mod services/ledger/go.mod services/witness/go.mod services/auditor/go.mod e2e/go.mod baseproof-cli/go.mod; do
+            actual=$(grep -E 'github.com/baseproof/baseproof v' "$mod" | head -1 | awk '{print $2}')
+            if [[ "$actual" != "${REQUIRED_BASEPROOF_VERSION}" ]]; then
+              echo "::error file=$mod::baseproof pinned to ${actual:-<missing>}, want ${REQUIRED_BASEPROOF_VERSION}"
+              fail=1
+            else
+              echo "✓ $mod @ ${actual}"
+            fi
+          done
+          exit $fail

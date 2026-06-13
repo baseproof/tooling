@@ -2,7 +2,15 @@
 FILE PATH: admission/network_payload_validator.go
 
 v1.32.0 SDK adoption — per-Kind structural validation hook for
-the three new on-log network entry kinds:
+on-log entry kinds the SDK ships validating decoders for. Grown at
+v0.0.5-rc1 (rc10) with the registry-expansion kinds:
+
+  - ExchangeGenesisV1 + Destination{Provision,Amend,Retire}V1 (exchange/)
+  - DelegationGrantV1                                  (delegation/)
+  - CredentialAttestationV1                            (credential/)
+  - NetworkBurnV1 — AUTHORSHIP-gated like rotation, see below
+
+Original v1.32.0/v1.33.0 set:
 
   - WitnessEndpointDeclarationV1 (network/witness_endpoint_declaration.go)
   - WitnessIdentityLabelV1       (network/witness_identity_label.go)
@@ -51,6 +59,9 @@ import (
 	"fmt"
 
 	"github.com/baseproof/baseproof/core/envelope"
+	"github.com/baseproof/baseproof/credential"
+	"github.com/baseproof/baseproof/delegation"
+	"github.com/baseproof/baseproof/exchange"
 	"github.com/baseproof/baseproof/network"
 	"github.com/baseproof/baseproof/witness"
 )
@@ -109,6 +120,46 @@ func VerifyNetworkPayloadEntry(entry *envelope.Entry) error {
 		if _, err := network.DecodeAuditorScopeAmendmentPayload(entry.DomainPayload); err != nil {
 			return fmt.Errorf("%w: AuditorScopeAmendmentV1: %s", ErrNetworkPayloadInvalid, err)
 		}
+	case exchange.ExchangeGenesisKindV1:
+		if _, err := exchange.DecodeExchangeGenesisPayload(entry.DomainPayload); err != nil {
+			return fmt.Errorf("%w: ExchangeGenesisV1: %s", ErrNetworkPayloadInvalid, err)
+		}
+	case exchange.DestinationProvisionKindV1:
+		if _, err := exchange.DecodeDestinationProvisionPayload(entry.DomainPayload); err != nil {
+			return fmt.Errorf("%w: DestinationProvisionV1: %s", ErrNetworkPayloadInvalid, err)
+		}
+	case exchange.DestinationAmendKindV1:
+		if _, err := exchange.DecodeDestinationAmendPayload(entry.DomainPayload); err != nil {
+			return fmt.Errorf("%w: DestinationAmendV1: %s", ErrNetworkPayloadInvalid, err)
+		}
+	case exchange.DestinationRetireKindV1:
+		if _, err := exchange.DecodeDestinationRetirePayload(entry.DomainPayload); err != nil {
+			return fmt.Errorf("%w: DestinationRetireV1: %s", ErrNetworkPayloadInvalid, err)
+		}
+	case delegation.DelegationGrantKindV1:
+		if _, err := delegation.DecodeDelegationGrantPayload(entry.DomainPayload); err != nil {
+			return fmt.Errorf("%w: DelegationGrantV1: %s", ErrNetworkPayloadInvalid, err)
+		}
+	case credential.CredentialAttestationKindV1:
+		if _, err := credential.DecodeCredentialAttestationPayload(entry.DomainPayload); err != nil {
+			return fmt.Errorf("%w: CredentialAttestationV1: %s", ErrNetworkPayloadInvalid, err)
+		}
+	case network.NetworkBurnKindV1:
+		// rc10 — the SECOND authorship gate, same rebuild-law reasoning as
+		// rotation below: the burn projection (and /v1/burn, and every v2
+		// proof's burn_attestation) is a cache of the log, so the only
+		// legitimate author of an on-log burn record is the burn ceremony's
+		// door (baseproof/tooling#110 — collects the K-of-N witness
+		// cosignatures the SDK's VerifyBurn demands, then submits through
+		// its own appender). Until that door exists nothing may author a
+		// burn; when it lands, it bypasses this gate by construction, like
+		// ProcessRotation. A well-formed externally-POSTed burn — EVEN A
+		// VALIDLY QUORUM-SIGNED ONE — is refused here so rebuilds never
+		// have to adjudicate who put it there. The SDK walker's quorum
+		// verification (ResolveBurnAt/VerifyBurn) stays the
+		// defense-in-depth layer for every verifier outside this door.
+		return fmt.Errorf("%w: NetworkBurnV1: burn records are authored only by the burn ceremony's door (baseproof/tooling#110) — external submission is refused outright",
+			ErrNetworkPayloadInvalid)
 	case witness.WitnessRotationPayloadKindV1:
 		// PRE-6 D1 — the AUTHORSHIP gate (upgraded from the structural gate):
 		// externally-submitted rotation records are refused OUTRIGHT. The
