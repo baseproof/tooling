@@ -343,6 +343,15 @@ func buildCosignHandler(scheme, keyFile, publicURL string, cfg serve.Config, log
 			return nil, fmt.Errorf("load secp256k1 witness key %q: %w", keyFile, err)
 		}
 		cfg.WitnessKey = priv
+		if publicURL != "" {
+			// PRE-12: ECDSA (did:key) witnesses self-declare their dial endpoint
+			// on-log; the ledger's by-kind resolver serves it to cosigners
+			// (LEDGER_WITNESS_ENDPOINTS is deleted). The witness signs its own
+			// declaration — run the producer with this key.
+			logger.Info("ECDSA witness: self-declare this endpoint on-log — run "+
+				"`declare-witness-endpoint -url <ledger> -log-did <log-did> -key <this-key-file> -public-url "+
+				publicURL+"`", "public_url", publicURL)
+		}
 		return serve.Build(cfg)
 	case "bls":
 		priv, err := blskey.LoadPEM(keyFile)
@@ -364,8 +373,9 @@ func buildCosignHandler(scheme, keyFile, publicURL string, cfg serve.Config, log
 		} else if encoded, eerr := network.EncodeWitnessEndpointDeclarationPayload(decl); eerr != nil {
 			logger.Warn("BLS witness: encode declaration", "pub_key_id", idHex, "error", eerr)
 		} else {
-			logger.Info("BLS witness on-log declaration — submit as BP-ENTRY-WITNESS-ENDPOINT-V1 "+
-				"so the network resolves this witness's key", "pub_key_id", idHex, "declaration", string(encoded))
+			logger.Info("BLS witness on-log declaration built — carry the BLS attestation via the "+
+				"PurposeWitnessEndpoint cosign path (item 6) and submit; the network then resolves this "+
+				"witness's key + endpoint by kind", "pub_key_id", idHex, "declaration", string(encoded))
 		}
 		return handler, nil
 	default:
