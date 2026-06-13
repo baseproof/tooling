@@ -66,9 +66,18 @@ func TestBuildWitnessEndpointDeclarationSource_ByKind_NoEnv_Embedded(t *testing.
 	if err != nil {
 		t.Fatalf("EncodeWitnessEndpointDeclarationPayload: %v", err)
 	}
-	entry := &envelope.Entry{
-		Header:        envelope.ControlHeader{SignerDID: kp.DID, Destination: "did:baseproof:log:test"},
-		DomainPayload: payload,
+	// Build through the real constructor (NewUnsignedEntry stamps the active
+	// protocol version) so the serialized canonical bytes survive the
+	// production resolver's envelope.Deserialize — a raw &envelope.Entry{}
+	// literal serializes as protocol version 0, which Deserialize rejects.
+	header := envelope.ControlHeader{
+		SignerDID:   kp.DID,
+		Destination: "did:baseproof:log:test",
+		EventTime:   time.Unix(1_700_000_000, 0).UTC().UnixMicro(),
+	}
+	entry, err := envelope.NewUnsignedEntry(header, payload)
+	if err != nil {
+		t.Fatalf("NewUnsignedEntry: %v", err)
 	}
 	sigHash := sha256.Sum256(envelope.SigningPayload(entry))
 	sig, err := sdksigs.SignEntry(sigHash, kp.PrivateKey)
