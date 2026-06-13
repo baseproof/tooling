@@ -416,6 +416,7 @@ func entryRowFor(seq uint64, hash [32]byte, entry *envelope.Entry) store.EntryRo
 		CosignatureOf:  cosigOf,
 		SchemaRef:      schemaRef,
 		SourceLogDID:   store.AnchorSourceLogDID(entry),
+		Kind:           store.EntryKindProjection(entry),
 	}
 }
 

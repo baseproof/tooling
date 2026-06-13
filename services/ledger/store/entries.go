@@ -151,7 +151,17 @@ type EntryRow struct {
 	// for the by-source read path (idx_anchor_source, migration 0020) —
 	// never authority; consumers re-verify from the entry bytes.
 	SourceLogDID string
-	Status       EntryStatus
+
+	// Kind is the entry payload's `kind` discriminator when it is one of
+	// the SDK's recognized entry kinds (kinds.AllEntryKinds()); "" otherwise.
+	// Projected at sequencing by store.EntryKindProjection (the one
+	// extraction home, shared with the rebuild path). DISCOVERY metadata for
+	// the by-kind read path (idx_entry_kind, migration 0022 — the
+	// AuthoritativeResolver's schema-position derivation, #114) — never
+	// authority; consumers re-verify from the entry bytes.
+	Kind string
+
+	Status EntryStatus
 
 	// Web3ReceiptsBytes is the serialized per-signature
 	// Web3VerificationReceipt slice captured at admission
@@ -187,12 +197,16 @@ func (s *EntryStore) Insert(ctx context.Context, tx pgx.Tx, row EntryRow) error 
 	if row.SourceLogDID != "" {
 		sourceLogDID = row.SourceLogDID
 	}
+	var kind any
+	if row.Kind != "" {
+		kind = row.Kind
+	}
 	_, err := tx.Exec(ctx, `
 		INSERT INTO entry_index (
 			sequence_number, canonical_hash, log_time,
 			signer_did, target_root, cosignature_of, schema_ref,
-			delegate_did, status, web3_receipts, source_log_did
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+			delegate_did, status, web3_receipts, source_log_did, kind
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
 		row.SequenceNumber, row.CanonicalHash[:],
 		row.LogTime, row.SignerDID,
 		row.TargetRoot, row.CosignatureOf, row.SchemaRef,
@@ -200,6 +214,7 @@ func (s *EntryStore) Insert(ctx context.Context, tx pgx.Tx, row EntryRow) error 
 		int16(row.Status),
 		row.Web3ReceiptsBytes,
 		sourceLogDID,
+		kind,
 	)
 	if err != nil {
 		if strings.Contains(err.Error(), "unique") || strings.Contains(err.Error(), "duplicate") {
@@ -329,6 +344,10 @@ func (s *EntryStore) InsertBatch(ctx context.Context, tx pgx.Tx, rows []EntryRow
 	// delegate_did (NULLIF in the INSERT), so non-anchor rows stay
 	// invisible to the partial idx_anchor_source index.
 	sourceLogDIDs := make([]string, len(rows))
+	// kind rides the same ""-means-NULL convention (NULLIF in the INSERT),
+	// so entries without a recognized platform kind stay invisible to the
+	// partial idx_entry_kind index.
+	kinds := make([]string, len(rows))
 	statuses := make([]int16, len(rows))
 	web3Receipts := make([][]byte, len(rows)) // nil entries land as SQL NULL
 	for i := range rows {
@@ -342,6 +361,7 @@ func (s *EntryStore) InsertBatch(ctx context.Context, tx pgx.Tx, rows []EntryRow
 		schemas[i] = rows[i].SchemaRef
 		delegateDIDs[i] = rows[i].DelegateDID
 		sourceLogDIDs[i] = rows[i].SourceLogDID
+		kinds[i] = rows[i].Kind
 		statuses[i] = int16(rows[i].Status)
 		web3Receipts[i] = rows[i].Web3ReceiptsBytes
 	}
@@ -349,27 +369,28 @@ func (s *EntryStore) InsertBatch(ctx context.Context, tx pgx.Tx, rows []EntryRow
 		INSERT INTO entry_index (
 			sequence_number, canonical_hash, log_time,
 			signer_did, target_root, cosignature_of, schema_ref,
-			delegate_did, status, web3_receipts, source_log_did
+			delegate_did, status, web3_receipts, source_log_did, kind
 		)
 		SELECT
 			sequence_number, canonical_hash, log_time,
 			signer_did, target_root, cosignature_of, schema_ref,
 			NULLIF(delegate_did, ''), status, web3_receipts,
-			NULLIF(source_log_did, '')
+			NULLIF(source_log_did, ''), NULLIF(kind, '')
 		FROM unnest(
 			$1::bigint[], $2::bytea[], $3::timestamptz[],
 			$4::text[], $5::bytea[], $6::bytea[], $7::bytea[],
-			$8::text[], $9::smallint[], $10::bytea[], $11::text[]
+			$8::text[], $9::smallint[], $10::bytea[], $11::text[],
+			$12::text[]
 		) AS t(
 			sequence_number, canonical_hash, log_time,
 			signer_did, target_root, cosignature_of, schema_ref,
-			delegate_did, status, web3_receipts, source_log_did
+			delegate_did, status, web3_receipts, source_log_did, kind
 		)
 		ON CONFLICT (canonical_hash) WHERE status <> 2 DO NOTHING
 		RETURNING sequence_number, canonical_hash`,
 		seqs, hashes, logTimes, signers,
 		targets, cosigs, schemas, delegateDIDs, statuses, web3Receipts,
-		sourceLogDIDs,
+		sourceLogDIDs, kinds,
 	)
 	if err != nil {
 		return InsertBatchResult{}, fmt.Errorf("store/entries: insert batch (n=%d): %w", len(rows), err)
