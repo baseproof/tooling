@@ -254,8 +254,18 @@ func TestMetrics_InFlightGauge_IncDecBalanced(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 
-	go h.ServeHTTP(httptest.NewRecorder(),
-		httptest.NewRequest(http.MethodGet, "/t", nil))
+	// done closes only after ServeHTTP fully returns — i.e. after
+	// Wrap's deferred in-flight Add(-1) has run. Receiving from
+	// midScrape proves only that the handler REACHED its body (the
+	// +1 is visible); it does NOT order the deferred -1 before the
+	// post-handler scrape. Without this edge the second scrape races
+	// the decrement and intermittently reads 1 (flaky under -race).
+	done := make(chan struct{})
+	go func() {
+		h.ServeHTTP(httptest.NewRecorder(),
+			httptest.NewRequest(http.MethodGet, "/t", nil))
+		close(done)
+	}()
 
 	body := <-midScrape
 	pattern := regexp.MustCompile(`route="/t"`)
@@ -267,8 +277,10 @@ func TestMetrics_InFlightGauge_IncDecBalanced(t *testing.T) {
 		t.Errorf("in-flight during handler = %v, want 1", v)
 	}
 
-	// After the handler completes, scrape again and confirm the
-	// gauge dropped back to 0 — Inc must be balanced by Dec.
+	// Wait for the handler goroutine to fully return so Wrap's
+	// deferred Add(-1) has happened-before this scrape, then confirm
+	// the gauge dropped back to 0 — Inc must be balanced by Dec.
+	<-done
 	body = scrape(t, r)
 	v, ok = findLabeledSeriesValue(body, "jn_http_in_flight_requests", pattern)
 	if !ok {
