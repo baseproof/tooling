@@ -855,10 +855,12 @@ func composeBuilderLoop(
 	// first derived target rides the multi-parent publisher extension; the
 	// chain itself — and its fatals — are fully in force here.
 	if cfg.GenesisBootstrapDocument.GenesisAnchoring != nil && len(cfg.GenesisBootstrapDocument.GenesisAnchoring.Targets) > 0 {
-		if atPos, ok := parseSchemaEnv("LEDGER_ANCHOR_TARGET_SCHEMA"); ok {
+		// PRE-11 Phase B: derive the parent anchoring target by-kind from the
+		// on-log AnchorTargetDeclaration projection, DEFAULT-ON (no schema-env
+		// proxy). The parent ADMISSION URL dial keeps its canary (PRE-12).
+		{
 			derivationQuery := indexes.NewPostgresQueryAPI(ctx, pool, compositeReader, cfg.LogDID)
-			src := buildAnchorTargetDeclarationSource(derivationQuery, atPos)
-			recs, srcErr := src(ctx)
+			recs, srcErr := buildAnchorTargetDeclarationSource(derivationQuery)(ctx)
 			if srcErr != nil {
 				recs = nil // walk unavailable: derivation proceeds on canary-only terms
 			}
@@ -1671,12 +1673,33 @@ func buildProtocolVersionAmendmentSource(
 // buildAnchorTargetDeclarationSource walks BP-ENTRY-ANCHOR-TARGET-V1
 // declarations (PR-4d / Tier 1.5): the on-log WHERE for each constitutional
 // anchor target. Same schema-position discipline as its sibling walkers.
+// collectByKind pages idx_entry_kind (Phase A, #117) to the full set of
+// entries of a payload kind. Platform-family declarations are admission-gated
+// (only the network authority mints them), so the set is governance-bounded;
+// paging caps each round-trip. DISCOVERY, not authority — the records are
+// still cryptographically verified by the resolver downstream.
+func collectByKind(q *indexes.PostgresQueryAPI, kind string) ([]types.EntryWithMetadata, error) {
+	const page = 512
+	var out []types.EntryWithMetadata
+	var start uint64
+	for {
+		batch, err := q.QueryByKind(kind, start, page)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, batch...)
+		if len(batch) < page {
+			return out, nil
+		}
+		start = batch[len(batch)-1].Position.Sequence + 1
+	}
+}
+
 func buildAnchorTargetDeclarationSource(
 	q *indexes.PostgresQueryAPI,
-	schemaPos types.LogPosition,
 ) func(ctx context.Context) ([]network.AnchorTargetDeclarationRecord, error) {
 	return func(ctx context.Context) ([]network.AnchorTargetDeclarationRecord, error) {
-		entries, err := q.QueryBySchemaRef(schemaPos)
+		entries, err := collectByKind(q, network.AnchorTargetDeclarationKindV1)
 		if err != nil {
 			return nil, err
 		}
@@ -1701,10 +1724,9 @@ func buildAnchorTargetDeclarationSource(
 
 func buildWitnessEndpointDeclarationSource(
 	q *indexes.PostgresQueryAPI,
-	schemaPos types.LogPosition,
 ) func(ctx context.Context) (network.WitnessEndpointDeclarationByPosition, error) {
 	return func(ctx context.Context) (network.WitnessEndpointDeclarationByPosition, error) {
-		entries, err := q.QueryBySchemaRef(schemaPos)
+		entries, err := collectByKind(q, network.WitnessEndpointDeclarationKindV1)
 		if err != nil {
 			return nil, err
 		}
@@ -1729,10 +1751,9 @@ func buildWitnessEndpointDeclarationSource(
 
 func buildWitnessIdentityLabelSource(
 	q *indexes.PostgresQueryAPI,
-	schemaPos types.LogPosition,
 ) func(ctx context.Context) (network.WitnessIdentityLabelByPosition, error) {
 	return func(ctx context.Context) (network.WitnessIdentityLabelByPosition, error) {
-		entries, err := q.QueryBySchemaRef(schemaPos)
+		entries, err := collectByKind(q, network.WitnessIdentityLabelKindV1)
 		if err != nil {
 			return nil, err
 		}
@@ -1757,10 +1778,9 @@ func buildWitnessIdentityLabelSource(
 
 func buildAuditorRegistrationSource(
 	q *indexes.PostgresQueryAPI,
-	schemaPos types.LogPosition,
 ) func(ctx context.Context) ([]network.AuditorRegistrationRecord, error) {
 	return func(ctx context.Context) ([]network.AuditorRegistrationRecord, error) {
-		entries, err := q.QueryBySchemaRef(schemaPos)
+		entries, err := collectByKind(q, network.AuditorRegistrationKindV1)
 		if err != nil {
 			return nil, err
 		}
@@ -1791,10 +1811,9 @@ func buildAuditorRegistrationSource(
 // amendments).
 func buildAuditorScopeAmendmentSource(
 	q *indexes.PostgresQueryAPI,
-	schemaPos types.LogPosition,
 ) func(ctx context.Context) ([]network.AuditorScopeAmendmentRecord, error) {
 	return func(ctx context.Context) ([]network.AuditorScopeAmendmentRecord, error) {
-		entries, err := q.QueryBySchemaRef(schemaPos)
+		entries, err := collectByKind(q, network.AuditorScopeAmendmentKindV1)
 		if err != nil {
 			return nil, err
 		}
@@ -1824,17 +1843,10 @@ func buildAuthoritativeResolver(
 	ourLogDID string,
 	logger *slog.Logger,
 ) (*discover.DefaultAuthoritativeResolver, error) {
-	witnessEPPos, hasWitnessEPSchema := parseSchemaEnv("LEDGER_WITNESS_ENDPOINT_SCHEMA")
-	labelPos, hasLabelSchema := parseSchemaEnv("LEDGER_WITNESS_LABEL_SCHEMA")
-	auditorPos, hasAuditorSchema := parseSchemaEnv("LEDGER_AUDITOR_REGISTRATION_SCHEMA")
-	amendPos, hasAmendmentSchema := parseSchemaEnv("LEDGER_AUDITOR_SCOPE_AMENDMENT_SCHEMA")
-	anchorTargetPos, hasAnchorTargetSchema := parseSchemaEnv("LEDGER_ANCHOR_TARGET_SCHEMA")
-
-	if !hasWitnessEPSchema && !hasLabelSchema && !hasAuditorSchema && !hasAmendmentSchema && !hasAnchorTargetSchema {
-		logger.Info("v1.33.0: AuthoritativeResolver disabled (no schema env vars set); resolver wire-up skipped")
-		return nil, nil
-	}
-
+	// PRE-11 Phase B (#114, M7 closure): all five platform families resolve
+	// BY-KIND from the log's idx_entry_kind index (Phase A, #117), DEFAULT-ON.
+	// The LEDGER_*_SCHEMA position proxies are gone — discovery is no longer
+	// dormant behind operator config, and no config path can fail toward forgery.
 	resolver := &discover.DefaultAuthoritativeResolver{
 		LogWitnessSets:    map[string][][32]byte{},
 		DIDFallbackPolicy: discover.FallbackDisabled,
@@ -1855,72 +1867,44 @@ func buildAuthoritativeResolver(
 		}
 	}
 
-	if hasWitnessEPSchema {
-		src := buildWitnessEndpointDeclarationSource(q, witnessEPPos)
-		recs, err := src(ctx)
-		if err != nil {
-			logger.Warn("v1.32.0: WitnessEndpointDeclaration source initial fetch failed",
-				"error", err)
-		} else {
-			resolver.WitnessEndpointRecords = recs
-			logger.Info("v1.32.0: WitnessEndpointDeclaration records loaded",
-				"count", len(recs))
-		}
+	if recs, err := buildWitnessEndpointDeclarationSource(q)(ctx); err != nil {
+		logger.Warn("PRE-11: WitnessEndpointDeclaration by-kind fetch failed", "error", err)
+	} else {
+		resolver.WitnessEndpointRecords = recs
+		logger.Info("PRE-11: WitnessEndpointDeclaration records loaded", "count", len(recs))
 	}
-	if hasLabelSchema {
-		src := buildWitnessIdentityLabelSource(q, labelPos)
-		recs, err := src(ctx)
-		if err != nil {
-			logger.Warn("v1.32.0: WitnessIdentityLabel source initial fetch failed",
-				"error", err)
-		} else {
-			resolver.WitnessLabelRecords = recs
-			logger.Info("v1.32.0: WitnessIdentityLabel records loaded",
-				"count", len(recs))
-		}
+	if recs, err := buildWitnessIdentityLabelSource(q)(ctx); err != nil {
+		logger.Warn("PRE-11: WitnessIdentityLabel by-kind fetch failed", "error", err)
+	} else {
+		resolver.WitnessLabelRecords = recs
+		logger.Info("PRE-11: WitnessIdentityLabel records loaded", "count", len(recs))
 	}
-	if hasAuditorSchema {
-		src := buildAuditorRegistrationSource(q, auditorPos)
-		recs, err := src(ctx)
-		if err != nil {
-			logger.Warn("v1.32.0: AuditorRegistration source initial fetch failed",
-				"error", err)
-		} else {
-			resolver.AuditorRegistryRecords = recs
-			logger.Info("v1.32.0: AuditorRegistration records loaded",
-				"count", len(recs))
-		}
+	if recs, err := buildAuditorRegistrationSource(q)(ctx); err != nil {
+		logger.Warn("PRE-11: AuditorRegistration by-kind fetch failed", "error", err)
+	} else {
+		resolver.AuditorRegistryRecords = recs
+		logger.Info("PRE-11: AuditorRegistration records loaded", "count", len(recs))
 	}
-	if hasAmendmentSchema {
-		src := buildAuditorScopeAmendmentSource(q, amendPos)
-		recs, err := src(ctx)
-		if err != nil {
-			logger.Warn("v1.33.0: AuditorScopeAmendment source initial fetch failed",
-				"error", err)
-		} else {
-			resolver.AuditorScopeAmendmentRecords = recs
-			logger.Info("v1.33.0: AuditorScopeAmendment records loaded",
-				"count", len(recs))
-		}
+	if recs, err := buildAuditorScopeAmendmentSource(q)(ctx); err != nil {
+		logger.Warn("PRE-11: AuditorScopeAmendment by-kind fetch failed", "error", err)
+	} else {
+		resolver.AuditorScopeAmendmentRecords = recs
+		logger.Info("PRE-11: AuditorScopeAmendment records loaded", "count", len(recs))
 	}
-	if hasAnchorTargetSchema {
-		// PR-4d — closes #94: the FederationGraph finally has a producer.
-		// ResolvePeer's on-log branch becomes the live path; the env canary
-		// is reachable only in the genuine pre-first-declaration window
-		// (logAnchorTargetPosture says which one we're in, honestly).
-		src := buildAnchorTargetDeclarationSource(q, anchorTargetPos)
-		recs, err := src(ctx)
-		if err != nil {
-			logger.Warn("PR-4d: AnchorTargetDeclaration source initial fetch failed", "error", err)
-		} else {
-			asOf := types.LogPosition{LogDID: ourLogDID, Sequence: ^uint64(0)}
-			graph, declared, undeclared := projectAnchorTargetGraph(doc, ourLogDID, recs, asOf)
-			if graph != nil {
-				resolver.FederationGraph = *graph
-			}
-			logAnchorTargetPosture(logger, graph, declared, undeclared,
-				os.Getenv("LEDGER_PARENT_ADMISSION_URL"), time.Now())
+	// PR-4d (#94): the FederationGraph's producer is the on-log
+	// AnchorTargetDeclaration, resolved by-kind. LEDGER_PARENT_ADMISSION_URL
+	// remains the cross-log (peer/parent) canary — retired in PRE-12 with the
+	// rest of the foreign-log resolution, not here.
+	if recs, err := buildAnchorTargetDeclarationSource(q)(ctx); err != nil {
+		logger.Warn("PRE-11: AnchorTargetDeclaration by-kind fetch failed", "error", err)
+	} else {
+		asOf := types.LogPosition{LogDID: ourLogDID, Sequence: ^uint64(0)}
+		graph, declared, undeclared := projectAnchorTargetGraph(doc, ourLogDID, recs, asOf)
+		if graph != nil {
+			resolver.FederationGraph = *graph
 		}
+		logAnchorTargetPosture(logger, graph, declared, undeclared,
+			os.Getenv("LEDGER_PARENT_ADMISSION_URL"), time.Now())
 	}
 
 	return resolver, nil

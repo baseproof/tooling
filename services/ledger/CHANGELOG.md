@@ -205,7 +205,7 @@ The v1.32.0 binary is backward-compatible with deployments running pre-v1.32.0 o
 2. Drop `LEDGER_WITNESS_ENDPOINTS` and `LEDGER_PARENT_ADMISSION_URL` from manifests after the on-log walker has been verified at boot.
 3. Audit `auditor_scope_reject_total` for `reason="not_registered"` from known-auditor DIDs — those indicate config drift between the operator's auditor list and the on-log registry.
 
-The schema-ID env vars (`LEDGER_WITNESS_ENDPOINT_SCHEMA`, `LEDGER_WITNESS_LABEL_SCHEMA`, `LEDGER_AUDITOR_REGISTRATION_SCHEMA`) are permanent — they identify which schema-ID a given network uses to admit each on-log entry kind. They are NOT canary paths.
+The schema-ID env vars (`LEDGER_WITNESS_ENDPOINT_SCHEMA`, `LEDGER_WITNESS_LABEL_SCHEMA`, `LEDGER_AUDITOR_REGISTRATION_SCHEMA`) are permanent — they identify which schema-ID a given network uses to admit each on-log entry kind. They are NOT canary paths. _**[Superseded by PRE-11 Phase B (#114): this "permanent" claim is retracted. These were the AuthoritativeResolver's record locators, not admission inputs; they are removed, and resolution is now by-kind from `idx_entry_kind`.]**_
 
 ### Coordination
 
