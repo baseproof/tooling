@@ -191,8 +191,8 @@ func networkBundleVerify(ctx context.Context, args []string) error {
 		ContentHash: hex.EncodeToString(h[:]), Operations: len(m.Operations),
 	}
 	return emitOutput(*output, "network-bundle-verify", data, func() error {
-		fmt.Printf("network bundle: ✔ VERIFIED %s\n", fs.Arg(0))
-		fmt.Printf("  network=%s exchange=%s operations=%d content_hash=%s\n",
+		tablef("network bundle: ✔ VERIFIED %s\n", fs.Arg(0))
+		tablef("  network=%s exchange=%s operations=%d content_hash=%s\n",
 			short(data.NetworkID), data.Exchange, data.Operations, short(data.ContentHash))
 		return nil
 	})
@@ -273,8 +273,8 @@ func networkBundlePublish(ctx context.Context, args []string) error {
 			Anchor: fmt.Sprintf("%s@%d", dest, seq),
 		}
 		return emitOutput(*output, "network-bundle-publish", data, func() error {
-			fmt.Printf("anchor published: %s  (canonical_hash=%s)\n", data.Anchor, short(hash))
-			fmt.Printf("next: baseproof network bundle publish --manifest <m.json> --anchor %s --signer-key %s\n", data.Anchor, *keyFile)
+			tablef("anchor published: %s  (canonical_hash=%s)\n", data.Anchor, short(hash))
+			tablef("next: baseproof network bundle publish --manifest <m.json> --anchor %s --signer-key %s\n", data.Anchor, *keyFile)
 			return nil
 		})
 	}
@@ -314,10 +314,10 @@ func networkBundlePublish(ctx context.Context, args []string) error {
 		ContentHash: hex.EncodeToString(ch[:]), Exchange: m.Exchange,
 	}
 	return emitOutput(*output, "network-bundle-publish", data, func() error {
-		fmt.Printf("manifest published: exchange=%s operations=%d content_hash=%s\n",
+		tablef("manifest published: exchange=%s operations=%d content_hash=%s\n",
 			m.Exchange, len(m.Operations), short(data.ContentHash))
-		fmt.Printf("  sequenced at %d (canonical_hash=%s, anchor %s@%d)\n", seq, short(hash), anchorPos.LogDID, anchorPos.Sequence)
-		fmt.Printf("  resolve: GET %s/v1/query/schema_ref/%s@%d — the LATEST citing entry is current\n",
+		tablef("  sequenced at %d (canonical_hash=%s, anchor %s@%d)\n", seq, short(hash), anchorPos.LogDID, anchorPos.Sequence)
+		tablef("  resolve: GET %s/v1/query/schema_ref/%s@%d — the LATEST citing entry is current\n",
 			b.Endpoint, anchorPos.LogDID, anchorPos.Sequence)
 		return nil
 	})
@@ -408,22 +408,22 @@ func signSubmitWait(ctx context.Context, hc *http.Client, endpoint, token string
 }
 
 func renderBundleSummary(d NetworkBundleGetData) {
-	fmt.Printf("network bundle: ✔ VERIFIED destination=%s\n", d.Destination)
-	fmt.Printf("  content_hash=%s published=%s", short(d.ContentHash), orDash(d.Published))
+	tablef("network bundle: ✔ VERIFIED destination=%s\n", d.Destination)
+	tablef("  content_hash=%s published=%s", short(d.ContentHash), orDash(d.Published))
 	if d.Position != "" {
-		fmt.Printf(" position=%s", d.Position)
+		tablef(" position=%s", d.Position)
 	}
 	if d.EnforcedMatch != "" {
-		fmt.Printf(" enforced_match=%s", d.EnforcedMatch)
+		tablef(" enforced_match=%s", d.EnforcedMatch)
 	}
-	fmt.Println()
+	tableln()
 	m := d.Manifest
-	fmt.Printf("  network=%s name=%q quorum_k=%d log=%s\n",
+	tablef("  network=%s name=%q quorum_k=%d log=%s\n",
 		short(m.Network.NetworkID), m.Network.Name, m.Network.QuorumK, m.Network.LogDID)
-	fmt.Printf("  endpoints=%d operations=%d roles=%d datatypes=%d federation=%d\n",
+	tablef("  endpoints=%d operations=%d roles=%d datatypes=%d federation=%d\n",
 		len(m.Endpoints), len(m.Operations), len(m.Roles), len(m.Datatypes), len(m.Federation))
 	if m.Submit.Path != "" {
-		fmt.Printf("  submit: %s %s  admission: gating=%s payment=%v\n",
+		tablef("  submit: %s %s  admission: gating=%s payment=%v\n",
 			orDash(m.Submit.Endpoint), m.Submit.Path, orDash(m.Admission.Gating), m.Admission.Payment)
 	}
 }

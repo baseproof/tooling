@@ -351,7 +351,7 @@ func cosignSubmit(ctx context.Context, args []string) error {
 		DraftDigest   string `json:"draft_digest"`
 	}{seq, hash, req.Operation, len(req.Collected), hex.EncodeToString(digest[:])}
 	return emitOutput(*output, "cosign-submit", data, func() error {
-		fmt.Printf("cosign: ✔ sequenced at %d (canonical_hash=%s, %d signatures over digest %s)\n",
+		tablef("cosign: ✔ sequenced at %d (canonical_hash=%s, %d signatures over digest %s)\n",
 			seq, short(hash), data.Signatures, short(data.DraftDigest))
 		return nil
 	})
@@ -519,9 +519,9 @@ func cosignStatus(req *CosignRequest) CosignStatusData {
 }
 
 func renderCosignRequest(req *CosignRequest) {
-	fmt.Printf("cosign request: operation=%s destination=%s\n", req.Operation, req.Draft.Destination)
-	fmt.Printf("  primary=%s event_time=%d digest=%s\n", req.Draft.SignerDID, req.Draft.EventTime, short(req.DraftDigest))
-	fmt.Printf("  rule: required_signer_roles=%v min_cosigners=%d intra_exchange_only=%v\n",
+	tablef("cosign request: operation=%s destination=%s\n", req.Operation, req.Draft.Destination)
+	tablef("  primary=%s event_time=%d digest=%s\n", req.Draft.SignerDID, req.Draft.EventTime, short(req.DraftDigest))
+	tablef("  rule: required_signer_roles=%v min_cosigners=%d intra_exchange_only=%v\n",
 		req.Signing.RequiredSignerRoles, req.Signing.EffectiveMinCosigners(), req.Signing.IntraExchangeOnly)
 	payload, err := base64.StdEncoding.DecodeString(req.Draft.PayloadB64)
 	if err == nil {
@@ -532,16 +532,16 @@ func renderCosignRequest(req *CosignRequest) {
 				pretty = p
 			}
 		}
-		fmt.Printf("  payload (%d bytes):\n  %s\n", len(payload), pretty)
+		tablef("  payload (%d bytes):\n  %s\n", len(payload), pretty)
 	}
 	for i, c := range req.Collected {
 		who := "cosigner"
 		if i == 0 {
 			who = "primary"
 		}
-		fmt.Printf("  [%d] %s %s role=%q ✔ verified\n", i, who, c.SignerDID, c.Role)
+		tablef("  [%d] %s %s role=%q ✔ verified\n", i, who, c.SignerDID, c.Role)
 	}
-	fmt.Printf("  status: %s\n", completenessLine(req))
+	tablef("  status: %s\n", completenessLine(req))
 }
 
 // fetchVerifiedManifest pulls the network's bundle for its sole served

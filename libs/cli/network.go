@@ -248,7 +248,7 @@ func networkList(args []string) error {
 	}
 	return emitOutput(*output, "network-list", data, func() error {
 		if len(data.Networks) == 0 {
-			fmt.Println("no networks — add one: baseproof network add <name> --from-ledger <url>")
+			tableln("no networks — add one: baseproof network add <name> --from-ledger <url>")
 			return nil
 		}
 		for _, e := range data.Networks {
@@ -260,7 +260,7 @@ func networkList(args []string) error {
 			if e.LoadError == "" {
 				id, ep = short(e.NetworkID), e.Endpoint
 			}
-			fmt.Printf("%s%-16s %s  %s\n", mark, e.Name, id, ep)
+			tablef("%s%-16s %s  %s\n", mark, e.Name, id, ep)
 		}
 		return nil
 	})
@@ -306,7 +306,7 @@ func networkShow(args []string) error {
 	}
 	return emitOutput(*output, "network-show", data, func() error {
 		out, _ := json.MarshalIndent(b, "", "  ")
-		fmt.Println(string(out))
+		tableln(string(out))
 		return nil
 	})
 }
@@ -317,9 +317,9 @@ func configList() error {
 	if active == "" {
 		active = "(none)"
 	}
-	fmt.Printf("active network: %s\n", active)
+	tablef("active network: %s\n", active)
 	names, _ := listNetworks()
-	fmt.Printf("networks: %s\n", strings.Join(names, ", "))
+	tablef("networks: %s\n", strings.Join(names, ", "))
 	return nil
 }
 

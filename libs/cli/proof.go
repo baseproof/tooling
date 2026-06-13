@@ -101,12 +101,12 @@ func RunProof(ctx context.Context, args []string) error {
 		return fmt.Errorf("generated proof did not self-verify (fail-closed): %w", err)
 	}
 
-	renderProof(os.Stdout, proof, res, *seq)
+	renderProof(stdout(), proof, res, *seq)
 	if *out != "" {
 		if err := writeProofFile(proof, *out); err != nil {
 			return err
 		}
-		fmt.Printf("\nproof: wrote %s (portable — verify it anywhere with `baseproof verify %s`)\n", *out, *out)
+		tablef("\nproof: wrote %s (portable — verify it anywhere with `baseproof verify %s`)\n", *out, *out)
 	}
 	return nil
 }

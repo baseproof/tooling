@@ -168,7 +168,7 @@ func rotationDraftCmd(ctx context.Context, args []string) error {
 		"new_set_hash":     hex.EncodeToString(nsh[:]),
 		"new_witnesses":    len(draft.NewSet),
 	}, func() error {
-		fmt.Printf("rotation draft: network=%s K=%d current=%d witnesses (%s) new=%d witnesses (%s)\n",
+		tablef("rotation draft: network=%s K=%d current=%d witnesses (%s) new=%d witnesses (%s)\n",
 			short(draft.NetworkIDHex), draft.QuorumK, len(draft.CurrentSet), short(cur.SetHash),
 			len(draft.NewSet), short(hex.EncodeToString(nsh[:])))
 		return nil
@@ -219,7 +219,7 @@ func rotationFinalizeCmd(_ context.Context, args []string) error {
 		"new_signatures":     len(rotation.NewSignatures),
 		"new_set":            len(rotation.NewSet),
 	}, func() error {
-		fmt.Printf("rotation finalized → %s (%d current + %d new signatures, %d new witnesses)\n",
+		tablef("rotation finalized → %s (%d current + %d new signatures, %d new witnesses)\n",
 			*out, len(rotation.CurrentSignatures), len(rotation.NewSignatures), len(rotation.NewSet))
 		return nil
 	})
@@ -312,7 +312,7 @@ func rotationSubmitCmd(ctx context.Context, args []string) error {
 		return fmt.Errorf("network rotation submit: the rotation door refused (HTTP %d): %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 	return emitOutput(*output, "rotation-submit", json.RawMessage(body), func() error {
-		fmt.Printf("rotation: ✔ accepted by the network's rotation door (%d new witnesses applied)\n", len(r.NewSet))
+		tablef("rotation: ✔ accepted by the network's rotation door (%d new witnesses applied)\n", len(r.NewSet))
 		return nil
 	})
 }

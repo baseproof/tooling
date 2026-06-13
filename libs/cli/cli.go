@@ -38,7 +38,7 @@ func Main(argv []string) int {
 	case "load":
 		err = RunLoad(ctx, args)
 	case "-h", "--help", "help":
-		usage(os.Stdout)
+		usage(stdout())
 		return 0
 	default:
 		fmt.Fprintf(os.Stderr, "baseproof: unknown command %q\n\n", cmd)

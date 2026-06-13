@@ -89,7 +89,7 @@ func RunSubmit(ctx context.Context, args []string) error {
 			if werr := writeHexKey(*outKey, scalarBytes(kp.PrivateKey)); werr != nil {
 				return werr
 			}
-			fmt.Printf("submit: wrote signer key → %s (keep it to amend this root later)\n", *outKey)
+			tablef("submit: wrote signer key → %s (keep it to amend this root later)\n", *outKey)
 		}
 	}
 
@@ -182,7 +182,7 @@ func RunSubmit(ctx context.Context, args []string) error {
 	}
 
 	key := smt.DeriveKey(types.LogPosition{LogDID: logDID, Sequence: seq})
-	fmt.Printf("submit: %s sequenced — seq=%d signer=%s smt_key=%s\n", kind, seq, id.DID, hex.EncodeToString(key[:]))
+	tablef("submit: %s sequenced — seq=%d signer=%s smt_key=%s\n", kind, seq, id.DID, hex.EncodeToString(key[:]))
 	return nil
 }
 

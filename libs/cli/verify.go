@@ -93,16 +93,16 @@ func RunVerify(ctx context.Context, args []string) error {
 		NotAsserted: append([]string(nil), res.Coverage.NotAsserted...),
 	}
 	return emitOutput(*output, "verify", data, func() error {
-		fmt.Printf("proof: format=%s network=%s tree_size=%d quorum=%d-of-%d\n",
+		tablef("proof: format=%s network=%s tree_size=%d quorum=%d-of-%d\n",
 			data.Format, data.NetworkID, data.TreeSize, data.QuorumHave, data.QuorumNeed)
-		fmt.Printf("proof: verified: %v\n", res.Coverage.Verified)
+		tablef("proof: verified: %v\n", res.Coverage.Verified)
 		if len(data.NotAsserted) > 0 {
-			fmt.Printf("proof: not asserted (absent sections): %v\n", data.NotAsserted)
+			tablef("proof: not asserted (absent sections): %v\n", data.NotAsserted)
 		}
 		if effectivePin == "" {
-			fmt.Println("proof: ✔ VERIFIED (self-anchored / trust-on-first-use — pass --network/--bundle/--pin to bind to a network you already trust)")
+			tableln("proof: ✔ VERIFIED (self-anchored / trust-on-first-use — pass --network/--bundle/--pin to bind to a network you already trust)")
 		} else {
-			fmt.Printf("proof: ✔ VERIFIED and pinned to network %s\n", short(effectivePin))
+			tablef("proof: ✔ VERIFIED and pinned to network %s\n", short(effectivePin))
 		}
 		return nil
 	})

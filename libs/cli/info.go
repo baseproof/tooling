@@ -32,7 +32,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"os"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -185,7 +184,7 @@ func RunInfo(ctx context.Context, args []string) error {
 		return err
 	}
 	if err := emitOutput(*output, "info", n, func() error {
-		renderNetwork(os.Stdout, n)
+		renderNetwork(stdout(), n)
 		return nil
 	}); err != nil {
 		return err
