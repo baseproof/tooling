@@ -40,19 +40,52 @@ type BurnSource interface {
 // source (gossip disabled) reports is_burned=false — the honest answer when the
 // ledger has no equivocation-observation capability (no evidence of burn).
 func NewBurnHandler(src BurnSource, logDID string, logger *slog.Logger) http.HandlerFunc {
+	return NewBurnHandlerWithDeclared(src, nil, logDID, logger)
+}
+
+// DeclaredBurnSource answers the AUTHORITATIVE burn question from the
+// on-log record: the quorum-cosigned EntryNetworkBurnV1 the burn door
+// (POST /v1/network/burn → BurnProcessor) committed and verified. The
+// rc10 OR-semantics ruling (tooling#110):
+//
+//	is_burned = declared (on-log walk, authoritative)
+//	         OR observed (gossip equivocation, evidence-tier)
+//
+// and ANY source error is a serve ABORT (503) — never a false bool in
+// either direction. nil = no declared-burn capability wired (a reader
+// binary): observed-only, the honest pre-#110-door posture.
+type DeclaredBurnSource interface {
+	DeclaredBurn(ctx context.Context) (bool, error)
+}
+
+// NewBurnHandlerWithDeclared creates GET /v1/burn with both legs.
+func NewBurnHandlerWithDeclared(observed BurnSource, declared DeclaredBurnSource, logDID string, logger *slog.Logger) http.HandlerFunc {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	return func(w http.ResponseWriter, r *http.Request) {
 		burned := false
-		if src != nil {
-			b, err := src.IsBurned(r.Context(), logDID)
+		if declared != nil {
+			d, err := declared.DeclaredBurn(r.Context())
+			if err != nil {
+				// The walk refusing (e.g. an unauthorized on-log burn) is
+				// misbehavior evidence — ABORT, never serve "not burned"
+				// over poison (the SDK INPUT CONTRACT both this endpoint
+				// and EncodeBurnAttestation inherit).
+				logger.Error("burn status: declared leg", "error", err, "log_did", logDID)
+				http.Error(w, "burn status unavailable", http.StatusServiceUnavailable)
+				return
+			}
+			burned = burned || d
+		}
+		if !burned && observed != nil {
+			b, err := observed.IsBurned(r.Context(), logDID)
 			if err != nil {
 				logger.Error("burn status", "error", err, "log_did", logDID)
 				http.Error(w, "burn status unavailable", http.StatusServiceUnavailable)
 				return
 			}
-			burned = b
+			burned = burned || b
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{"is_burned": burned})
