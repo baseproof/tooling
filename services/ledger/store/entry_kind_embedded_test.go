@@ -19,8 +19,10 @@ import (
 	"github.com/baseproof/baseproof/core/envelope"
 	"github.com/baseproof/baseproof/kinds"
 
+	"github.com/baseproof/tooling/services/ledger/bytestore"
 	"github.com/baseproof/tooling/services/ledger/internal/embeddedpg"
 	"github.com/baseproof/tooling/services/ledger/store"
+	"github.com/baseproof/tooling/services/ledger/store/indexes"
 )
 
 const entryKindPGPort = 54335
@@ -177,4 +179,107 @@ func TestEntryKindIndex_Embedded(t *testing.T) {
 	if nullCount != 3 {
 		t.Fatalf("no-kind, unrecognized-kind, and batch-no-kind rows must all be NULL: got %d/3", nullCount)
 	}
+}
+
+// TestEntryKindIndex_FamilyDiscrimination_Embedded pins #114 finding ②: the
+// AuthoritativeResolver's five families are DISTINCT kinds and the index
+// discriminates each on its own kind — the by-kind derivation model Phase B
+// can actually use. The same test proves the ANTI-pattern: keying off the
+// shared EntrySchemaShardGenesisV1 cannot tell the families apart (every
+// family's schema shard is that one kind), so LatestByKind(SchemaShardGenesis)
+// returns one shard regardless of how many families exist. This is the
+// concrete reason Phase B must derive per family kind, not via the shard.
+func TestEntryKindIndex_FamilyDiscrimination_Embedded(t *testing.T) {
+	pool := embeddedpg.Start(t, entryKindPGPort+1) // distinct port from the sibling test
+	ctx := context.Background()
+	es := store.NewEntryStore(pool)
+
+	families := []string{
+		kinds.EntryWitnessEndpointV1,
+		kinds.EntryWitnessLabelV1,
+		kinds.EntryAuditorRegistrationV1,
+		kinds.EntryAuditorScopeAmendmentV1,
+		kinds.EntryAnchorTargetV1,
+	}
+	// One entry per family kind, plus TWO schema shards (the shared kind).
+	insert := func(seq uint64, kind string) {
+		tx, err := pool.Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer tx.Rollback(ctx)
+		var h [32]byte
+		h[0], h[1] = 0xD4, byte(seq)
+		if err := es.Insert(ctx, tx, store.EntryRow{
+			SequenceNumber: seq, CanonicalHash: h,
+			LogTime:   time.Unix(1_700_000_000+int64(seq), 0).UTC(),
+			SignerDID: "did:key:zOps", Kind: kind, Status: store.StatusLive,
+		}); err != nil {
+			t.Fatalf("insert seq=%d: %v", seq, err)
+		}
+		if err := tx.Commit(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i, fam := range families {
+		insert(uint64(i), fam)
+	}
+	insert(100, kinds.EntrySchemaShardGenesisV1)
+	insert(101, kinds.EntrySchemaShardGenesisV1)
+
+	// Drive the REAL production readers (QueryByKind / LatestByKind), not
+	// inlined SQL — so this test exercises the actual code Phase B imports,
+	// closing the reader-SQL drift gap. The fake reader returns dummy bytes
+	// per ref; the readers assemble metadata without deserializing, so seq
+	// is the assertion axis.
+	api := indexes.NewPostgresQueryAPI(ctx, pool, seqReader{}, "did:baseproof:log:test")
+
+	// Each family is found by ITS OWN kind — exactly one, at its own seq —
+	// through both readers. This is the by-kind derivation Phase B uses.
+	for i, fam := range families {
+		got, ok, err := api.LatestByKind(fam)
+		if err != nil {
+			t.Fatalf("family %s LatestByKind: %v", fam, err)
+		}
+		if !ok || got.Position.Sequence != uint64(i) {
+			t.Fatalf("family %s: LatestByKind want seq %d, got ok=%v seq=%d", fam, i, ok, got.Position.Sequence)
+		}
+		page, err := api.QueryByKind(fam, 0, 100)
+		if err != nil {
+			t.Fatalf("family %s QueryByKind: %v", fam, err)
+		}
+		if len(page) != 1 || page[0].Position.Sequence != uint64(i) {
+			t.Fatalf("family %s: QueryByKind want exactly [seq %d], got %d rows", fam, i, len(page))
+		}
+	}
+	// The shared shard kind cannot discriminate families: LatestByKind
+	// returns the latest shard (101) and QueryByKind returns BOTH — never a
+	// per-family answer. This is the concrete reason Phase B must NOT key
+	// derivation off SchemaShardGenesisV1.
+	shardLatest, ok, err := api.LatestByKind(kinds.EntrySchemaShardGenesisV1)
+	if err != nil || !ok || shardLatest.Position.Sequence != 101 {
+		t.Fatalf("schema shard LatestByKind: want seq 101, got ok=%v seq=%d err=%v", ok, shardLatest.Position.Sequence, err)
+	}
+	shards, err := api.QueryByKind(kinds.EntrySchemaShardGenesisV1, 0, 100)
+	if err != nil || len(shards) != 2 {
+		t.Fatalf("schema shard kind is shared: QueryByKind want 2 rows, got %d err=%v", len(shards), err)
+	}
+}
+
+// seqReader is a minimal bytestore.Reader for the index-reader tests: it
+// returns dummy non-nil bytes per ref so QueryByKind/LatestByKind assemble
+// successfully (they don't deserialize — the consumer does). Seq is the
+// assertion axis.
+type seqReader struct{}
+
+func (seqReader) ReadEntry(_ context.Context, seq uint64, _ [32]byte) ([]byte, error) {
+	return []byte{byte(seq)}, nil
+}
+
+func (seqReader) ReadEntryBatch(_ context.Context, refs []bytestore.EntryRef) ([][]byte, error) {
+	out := make([][]byte, len(refs))
+	for i, r := range refs {
+		out[i] = []byte{byte(r.Seq)}
+	}
+	return out, nil
 }

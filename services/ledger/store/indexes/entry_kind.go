@@ -41,11 +41,21 @@ const entryKindLatestSQL = `SELECT sequence_number, log_time, canonical_hash
 	FROM entry_index WHERE kind = $1 AND sequence_number >= $2 ORDER BY sequence_number DESC`
 
 // LatestByKind returns the single most recent entry whose payload kind == kind,
-// or (zero, false, nil) when the log carries no such entry. This is the
-// AuthoritativeResolver's derivation primitive (#114 Phase B): the latest
-// schema-declaration of each family, resolved from the log in one seek. Routes
-// through the shared runIndexQuery path (close-discipline + hydrate in one
-// home) with limit 1.
+// or (zero, false, nil) when the log carries no such entry. Routes through the
+// shared runIndexQuery path (close-discipline + hydrate in one home) with
+// limit 1.
+//
+// PHASE-B USAGE (#114) — DISCRIMINATION IS PER FAMILY KIND, NOT VIA THE SCHEMA
+// SHARD: the AuthoritativeResolver projects FIVE families
+// (EntryWitnessEndpointV1, EntryWitnessLabelV1, EntryAuditorRegistrationV1,
+// EntryAuditorScopeAmendmentV1, EntryAnchorTargetV1 — all DISTINCT kinds), so
+// it queries each family by ITS OWN kind. It must NOT key off
+// EntrySchemaShardGenesisV1: every family's schema shard shares that one kind,
+// so LatestByKind(SchemaShardGenesisV1) returns one shard total and cannot tell
+// the families apart. The exact derivation model — query the family kind
+// directly (QueryByKind) vs. resolve a schema position and keep the schema_ref
+// indirection — is Phase B's decision; this index serves the by-kind model
+// cleanly and is what the per-family-kind discrimination test pins.
 func (q *PostgresQueryAPI) LatestByKind(kind string) (types.EntryWithMetadata, bool, error) {
 	if kind == "" {
 		return types.EntryWithMetadata{}, false, nil
