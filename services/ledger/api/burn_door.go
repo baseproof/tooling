@@ -34,7 +34,7 @@ var ErrAlreadyBurned = errors.New("ledger: network is already burned — burn is
 
 const maxBurnBody = 64 * 1024
 
-// BurnProcessor is the single chokepoint the door feeds — satisfied by
+// BurnDoorProcessor is the single chokepoint the door feeds — satisfied by
 // *witnessclient.BurnProcessor. Injected, not imported, on the handler
 // struct so tests drive the door with fakes.
 type BurnDoorProcessor interface {
