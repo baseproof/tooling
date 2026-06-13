@@ -53,3 +53,16 @@ func emitOutput(output, kind string, data any, table func() error) error {
 		return fmt.Errorf("--output %q: want table|json", output)
 	}
 }
+
+// tablef / tableln are the ONLY in-package stdout writers besides the JSON
+// encoder above — every table renderer prints through them, so the guard
+// test (pre1_stdout_guard_test.go) can enforce "no stdout writes outside
+// output.go" mechanically instead of by review discipline.
+func tablef(format string, a ...any) { fmt.Fprintf(os.Stdout, format, a...) }
+
+func tableln(a ...any) { fmt.Fprintln(os.Stdout, a...) }
+
+// stdout returns the data stream for writer-parameterized renderers
+// (usage, renderNetwork, renderProof) — the licensed alternative to a
+// direct os.Stdout reference outside this file.
+func stdout() *os.File { return os.Stdout }

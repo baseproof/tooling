@@ -64,7 +64,7 @@ func RunLoad(ctx context.Context, args []string) error {
 		sink = ow
 	}
 
-	fmt.Printf("load: endpoint=%s log-did=%s n=%d amend-ratio=%.2f delegate-ratio=%.2f workers=%d batch=%d window=%d seed=%d\n",
+	tablef("load: endpoint=%s log-did=%s n=%d amend-ratio=%.2f delegate-ratio=%.2f workers=%d batch=%d window=%d seed=%d\n",
 		b.Endpoint, logDID, *n, *amendRatio, *delegRatio, *workers, *batch, *window, *seed)
 
 	st, runErr := loadgen.Run(ctx, loadgen.Config{
@@ -82,7 +82,7 @@ func RunLoad(ctx context.Context, args []string) error {
 		AmendWindow:    *window,
 		HTTPClient:     hc,
 		Progress: func(p loadgen.Progress) {
-			fmt.Printf("load: %d/%d (%.1f%%) entities=%d delegations=%d amendments=%d(%d delegated) %.1f/s eta=%s\n",
+			tablef("load: %d/%d (%.1f%%) entities=%d delegations=%d amendments=%d(%d delegated) %.1f/s eta=%s\n",
 				p.Submitted, p.N, p.Pct, p.Roots, p.Delegations, p.Amendments, p.DelegatedAmendments, p.Rate, p.ETA)
 		},
 	}, sink)
@@ -95,10 +95,10 @@ func RunLoad(ctx context.Context, args []string) error {
 	if runErr != nil {
 		return runErr
 	}
-	fmt.Printf("load: complete — %d entries (%d entities, %d delegations, %d amendments [%d delegated]) in %s\n",
+	tablef("load: complete — %d entries (%d entities, %d delegations, %d amendments [%d delegated]) in %s\n",
 		st.Submitted, st.Roots, st.Delegations, st.Amendments, st.DelegatedAmendments, st.Elapsed.Round(time.Second))
 	if ow != nil {
-		fmt.Printf("load: oracle = %s (%d leaves)\n", *manifest, ow.Count())
+		tablef("load: oracle = %s (%d leaves)\n", *manifest, ow.Count())
 	}
 	return nil
 }

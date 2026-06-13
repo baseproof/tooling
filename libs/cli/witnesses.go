@@ -120,20 +120,20 @@ func RunWitnesses(ctx context.Context, args []string) error {
 		})
 	}
 	return emitOutput(*output, "witnesses", data, func() error {
-		fmt.Printf("witnesses: %s — set %s  scheme=%d  effective_seq=%d  (%d keys)\n",
+		tablef("witnesses: %s — set %s  scheme=%d  effective_seq=%d  (%d keys)\n",
 			label, short(set.SetHash), set.SchemeTag, set.EffectiveSeq, len(set.Keys))
 		if genesisDerived {
-			fmt.Printf("witnesses: GENESIS set — derived from the hash-verified bootstrap (the ledger serves no witness history)\n")
+			tablef("witnesses: GENESIS set — derived from the hash-verified bootstrap (the ledger serves no witness history)\n")
 		}
 		if set.RetiredSeq != nil {
-			fmt.Printf("witnesses: this set RETIRED at seq %d — a later set is active (rotation)\n", *set.RetiredSeq)
+			tablef("witnesses: this set RETIRED at seq %d — a later set is active (rotation)\n", *set.RetiredSeq)
 		}
 		for i, k := range data.Witnesses {
 			name := ""
 			if k.Label != "" {
 				name = "  " + k.Label
 			}
-			fmt.Printf("  [%d] %s%s\n", i, short(k.ID), name)
+			tablef("  [%d] %s%s\n", i, short(k.ID), name)
 		}
 		return nil
 	})

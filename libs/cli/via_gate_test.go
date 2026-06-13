@@ -66,7 +66,7 @@ func TestSubmitViaGate(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	seq, err := submitViaGate(context.Background(), srv.Client(), b, entry, primary, cosigners, 5*time.Second)
+	seq, err := submitViaGate(context.Background(), srv.Client(), b, entry, primary, cosigners, 5*time.Second, false)
 	if err != nil {
 		t.Fatalf("submitViaGate: %v", err)
 	}

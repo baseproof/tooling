@@ -36,6 +36,7 @@ func RunSubmit(ctx context.Context, args []string) error {
 		bundlePath   = fs.String("bundle", "", "client bundle JSON (else --network or the active network)")
 		network      = fs.String("network", "", "stored network name (else the active network)")
 		payload      = fs.String("payload", "", "entry payload (UTF-8) — REQUIRED")
+		dryRun       = fs.Bool("dry-run", false, "build, sign, validate and serialize the entry, then stop BEFORE the POST")
 		amend        = fs.Int64("amend", -1, "amend the entity at this sequence (signed by its key); omit to create a new entity")
 		delegateTo   = fs.String("delegate-to", "", "mint a delegation: the entity (--key-file) grants authority to this delegate DID")
 		delegation   = fs.Int64("delegation", -1, "with --amend: a DELEGATED amendment citing the delegation at this sequence (--key-file is the delegate)")
@@ -89,7 +90,7 @@ func RunSubmit(ctx context.Context, args []string) error {
 			if werr := writeHexKey(*outKey, scalarBytes(kp.PrivateKey)); werr != nil {
 				return werr
 			}
-			fmt.Printf("submit: wrote signer key → %s (keep it to amend this root later)\n", *outKey)
+			tablef("submit: wrote signer key → %s (keep it to amend this root later)\n", *outKey)
 		}
 	}
 
@@ -163,7 +164,7 @@ func RunSubmit(ctx context.Context, args []string) error {
 		// WriteAuthorization the ledger requires. Multi-sign (primary + inline
 		// cosigners); the gate's forward satisfies the payment axis, so no
 		// PoW/token is attached here.
-		seq, err = submitViaGate(ctx, hc, b, entry, id, cosigners, *timeout)
+		seq, err = submitViaGate(ctx, hc, b, entry, id, cosigners, *timeout, *dryRun)
 	} else {
 		if len(cosigners) > 0 {
 			return fmt.Errorf("--cosigner-keys (in-band multi-sig) needs a gated network (a write_endpoint / write gate): inline cosignatures are validated by the gate's cosignature policy, not on a direct-to-ledger write")
@@ -182,7 +183,7 @@ func RunSubmit(ctx context.Context, args []string) error {
 	}
 
 	key := smt.DeriveKey(types.LogPosition{LogDID: logDID, Sequence: seq})
-	fmt.Printf("submit: %s sequenced — seq=%d signer=%s smt_key=%s\n", kind, seq, id.DID, hex.EncodeToString(key[:]))
+	tablef("submit: %s sequenced — seq=%d signer=%s smt_key=%s\n", kind, seq, id.DID, hex.EncodeToString(key[:]))
 	return nil
 }
 
@@ -267,7 +268,7 @@ func parseLogPos(arg, defaultLogDID string) (types.LogPosition, error) {
 // LEDGER to sequence it.
 // Reads stay on the ledger; the bundle's mTLS transport serves both hops (one
 // network CA verifies both server certs).
-func submitViaGate(ctx context.Context, hc *http.Client, b *ClientBundle, entry *envelope.Entry, primary loadgen.Identity, cosigners []loadgen.Identity, timeout time.Duration) (uint64, error) {
+func submitViaGate(ctx context.Context, hc *http.Client, b *ClientBundle, entry *envelope.Entry, primary loadgen.Identity, cosigners []loadgen.Identity, timeout time.Duration, dryRun bool) (uint64, error) {
 	u, err := envelope.NewUnsignedEntry(entry.Header, entry.DomainPayload)
 	if err != nil {
 		return 0, fmt.Errorf("new unsigned entry: %w", err)
@@ -293,6 +294,14 @@ func submitViaGate(ctx context.Context, hc *http.Client, b *ClientBundle, entry 
 	wire, err := envelope.Serialize(u)
 	if err != nil {
 		return 0, fmt.Errorf("serialize: %w", err)
+	}
+	if dryRun {
+		// PRE-1 two-phase contract: the entry built, signed, validated and
+		// serialized through the production pipeline; the write does not
+		// happen. The canonical bytes ARE what a real run would post.
+		tableln("dry-run: entry validated and serialized; stopping before POST")
+		tablef("dry-run: canonical bytes: %d\n", len(wire))
+		return 0, nil
 	}
 	hash, err := postThroughGate(ctx, hc, strings.TrimRight(b.WriteEndpoint, "/")+"/v1/entries/submit", wire)
 	if err != nil {

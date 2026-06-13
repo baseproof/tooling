@@ -43,6 +43,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -191,8 +192,8 @@ func networkBundleVerify(ctx context.Context, args []string) error {
 		ContentHash: hex.EncodeToString(h[:]), Operations: len(m.Operations),
 	}
 	return emitOutput(*output, "network-bundle-verify", data, func() error {
-		fmt.Printf("network bundle: ✔ VERIFIED %s\n", fs.Arg(0))
-		fmt.Printf("  network=%s exchange=%s operations=%d content_hash=%s\n",
+		tablef("network bundle: ✔ VERIFIED %s\n", fs.Arg(0))
+		tablef("  network=%s exchange=%s operations=%d content_hash=%s\n",
 			short(data.NetworkID), data.Exchange, data.Operations, short(data.ContentHash))
 		return nil
 	})
@@ -216,6 +217,7 @@ func networkBundlePublish(ctx context.Context, args []string) error {
 		network       = fs.String("network", "", "stored network name (else the active network)")
 		manifestPath  = fs.String("manifest", "", "composed manifest JSON to publish (step 2; from your network's composer)")
 		anchor        = fs.String("anchor", "", "manifest anchor position <log-did>@<seq> (step 2; from step 1's output)")
+		dryRun        = fs.Bool("dry-run", false, "verify through the door and parse the anchor, then stop BEFORE signing/submitting")
 		publishAnchor = fs.Bool("publish-anchor", false, "publish the manifest ANCHOR schema entry (step 1 of 2) and wait for its sequence")
 		destination   = fs.String("destination", "", "destination DID for the anchor entry (step 1; default: the bundle's log DID)")
 		keyFile       = fs.String("signer-key", "", "32-byte hex secp256k1 signer key (REQUIRED; the publication signer)")
@@ -273,8 +275,8 @@ func networkBundlePublish(ctx context.Context, args []string) error {
 			Anchor: fmt.Sprintf("%s@%d", dest, seq),
 		}
 		return emitOutput(*output, "network-bundle-publish", data, func() error {
-			fmt.Printf("anchor published: %s  (canonical_hash=%s)\n", data.Anchor, short(hash))
-			fmt.Printf("next: baseproof network bundle publish --manifest <m.json> --anchor %s --signer-key %s\n", data.Anchor, *keyFile)
+			tablef("anchor published: %s  (canonical_hash=%s)\n", data.Anchor, short(hash))
+			tablef("next: baseproof network bundle publish --manifest <m.json> --anchor %s --signer-key %s\n", data.Anchor, *keyFile)
 			return nil
 		})
 	}
@@ -304,6 +306,16 @@ func networkBundlePublish(ctx context.Context, args []string) error {
 		EventTime:     time.Now().UTC().UnixMicro(),
 		SchemaRef:     &anchorPos,
 	}
+	if *dryRun {
+		return emitOutput(*output, "network-bundle-publish", map[string]any{
+			"dry_run": true, "verified_through_door": true,
+			"exchange": m.Exchange, "operations": len(m.Operations),
+			"anchor": anchorPos.LogDID + "@" + strconv.FormatUint(anchorPos.Sequence, 10),
+		}, func() error {
+			tableln("dry-run: manifest verified through the door; stopping before submit")
+			return nil
+		})
+	}
 	hash, seq, err := signSubmitWait(ctx, hc, b.Endpoint, *token, header, raw, id, *timeout)
 	if err != nil {
 		return err
@@ -314,10 +326,10 @@ func networkBundlePublish(ctx context.Context, args []string) error {
 		ContentHash: hex.EncodeToString(ch[:]), Exchange: m.Exchange,
 	}
 	return emitOutput(*output, "network-bundle-publish", data, func() error {
-		fmt.Printf("manifest published: exchange=%s operations=%d content_hash=%s\n",
+		tablef("manifest published: exchange=%s operations=%d content_hash=%s\n",
 			m.Exchange, len(m.Operations), short(data.ContentHash))
-		fmt.Printf("  sequenced at %d (canonical_hash=%s, anchor %s@%d)\n", seq, short(hash), anchorPos.LogDID, anchorPos.Sequence)
-		fmt.Printf("  resolve: GET %s/v1/query/schema_ref/%s@%d — the LATEST citing entry is current\n",
+		tablef("  sequenced at %d (canonical_hash=%s, anchor %s@%d)\n", seq, short(hash), anchorPos.LogDID, anchorPos.Sequence)
+		tablef("  resolve: GET %s/v1/query/schema_ref/%s@%d — the LATEST citing entry is current\n",
 			b.Endpoint, anchorPos.LogDID, anchorPos.Sequence)
 		return nil
 	})
@@ -408,22 +420,22 @@ func signSubmitWait(ctx context.Context, hc *http.Client, endpoint, token string
 }
 
 func renderBundleSummary(d NetworkBundleGetData) {
-	fmt.Printf("network bundle: ✔ VERIFIED destination=%s\n", d.Destination)
-	fmt.Printf("  content_hash=%s published=%s", short(d.ContentHash), orDash(d.Published))
+	tablef("network bundle: ✔ VERIFIED destination=%s\n", d.Destination)
+	tablef("  content_hash=%s published=%s", short(d.ContentHash), orDash(d.Published))
 	if d.Position != "" {
-		fmt.Printf(" position=%s", d.Position)
+		tablef(" position=%s", d.Position)
 	}
 	if d.EnforcedMatch != "" {
-		fmt.Printf(" enforced_match=%s", d.EnforcedMatch)
+		tablef(" enforced_match=%s", d.EnforcedMatch)
 	}
-	fmt.Println()
+	tableln()
 	m := d.Manifest
-	fmt.Printf("  network=%s name=%q quorum_k=%d log=%s\n",
+	tablef("  network=%s name=%q quorum_k=%d log=%s\n",
 		short(m.Network.NetworkID), m.Network.Name, m.Network.QuorumK, m.Network.LogDID)
-	fmt.Printf("  endpoints=%d operations=%d roles=%d datatypes=%d federation=%d\n",
+	tablef("  endpoints=%d operations=%d roles=%d datatypes=%d federation=%d\n",
 		len(m.Endpoints), len(m.Operations), len(m.Roles), len(m.Datatypes), len(m.Federation))
 	if m.Submit.Path != "" {
-		fmt.Printf("  submit: %s %s  admission: gating=%s payment=%v\n",
+		tablef("  submit: %s %s  admission: gating=%s payment=%v\n",
 			orDash(m.Submit.Endpoint), m.Submit.Path, orDash(m.Admission.Gating), m.Admission.Payment)
 	}
 }
