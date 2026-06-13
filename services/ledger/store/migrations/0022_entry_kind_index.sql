@@ -1,0 +1,74 @@
+-- migrate:no-transaction
+--
+-- This directive MUST appear as the first non-empty line of the file. The
+-- migration runner (store/migrations.go) detects it and applies the file via
+-- autocommit instead of the default BEGIN/COMMIT wrapper — REQUIRED because
+-- the CREATE INDEX below uses CONCURRENTLY, which PostgreSQL refuses to run
+-- inside an explicit transaction block. (Mirrors migration 0006.)
+--
+-- WHY CONCURRENTLY IS NOT OPTIONAL HERE: this PR's whole thesis is that a
+-- full-log scan at boot is a budget violation at 10M entries/day. A plain
+-- CREATE INDEX on entry_index at 10B rows takes a write-blocking SHARE lock
+-- for the entire build — a sequencing stall (write outage) on an append-only
+-- ledger, strictly worse than the slow boot it prevents. CONCURRENTLY builds
+-- without blocking writes. (Migrations 0008/0017/0020 added entry_index
+-- indexes WITHOUT this and carry the same latent defect at scale; 0022 does
+-- not repeat it, and they should be converted when next touched.)
+--
+-- DISCIPLINE: every statement here is IDEMPOTENT (IF NOT EXISTS). On replay
+-- the file is a no-op. CAVEAT (the runner doc's warning): a CREATE INDEX
+-- CONCURRENTLY that is interrupted leaves an INVALID index behind; the
+-- IF NOT EXISTS re-run will NOT rebuild it — an operator must DROP INDEX
+-- idx_entry_kind and re-run. The partial WHERE keeps a failed build cheap.
+--
+-- =============================================================================
+-- Migration 0022 — entry-kind projection column + partial covering index
+-- =============================================================================
+--
+-- WHY (PRE-11/M7, baseproof/tooling#114 Phase A):
+--
+-- The AuthoritativeResolver needs to discover, per family, the on-log entries
+-- it projects (witness endpoints, witness labels, auditor registrations,
+-- auditor scope amendments, anchor targets) — instead of from the dormant
+-- LEDGER_*_SCHEMA env vars. entry_index records no payload KIND today, so
+-- "the entries of kind X" is an unbounded full-log scan — a boot-budget
+-- violation at 10M entries/day. This column makes it an index seek.
+--
+-- kind is a DISCOVERY projection, not authority: it is the entry payload's own
+-- `kind` discriminator, extracted at sequencing time from the one extraction
+-- home (store.EntryKindProjection), bounded to the SDK's closed kinds.AllEntryKinds()
+-- set so a garbage discriminator projects nothing. Everything trust-bearing
+-- (the declaration's content, its validity) is re-established by the consumer
+-- from the entry bytes; a missing/NULL projection therefore fails toward the
+-- resolver finding no declaration (the env canary or boot-refusal path), never
+-- toward a forged one. Rows whose payload carries no recognized kind carry NULL.
+--
+-- The index follows the 0017/0020 covering discipline: partial (only
+-- recognized-kind rows; most entries in a busy log are domain payloads without
+-- a platform `kind`, so the index stays proportional to platform entries),
+-- keyed (kind, sequence_number ASC) so BOTH a keyset page AND the latest-per-kind
+-- seek (ORDER BY sequence_number DESC LIMIT 1, served by the same btree in
+-- reverse) are index-only, INCLUDE-ing exactly the projection the shared
+-- runIndexQuery scans (log_time, canonical_hash).
+--
+-- Existing rows predate the projection and are left NULL here. entry_index is
+-- APPEND-ONLY (H4 code guard + F2 DB grants), so there is no UPDATE-based
+-- backfill by design: the retrofit path is the existing administrator rebuild
+-- (cmd/rebuild-projection), which re-derives every entry_index row from the
+-- durable tiles through recovery.entryRowFor — the same one-home extraction the
+-- sequencer uses — and therefore projects this column for historical entries as
+-- a side effect of the standard DR flow. (This mirrors migration 0020's
+-- source_log_did retrofit exactly.) PHASE B PRECONDITION: a network whose
+-- entries predate this migration must complete rebuild-projection BEFORE the
+-- resolver flips default-ON over the by-kind index, or it derives zero
+-- declarations and boot-refuses; see baseproof/tooling#114.
+--
+-- ADD COLUMN ... TEXT (nullable, no default) is metadata-only on PG11+ — fast,
+-- safe in autocommit.
+
+ALTER TABLE entry_index ADD COLUMN IF NOT EXISTS kind TEXT;
+
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_entry_kind
+    ON entry_index (kind, sequence_number ASC)
+    INCLUDE (log_time, canonical_hash)
+    WHERE kind IS NOT NULL;

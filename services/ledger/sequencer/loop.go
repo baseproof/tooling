@@ -476,7 +476,10 @@ func (s *Sequencer) buildLiveStagedEntry(
 			// entries (one extraction home, shared with recovery's
 			// entryRowFor — drift breaks the bit-exact rebuild test).
 			SourceLogDID: store.AnchorSourceLogDID(entry),
-			Status:       store.StatusLive,
+			// #114 Phase A: by-kind discovery projection (same one-home /
+			// shared-with-rebuild discipline; drift breaks the same test).
+			Kind:   store.EntryKindProjection(entry),
+			Status: store.StatusLive,
 		},
 	}
 	if extractedSplitID != nil {
