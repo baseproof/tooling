@@ -33,9 +33,9 @@ When `LEDGER_BYTE_STORE_BACKEND=s3`:
 |---|---|---|
 | `LEDGER_BYTE_STORE_NAMESPACE` | derived from `LEDGER_LOG_DID` (`bytestore.NamespaceForLog`) | First key segment prepended to the **raw** object surface — the SMT tiles and the fixed-name `cosigned-checkpoint` horizon. Lets multiple logs share one bucket without the last writer clobbering another log's horizon. The content-addressed **entry** surface is NOT namespaced (its keys carry the SHA-256 identity and never collide), so offline readers (`ledger-reader`, `rebuild-projection`) and the 302 public URL are unaffected. The resolved value is logged at boot (`byte store ready … namespace=…`). Empty only collapses to the flat legacy layout. |
 
-When witness mode is active — i.e., when EITHER
-`LEDGER_WITNESS_KEY_FILE` is set OR `LEDGER_WITNESS_ENDPOINTS` is
-non-empty:
+When witness mode is active — i.e., when `LEDGER_WITNESS_KEY_FILE` is
+set (witness dial URLs come from on-log `WitnessEndpointDeclaration`
+records, not env):
 
 | Variable | Read at | Purpose |
 |---|---|---|
@@ -164,9 +164,14 @@ the TLS material composing in when configured.
 
 ### Witness mode
 
+Witness dial URLs are NOT configured via env. PRE-11 Phase B (#114)
+deleted the `LEDGER_WITNESS_ENDPOINTS` dial-list; witness endpoints now
+resolve exclusively from on-log `WitnessEndpointDeclaration` records keyed
+by `LEDGER_LOG_DID`. A static env list would be the silent-URL-substitution
+bypass those on-log declarations exist to close.
+
 | Variable | Default | Read at |
 |---|---|---|
-| `LEDGER_WITNESS_ENDPOINTS` | (CSV; default empty) | `main.go:583` |
 | `LEDGER_WITNESS_QUORUM_K` | `1` | `main.go:584` |
 
 ### Observability
@@ -245,7 +250,7 @@ the boot if any of these invariants is violated:
 | `LEDGER_TILE_BACKEND ∈ {posix, gcs}` | Typo protection |
 | `LEDGER_SEQUENCER_INTERVAL`, `LEDGER_MMD`, `LEDGER_PG_STATEMENT_TIMEOUT` ≥ 0 | Negative values would invert select branches |
 | `LEDGER_WITNESS_QUORUM_K > 0` when witnesses configured | 0-of-N would never finalize |
-| `LEDGER_WITNESS_QUORUM_K ≤ len(LEDGER_WITNESS_ENDPOINTS)` | Unreachable quorum |
+| `LEDGER_WITNESS_QUORUM_K ≤ count(on-log WitnessEndpointDeclaration records)` | Unreachable quorum (checked at HeadSync construction) |
 
 ## Quick start
 

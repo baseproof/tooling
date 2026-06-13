@@ -141,24 +141,30 @@ func startWitnessServerWithPub(t *testing.T, netID cosign.NetworkID) (*httptest.
 // NewHeadSync does not call it).
 // ─────────────────────────────────────────────────────────────────
 
-func TestNewHeadSync_RejectsEmptyEndpoints(t *testing.T) {
+// TestNewHeadSync_RejectsNilResolver pins the PRE-11 Phase B fail-loud
+// contract: with no on-log EndpointResolver wired there is NO config
+// dial-list to fall back to, so construction must fail. (Replaces the
+// pre-Phase-B TestNewHeadSync_RejectsEmptyEndpoints, which pinned the
+// now-deleted "empty WitnessEndpoints slice → error" behaviour.)
+func TestNewHeadSync_RejectsNilResolver(t *testing.T) {
 	_, err := NewHeadSync(HeadSyncConfig{
-		WitnessEndpoints:  nil,
+		EndpointResolver:  nil,
 		QuorumK:           1,
 		PerWitnessTimeout: 5 * time.Second,
 		NetworkID:         testNetID(),
 	}, nil, silentLogger())
 	if err == nil {
-		t.Fatal("NewHeadSync with empty WitnessEndpoints: expected error")
+		t.Fatal("NewHeadSync with nil EndpointResolver: expected error (no config dial-list fallback)")
 	}
 }
 
 func TestNewHeadSync_RejectsNonPositiveQuorum(t *testing.T) {
 	_, err := NewHeadSync(HeadSyncConfig{
-		WitnessEndpoints:  []string{"http://w1"},
-		QuorumK:           0,
-		PerWitnessTimeout: 5 * time.Second,
-		NetworkID:         testNetID(),
+		EndpointResolver:       &fakeEndpointResolver{urls: []string{"http://w1"}},
+		EndpointResolverLogDID: "did:test:log",
+		QuorumK:                0,
+		PerWitnessTimeout:      5 * time.Second,
+		NetworkID:              testNetID(),
 	}, nil, silentLogger())
 	if err == nil {
 		t.Fatal("NewHeadSync with QuorumK=0: expected error")
@@ -171,10 +177,12 @@ func TestNewHeadSync_RejectsQuorumGreaterThanN(t *testing.T) {
 	// rejection so a refactor that swaps the collector for one
 	// that silently accepts impossible quora can't slip past.
 	_, err := NewHeadSync(HeadSyncConfig{
-		WitnessEndpoints:  []string{"http://w1", "http://w2"}, // N=2
-		QuorumK:           3,                                  // K=3 > N
-		PerWitnessTimeout: 5 * time.Second,
-		NetworkID:         testNetID(),
+		EndpointResolver:       &fakeEndpointResolver{urls: []string{"http://w1", "http://w2"}}, // N=2
+		EndpointResolverLogDID: "did:test:log",
+		QuorumK:                3, // K=3 > N
+		PerWitnessTimeout:      5 * time.Second,
+		NetworkID:              testNetID(),
+		HTTPClient:             testHeadSyncHTTPClient(),
 	}, nil, silentLogger())
 	if err == nil {
 		t.Fatal("NewHeadSync with QuorumK > N: expected error")
@@ -183,11 +191,12 @@ func TestNewHeadSync_RejectsQuorumGreaterThanN(t *testing.T) {
 
 func TestNewHeadSync_DefaultsPerWitnessTimeout(t *testing.T) {
 	hs, err := NewHeadSync(HeadSyncConfig{
-		WitnessEndpoints:  []string{"http://w1"},
-		QuorumK:           1,
-		PerWitnessTimeout: 0, // ← zero
-		NetworkID:         testNetID(),
-		HTTPClient:        testHeadSyncHTTPClient(),
+		EndpointResolver:       &fakeEndpointResolver{urls: []string{"http://w1"}},
+		EndpointResolverLogDID: "did:test:log",
+		QuorumK:                1,
+		PerWitnessTimeout:      0, // ← zero
+		NetworkID:              testNetID(),
+		HTTPClient:             testHeadSyncHTTPClient(),
 	}, nil, silentLogger())
 	if err != nil {
 		t.Fatalf("NewHeadSync: %v", err)
@@ -211,11 +220,12 @@ func TestNewHeadSync_DefaultsPerWitnessTimeout(t *testing.T) {
 func TestNewHeadSync_AcceptsHTTPClient(t *testing.T) {
 	custom := &http.Client{Timeout: 7 * time.Second}
 	hs, err := NewHeadSync(HeadSyncConfig{
-		WitnessEndpoints:  []string{"http://w1"},
-		QuorumK:           1,
-		PerWitnessTimeout: 5 * time.Second,
-		NetworkID:         testNetID(),
-		HTTPClient:        custom,
+		EndpointResolver:       &fakeEndpointResolver{urls: []string{"http://w1"}},
+		EndpointResolverLogDID: "did:test:log",
+		QuorumK:                1,
+		PerWitnessTimeout:      5 * time.Second,
+		NetworkID:              testNetID(),
+		HTTPClient:             custom,
 	}, nil, silentLogger())
 	if err != nil {
 		t.Fatalf("NewHeadSync with HTTPClient: %v", err)
@@ -232,11 +242,12 @@ func TestNewHeadSync_AcceptsHTTPClient(t *testing.T) {
 // silent-fallback behavior. See baseproof v1.34 CHANGELOG.
 func TestNewHeadSync_RejectsNilHTTPClient(t *testing.T) {
 	_, err := NewHeadSync(HeadSyncConfig{
-		WitnessEndpoints:  []string{"http://w1"},
-		QuorumK:           1,
-		PerWitnessTimeout: 5 * time.Second,
-		NetworkID:         testNetID(),
-		HTTPClient:        nil,
+		EndpointResolver:       &fakeEndpointResolver{urls: []string{"http://w1"}},
+		EndpointResolverLogDID: "did:test:log",
+		QuorumK:                1,
+		PerWitnessTimeout:      5 * time.Second,
+		NetworkID:              testNetID(),
+		HTTPClient:             nil,
 	}, nil, silentLogger())
 	if err == nil {
 		t.Fatal("err = nil, want fail-closed on nil HTTPClient")
@@ -248,11 +259,12 @@ func TestNewHeadSync_RejectsNilHTTPClient(t *testing.T) {
 
 func TestNewHeadSync_HappyPath(t *testing.T) {
 	hs, err := NewHeadSync(HeadSyncConfig{
-		WitnessEndpoints:  []string{"http://w1", "http://w2", "http://w3"},
-		QuorumK:           2,
-		PerWitnessTimeout: 5 * time.Second,
-		NetworkID:         testNetID(),
-		HTTPClient:        testHeadSyncHTTPClient(),
+		EndpointResolver:       &fakeEndpointResolver{urls: []string{"http://w1", "http://w2", "http://w3"}},
+		EndpointResolverLogDID: "did:test:log",
+		QuorumK:                2,
+		PerWitnessTimeout:      5 * time.Second,
+		NetworkID:              testNetID(),
+		HTTPClient:             testHeadSyncHTTPClient(),
 	}, nil, silentLogger())
 	if err != nil {
 		t.Fatalf("NewHeadSync: %v", err)
@@ -293,11 +305,12 @@ func TestRequestCosignatures_HappyPath_K1(t *testing.T) {
 	srv := startWitnessServer(t, netID)
 
 	hs, err := NewHeadSync(HeadSyncConfig{
-		WitnessEndpoints:  []string{srv.URL},
-		QuorumK:           1,
-		PerWitnessTimeout: 2 * time.Second,
-		NetworkID:         netID,
-		HTTPClient:        testHeadSyncHTTPClient(),
+		EndpointResolver:       &fakeEndpointResolver{urls: []string{srv.URL}},
+		EndpointResolverLogDID: "did:test:log",
+		QuorumK:                1,
+		PerWitnessTimeout:      2 * time.Second,
+		NetworkID:              netID,
+		HTTPClient:             testHeadSyncHTTPClient(),
 	}, store.NewTreeHeadStore(pool), silentLogger())
 	if err != nil {
 		t.Fatalf("NewHeadSync: %v", err)
@@ -346,11 +359,12 @@ func TestRequestCosignatures_QuorumFailure_WrapsErr(t *testing.T) {
 	srvB.Close()
 
 	hs, err := NewHeadSync(HeadSyncConfig{
-		WitnessEndpoints:  []string{srvA.URL, srvB.URL},
-		QuorumK:           2,
-		PerWitnessTimeout: 1 * time.Second,
-		NetworkID:         netID,
-		HTTPClient:        testHeadSyncHTTPClient(),
+		EndpointResolver:       &fakeEndpointResolver{urls: []string{srvA.URL, srvB.URL}},
+		EndpointResolverLogDID: "did:test:log",
+		QuorumK:                2,
+		PerWitnessTimeout:      1 * time.Second,
+		NetworkID:              netID,
+		HTTPClient:             testHeadSyncHTTPClient(),
 	}, store.NewTreeHeadStore(pool), silentLogger())
 	if err != nil {
 		t.Fatalf("NewHeadSync: %v", err)
@@ -405,11 +419,12 @@ func TestRequestCosignatures_ExactQuorum_3of5(t *testing.T) {
 	}
 
 	hs, err := NewHeadSync(HeadSyncConfig{
-		WitnessEndpoints:  endpoints,
-		QuorumK:           quorumK,
-		PerWitnessTimeout: 1 * time.Second,
-		NetworkID:         netID,
-		HTTPClient:        testHeadSyncHTTPClient(),
+		EndpointResolver:       &fakeEndpointResolver{urls: endpoints},
+		EndpointResolverLogDID: "did:test:log",
+		QuorumK:                quorumK,
+		PerWitnessTimeout:      1 * time.Second,
+		NetworkID:              netID,
+		HTTPClient:             testHeadSyncHTTPClient(),
 	}, store.NewTreeHeadStore(pool), silentLogger())
 	if err != nil {
 		t.Fatalf("NewHeadSync: %v", err)
@@ -454,11 +469,12 @@ func TestRequestCosignatures_BindsReceiptRoot(t *testing.T) {
 	srv, pub := startWitnessServerWithPub(t, netID)
 
 	hs, err := NewHeadSync(HeadSyncConfig{
-		WitnessEndpoints:  []string{srv.URL},
-		QuorumK:           1,
-		PerWitnessTimeout: 2 * time.Second,
-		NetworkID:         netID,
-		HTTPClient:        testHeadSyncHTTPClient(),
+		EndpointResolver:       &fakeEndpointResolver{urls: []string{srv.URL}},
+		EndpointResolverLogDID: "did:test:log",
+		QuorumK:                1,
+		PerWitnessTimeout:      2 * time.Second,
+		NetworkID:              netID,
+		HTTPClient:             testHeadSyncHTTPClient(),
 	}, store.NewTreeHeadStore(pool), silentLogger())
 	if err != nil {
 		t.Fatalf("NewHeadSync: %v", err)

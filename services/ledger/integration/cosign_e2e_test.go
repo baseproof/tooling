@@ -128,10 +128,11 @@ func TestE2E_HeadSyncCollectsFromContainer(t *testing.T) {
 	resetCosignTables(t, ctx, pool)
 
 	hs, err := witnessclient.NewHeadSync(witnessclient.HeadSyncConfig{
-		WitnessEndpoints:  []string{witnessURL},
-		QuorumK:           1,
-		PerWitnessTimeout: 5 * time.Second,
-		NetworkID:         netID,
+		EndpointResolver:       staticEndpointResolver{urls: []string{witnessURL}},
+		EndpointResolverLogDID: "did:test:log",
+		QuorumK:                1,
+		PerWitnessTimeout:      5 * time.Second,
+		NetworkID:              netID,
 	}, store.NewTreeHeadStore(pool), silentLogger())
 	if err != nil {
 		t.Fatalf("NewHeadSync: %v", err)

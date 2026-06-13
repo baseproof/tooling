@@ -87,13 +87,12 @@ import (
 // anchor.PeerAdmissionURLResolver pattern used elsewhere in this
 // repo: minimal interface declared at the consumer.
 //
-// The legacy config-driven path (LEDGER_WITNESS_ENDPOINTS) is
-// preserved as a canary fallback when the resolver returns no on-log
-// declarations (bootstrap window before any
-// WitnessEndpointDeclarationV1 entry has landed). After the first
-// declaration is admitted + cosigned, the resolver becomes the
-// authoritative source and the env var is dead config — operators
-// should drop it from deployment manifests.
+// PRE-11 Phase B: this resolver is the SOLE witness-endpoint source.
+// The legacy LEDGER_WITNESS_ENDPOINTS config dial-list is DELETED —
+// there is no fallback. Before any WitnessEndpointDeclarationV1 entry
+// lands (the genesis window) the resolver returns empty and NewHeadSync
+// fails loud; the genesis witnesses come from the constitution's
+// genesis_witness_set (key IDs) plus their on-log endpoint declarations.
 type WitnessEndpointResolver interface {
 	WitnessEndpoints(ctx context.Context, logDID string) ([]string, error)
 }
@@ -110,11 +109,11 @@ type CosignedHeadPublisher interface {
 type HeadSyncConfig struct {
 	// EndpointResolver is the on-log authoritative witness-endpoint
 	// discovery surface (typically a *discover.DefaultAuthoritativeResolver
-	// from the SDK). When non-nil and EndpointResolverLogDID is set,
-	// NewHeadSync snapshots the witness URLs from the resolver at
-	// construction time via EndpointResolver.WitnessEndpoints(ctx,
-	// LogDID). Resolver-returned URLs WIN over WitnessEndpoints
-	// (the legacy config-driven slice below).
+	// from the SDK). REQUIRED: NewHeadSync snapshots the witness URLs
+	// from the resolver at construction via
+	// EndpointResolver.WitnessEndpoints(ctx, LogDID). It is the SOLE
+	// source — a nil resolver, a resolution error, or an empty result is
+	// a fail-loud construction error (there is no config dial-list).
 	//
 	// THIS CLOSES THE LAYER-2 SILENT-URL-SUBSTITUTION BACKDOOR for
 	// witness discovery: pre-v1.32.0 the ledger trusted its own
@@ -130,31 +129,14 @@ type HeadSyncConfig struct {
 	// EndpointResolver.WitnessEndpoints. Typically this binary's
 	// own log DID (cmd/ledger wires it from cfg.LogDID). Empty
 	// with a non-nil EndpointResolver is a CONSTRUCTION ERROR
-	// (NewHeadSync refuses): discovery was requested and an empty
-	// DID would silently disable it, degrading to the legacy
-	// config canary — the silent-URL-substitution posture the
-	// resolver exists to close.
+	// (NewHeadSync refuses): on-log discovery was requested but no
+	// log is named to resolve against.
 	EndpointResolverLogDID string
 
 	// EndpointResolverTimeout caps the resolver call at startup.
-	// 0 ⇒ 5 seconds. A timeout is NOT a fatal error — the
-	// constructor falls through to the WitnessEndpoints canary
-	// fallback, logs a warn, and the ledger remains operable.
+	// 0 ⇒ 5 seconds. A resolver error or timeout is FATAL: the
+	// cosigner fails loud rather than dial unverified config.
 	EndpointResolverTimeout time.Duration
-
-	// WitnessEndpoints is the LEGACY config-driven set of peer
-	// witness base URLs. After v1.32.0 the authoritative source is
-	// the EndpointResolver above; this slice is the CANARY FALLBACK
-	// used when the resolver is nil OR returns an empty list (the
-	// bootstrap window before any WitnessEndpointDeclarationV1
-	// entry has been admitted + cosigned).
-	//
-	// Operators SHOULD drop LEDGER_WITNESS_ENDPOINTS from
-	// deployment manifests once the network has published its
-	// witness-endpoint declarations on-log. The fallback is
-	// retained so a bootstrap-window outage doesn't strand the
-	// ledger.
-	WitnessEndpoints []string
 
 	// QuorumK is the minimum number of valid signatures required
 	// to consider a head "cosigned". 1 <= QuorumK <= N (where N is
@@ -213,18 +195,14 @@ type HeadSync struct {
 // if the SDK collector rejects the witness configuration (zero
 // NetworkID, K > N, K <= 0, empty endpoints, etc.).
 //
-// Endpoint precedence (v1.32.0):
-//
-//  1. cfg.EndpointResolver.WitnessEndpoints(ctx, cfg.EndpointResolverLogDID)
-//     — the on-log, network-signed authoritative source. Used when
-//     the resolver is configured AND returns a non-empty slice.
-//  2. cfg.WitnessEndpoints — the legacy config-driven canary
-//     fallback. Used when the resolver is nil OR returns empty
-//     (bootstrap window).
-//
-// At least one of the two MUST produce a non-empty endpoint slice;
-// otherwise the constructor returns an error rather than wiring a
-// zero-quorum collector.
+// Endpoint source (PRE-11 Phase B): cfg.EndpointResolver is the SOLE
+// witness-endpoint source — the on-log, network-signed
+// WitnessEndpointDeclaration records, via
+// EndpointResolver.WitnessEndpoints(ctx, cfg.EndpointResolverLogDID).
+// There is no config dial-list. A nil resolver, a resolution error, or
+// an empty result returns an error (fail-loud) rather than wiring a
+// zero-quorum collector — the cosigner is unconstructible without
+// on-log endpoints.
 func NewHeadSync(cfg HeadSyncConfig, treeStore *store.TreeHeadStore, logger *slog.Logger) (*HeadSync, error) {
 	if logger == nil {
 		logger = slog.Default()
@@ -259,7 +237,6 @@ func NewHeadSync(cfg HeadSyncConfig, treeStore *store.TreeHeadStore, logger *slo
 	if err != nil {
 		return nil, err
 	}
-	cfg.WitnessEndpoints = effectiveEndpoints
 	logger.Info("witness/head_sync: endpoint source",
 		"source", source,
 		"endpoint_count", len(effectiveEndpoints),
@@ -287,8 +264,8 @@ func NewHeadSync(cfg HeadSyncConfig, treeStore *store.TreeHeadStore, logger *slo
 	}
 	httpClient := cfg.HTTPClient
 
-	clients := make([]*cosign.WitnessClient, 0, len(cfg.WitnessEndpoints))
-	for _, ep := range cfg.WitnessEndpoints {
+	clients := make([]*cosign.WitnessClient, 0, len(effectiveEndpoints))
+	for _, ep := range effectiveEndpoints {
 		c, cErr := cosign.NewWitnessClient(ep, cfg.NetworkID,
 			cosign.WithHTTPClient(httpClient))
 		if cErr != nil {
@@ -305,7 +282,7 @@ func NewHeadSync(cfg HeadSyncConfig, treeStore *store.TreeHeadStore, logger *slo
 	return &HeadSync{
 		cfg:       cfg,
 		collector: collector,
-		endpoints: append([]string{}, cfg.WitnessEndpoints...),
+		endpoints: append([]string{}, effectiveEndpoints...),
 		store:     treeStore,
 		logger:    logger,
 		publisher: cfg.GossipPublisher,
@@ -482,36 +459,35 @@ func (hs *HeadSync) persistSignatures(
 // the safety valve during the bootstrap window when no
 // WitnessEndpointDeclarationV1 entry has been admitted yet.
 func resolveEffectiveEndpoints(cfg HeadSyncConfig, logger *slog.Logger) ([]string, string, error) {
-	// Resolver path.
-	if cfg.EndpointResolver != nil && cfg.EndpointResolverLogDID != "" {
-		timeout := cfg.EndpointResolverTimeout
-		if timeout <= 0 {
-			timeout = 5 * time.Second
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), timeout)
-		defer cancel()
-		urls, err := cfg.EndpointResolver.WitnessEndpoints(ctx, cfg.EndpointResolverLogDID)
-		switch {
-		case err != nil:
-			logger.Warn("witness/head_sync: on-log resolver failed; using LEDGER_WITNESS_ENDPOINTS canary fallback",
-				"log_did", cfg.EndpointResolverLogDID,
-				"error", err.Error(),
-			)
-		case len(urls) > 0:
-			return append([]string{}, urls...), "on_log_resolver", nil
-		default:
-			logger.Warn("witness/head_sync: on-log resolver returned empty; using LEDGER_WITNESS_ENDPOINTS canary fallback",
-				"log_did", cfg.EndpointResolverLogDID,
-			)
-		}
-	}
-
-	// Config-driven canary fallback.
-	if len(cfg.WitnessEndpoints) == 0 {
+	// PRE-11 Phase B: the on-log resolver is the SOLE witness-endpoint
+	// source. There is no config dial-list to fall back to — a static
+	// LEDGER_WITNESS_ENDPOINTS list would be the silent-URL-substitution
+	// bypass the WitnessEndpointDeclaration exists to close. A nil
+	// resolver, a resolution error, or an empty result FAILS LOUD: the
+	// cosigner is left unconstructible rather than dialing operator
+	// config (fail toward refusal, never forgery).
+	if cfg.EndpointResolver == nil {
 		return nil, "", fmt.Errorf(
-			"witness/head_sync: no witness endpoints available — resolver returned empty AND LEDGER_WITNESS_ENDPOINTS unset")
+			"witness/head_sync: EndpointResolver is required — witness dial URLs resolve only from on-log WitnessEndpointDeclaration records (no config dial-list)")
 	}
-	return append([]string{}, cfg.WitnessEndpoints...), "config_canary_fallback", nil
+	timeout := cfg.EndpointResolverTimeout
+	if timeout <= 0 {
+		timeout = 5 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	urls, err := cfg.EndpointResolver.WitnessEndpoints(ctx, cfg.EndpointResolverLogDID)
+	if err != nil {
+		return nil, "", fmt.Errorf(
+			"witness/head_sync: on-log witness-endpoint resolution failed for %s (fail-closed, no config fallback): %w",
+			cfg.EndpointResolverLogDID, err)
+	}
+	if len(urls) == 0 {
+		return nil, "", fmt.Errorf(
+			"witness/head_sync: on-log resolver returned no witness endpoints for %s — refusing to construct a zero-quorum cosigner (publish WitnessEndpointDeclaration records on-log)",
+			cfg.EndpointResolverLogDID)
+	}
+	return append([]string{}, urls...), "on_log_resolver", nil
 }
 
 // logQuorumFailure emits a structured per-endpoint diagnostic when

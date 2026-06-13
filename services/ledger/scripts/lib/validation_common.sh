@@ -63,16 +63,16 @@ Required env (all profiles):
                             via `scripts/infra up` when unset; pass it in
                             (with BASEPROOF_TEST_S3_*) to use your own.
 
-Witness tier (DISCOVERED via env — these profiles never orchestrate it):
-  LEDGER_WITNESS_ENDPOINTS      CSV of witness cosign base URLs. SET ⇒ the
-                                run cosigns checkpoints against that fleet
-                                (production-shape K-of-N quorum). UNSET ⇒
-                                NON-WITNESS, with a warning (not fatal).
-  LEDGER_WITNESS_QUORUM_K       K threshold (default 1; must be ≤ endpoints).
-  LEDGER_NETWORK_BOOTSTRAP_FILE bootstrap JSON → NetworkID. REQUIRED when
-                                LEDGER_WITNESS_ENDPOINTS is set.
-  Stand a fleet up yourself (e.g. ../tooling/services/witness/scripts/run-local.sh)
-  and export these — the profiles connect to it; they do not spawn it.
+Witness tier (these profiles never orchestrate it):
+  PRE-11 Phase B retired env-based witness discovery: the witness dial-list
+  env (LEDGER_WITNESS_ENDPOINTS) was deleted, and witness URLs now resolve
+  ONLY from on-log WitnessEndpointDeclaration records. These at-scale
+  profiles therefore run NON-WITNESS (no env fleet to discover). Use the
+  in-process witnessed harness (newWitnessedTestHarnessN) to exercise the
+  K-of-N cosign path.
+  LEDGER_WITNESS_QUORUM_K       K threshold (default 1) — still read as the
+                                quorum cross-check against the constitution.
+  LEDGER_NETWORK_BOOTSTRAP_FILE bootstrap JSON → NetworkID binding.
 
 Profile-specific env (knobs documented in each profile body):
   determinism:  BASEPROOF_SCALE_DETERMINISM_{N,CONCURRENCY,
@@ -238,25 +238,15 @@ EOF
     eval "$("${REPO_ROOT_INFRA}/scripts/infra" env)"
 }
 
-# validation_witness_banner prints whether the witness tier was
-# DISCOVERED from the env, and warns when it was not. The validation
-# profiles never spawn witnesses — they consume an externally-run fleet
-# via the SAME env contract the production ledger reads:
-#
-#   LEDGER_WITNESS_ENDPOINTS      CSV of witness cosign base URLs
-#   LEDGER_WITNESS_QUORUM_K       K threshold (default 1)
-#   LEDGER_NETWORK_BOOTSTRAP_FILE bootstrap JSON → NetworkID binding
-#
-# These are read by the Go test (cosignerFromEnv); this banner only
-# surfaces the resolved state so the operator sees, up front, whether
-# the run exercises quorum or falls back to NON-WITNESS.
+# validation_witness_banner surfaces the witness posture up front. PRE-11
+# Phase B retired env-based witness discovery (LEDGER_WITNESS_ENDPOINTS was
+# deleted; witness URLs resolve only from on-log WitnessEndpointDeclaration
+# records). The Go harness (cosignerFromEnv) therefore always reports
+# NON-WITNESS for these at-scale profiles — to exercise K-of-N, use the
+# in-process witnessed harness (newWitnessedTestHarnessN).
 validation_witness_banner() {
-    if [ -n "${LEDGER_WITNESS_ENDPOINTS:-}" ]; then
-        echo "   witnesses:        DISCOVERED — ${LEDGER_WITNESS_ENDPOINTS} (K=${LEDGER_WITNESS_QUORUM_K:-1})"
-        echo "   network bootstrap: ${LEDGER_NETWORK_BOOTSTRAP_FILE:-<unset — REQUIRED with endpoints>}"
-    else
-        echo "   witnesses:        NONE — running NON-WITNESS (no quorum)"
-        echo "   (export LEDGER_WITNESS_ENDPOINTS + LEDGER_NETWORK_BOOTSTRAP_FILE [+ LEDGER_WITNESS_QUORUM_K]"
-        echo "    pointing at an already-running fleet to exercise the K-of-N cosign path)"
-    fi
+    echo "   witnesses:        NONE — running NON-WITNESS (no quorum)"
+    echo "   (env-based witness discovery was retired in PRE-11 Phase B;"
+    echo "    witness dial URLs now resolve only from on-log declarations."
+    echo "    Use the in-process witnessed harness to exercise the K-of-N path.)"
 }

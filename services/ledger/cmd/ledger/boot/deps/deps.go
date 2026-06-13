@@ -231,11 +231,13 @@ type AppDeps struct {
 	BurnProcessor *witnessclient.BurnProcessor
 
 	// WitnessEndpointResolver is the on-log authoritative
-	// witness-endpoint discovery surface used by wireWitnessCosigner
-	// to drop the LEDGER_WITNESS_ENDPOINTS backdoor — typically a
-	// *discover.DefaultAuthoritativeResolver from the SDK. When nil,
-	// the witness cosigner falls back to LEDGER_WITNESS_ENDPOINTS
-	// (the legacy canary path).
+	// witness-endpoint discovery surface used by wireWitnessCosigner —
+	// typically a *discover.DefaultAuthoritativeResolver from the SDK.
+	// PRE-11 Phase B made it the SOLE witness-endpoint source: there is
+	// no LEDGER_WITNESS_ENDPOINTS config dial-list to fall back to (a
+	// static list would be the silent-URL-substitution bypass the on-log
+	// WitnessEndpointDeclaration exists to close). When nil, the witness
+	// cosigner is simply not wired (read-only / test-rig posture).
 	//
 	// v1.32.0 SDK adoption: this field is the wire-up for SDK plan
 	// item L1 (close the silent-URL-substitution backdoor on witness

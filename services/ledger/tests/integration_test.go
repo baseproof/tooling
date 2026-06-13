@@ -39,7 +39,6 @@ import (
 	opbuilder "github.com/baseproof/tooling/services/ledger/builder"
 	"github.com/baseproof/tooling/services/ledger/store"
 	"github.com/baseproof/tooling/services/ledger/store/indexes"
-	"github.com/baseproof/tooling/services/ledger/witnessclient"
 )
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -713,19 +712,6 @@ func TestTreeHead_Assembly(t *testing.T) {
 	}
 }
 
-func TestTreeHead_QuorumK(t *testing.T) {
-	cfg := witnessclient.HeadSyncConfig{WitnessEndpoints: []string{"a", "b", "c"}, QuorumK: 2, PerWitnessTimeout: 30 * time.Second}
-	if len(cfg.WitnessEndpoints) < cfg.QuorumK {
-		t.Fatal("insufficient")
-	}
-}
-
-func TestTreeHead_QuorumInsufficient(t *testing.T) {
-	cfg := witnessclient.HeadSyncConfig{WitnessEndpoints: []string{"a"}, QuorumK: 2}
-	if len(cfg.WitnessEndpoints) >= cfg.QuorumK {
-		t.Fatal("should be insufficient")
-	}
-}
 
 func TestTreeHead_MerkleInclusion(t *testing.T) {
 	mt := smt.NewStubMerkleTree()

@@ -20,12 +20,14 @@
 #
 #     cd ../tooling/services/witness
 #     ./scripts/run-local.sh --witnesses 3
-#       → prints LEDGER_WITNESS_ENDPOINTS / LEDGER_WITNESS_QUORUM_K
-#         / LEDGER_NETWORK_BOOTSTRAP_FILE
+#       → prints LEDGER_WITNESS_QUORUM_K / LEDGER_NETWORK_BOOTSTRAP_FILE
+#         (witness dial URLs are resolved on-log from
+#          WitnessEndpointDeclaration records, NOT exported as env)
 #     export those, then run the ledger (./scripts/run-local.sh up).
 #
 #   This keeps the two repos' runtime config from intermingling:
-#   the only contract between them is those three env vars.
+#   the contract between them is the bootstrap file + quorum K, with
+#   dial URLs flowing through the on-log declaration records.
 #
 # THE WORKFLOW:
 #
@@ -200,7 +202,8 @@ case "${SUBCMD}" in
         echo "Need a witness fleet? It is NOT part of this infra. Run it from"
         echo "the tooling repo (services/witness) and export the env vars it prints:"
         echo "  cd ../tooling/services/witness && ./scripts/run-local.sh --witnesses 3"
-        echo "  # → export LEDGER_WITNESS_ENDPOINTS / _QUORUM_K / _NETWORK_BOOTSTRAP_FILE"
+        echo "  # → export LEDGER_WITNESS_QUORUM_K / _NETWORK_BOOTSTRAP_FILE"
+        echo "  #   (witness dial URLs are resolved on-log, not via env)"
         echo
         echo "Full sweep with DSN exported — use 'make test' (NOT 'go test ./...'):"
         echo "  make test                                         # -p 1 serializes packages against shared DB"

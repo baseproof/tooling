@@ -464,26 +464,23 @@ func startEquivocationScanner(
 }
 
 // wireWitnessCosigner builds the HeadSync requester (witness cosigner)
-// when EITHER the on-log endpoint resolver returns a non-empty witness
-// set OR LEDGER_WITNESS_ENDPOINTS (legacy canary fallback) is set; nil
-// otherwise. The returned *witnessclient.HeadSync satisfies
-// builder.WitnessCosigner and is fed into the BuilderLoop.
+// when the on-log endpoint resolver is wired; nil otherwise. The
+// returned *witnessclient.HeadSync satisfies builder.WitnessCosigner
+// and is fed into the BuilderLoop.
 //
-// v1.32.0 backdoor closure (L1 in the SDK adoption plan): pre-v1.32.0
-// the witness URL list came exclusively from LEDGER_WITNESS_ENDPOINTS
-// (config — an operator-edit-and-reload away from the silent URL
-// substitution attack the SDK's WitnessEndpointDeclarationV1 was
-// designed to prevent). Post-v1.32.0 the authoritative source is the
-// on-log resolver populated from WitnessEndpointDeclarationV1 records;
-// the config slice remains as a CANARY FALLBACK for the bootstrap
-// window before any declaration entry has been admitted + cosigned.
+// L1 backdoor closure (completed in PRE-11 Phase B): the witness URL
+// list comes EXCLUSIVELY from the on-log resolver, populated from
+// WitnessEndpointDeclarationV1 records. The legacy
+// LEDGER_WITNESS_ENDPOINTS config dial-list is DELETED — there is no
+// fallback. NewHeadSync fails loud if the resolver yields no endpoints
+// (the genesis window before declarations land).
 func wireWitnessCosigner(cfg Config, d *deps.AppDeps) (*witnessclient.HeadSync, error) {
-	// "Disabled" detection is now two-state: neither the resolver
-	// nor the config canary contributes — the operator chose to
-	// run a pure read-only / test-rig posture.
+	// "Disabled" detection: no on-log resolver wired ⇒ this binary runs
+	// read-only / test-rig (no witness cosigner). The deleted config
+	// canary no longer contributes.
 	resolverAvailable := d.WitnessEndpointResolver != nil && cfg.LogDID != ""
-	if !resolverAvailable && len(cfg.WitnessEndpoints) == 0 {
-		d.Logger.Info("witness cosigner: disabled (no on-log resolver AND LEDGER_WITNESS_ENDPOINTS unset)")
+	if !resolverAvailable {
+		d.Logger.Info("witness cosigner: disabled (no on-log witness-endpoint resolver wired)")
 		return nil, nil
 	}
 	var pub witnessclient.CosignedHeadPublisher
@@ -491,12 +488,11 @@ func wireWitnessCosigner(cfg Config, d *deps.AppDeps) (*witnessclient.HeadSync, 
 		pub = d.GossipPublisher
 	}
 	hs, err := witnessclient.NewHeadSync(witnessclient.HeadSyncConfig{
-		// v1.32.0: on-log resolver is the AUTHORITATIVE source.
-		// WitnessEndpoints (below) is the canary fallback.
+		// PRE-11 Phase B: the on-log resolver is the SOLE witness-endpoint
+		// source; NewHeadSync fails loud if it resolves empty.
 		EndpointResolver:        d.WitnessEndpointResolver,
 		EndpointResolverLogDID:  cfg.LogDID,
 		EndpointResolverTimeout: 5 * time.Second,
-		WitnessEndpoints:        cfg.WitnessEndpoints,
 		QuorumK:                 cfg.WitnessQuorumK,
 		PerWitnessTimeout:       30 * time.Second,
 		NetworkID:               cfg.NetworkID,
@@ -509,9 +505,7 @@ func wireWitnessCosigner(cfg Config, d *deps.AppDeps) (*witnessclient.HeadSync, 
 	if err != nil {
 		return nil, err
 	}
-	d.Logger.Info("witness cosigner: HeadSync requester enabled",
-		"resolver_wired", resolverAvailable,
-		"canary_endpoint_count", len(cfg.WitnessEndpoints),
+	d.Logger.Info("witness cosigner: HeadSync requester enabled (on-log resolver)",
 		"quorum_k", cfg.WitnessQuorumK,
 		"gossip_publisher", d.GossipPublisher != nil,
 		"log_did", cfg.LogDID,

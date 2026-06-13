@@ -148,7 +148,6 @@ type Config struct {
 
 	GossipPeerEndpoints []string
 	GossipPeerDIDs      []string
-	WitnessEndpoints    []string
 	WitnessQuorumK      int
 	GenesisWitnessSet   []string
 

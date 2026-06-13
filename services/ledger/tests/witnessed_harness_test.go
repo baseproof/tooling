@@ -219,11 +219,12 @@ func newWitnessedTestHarnessN(
 	// URLs. Persists head + sigs to the supplied TreeHeadStore.
 	treeHeadStore := opstore.NewTreeHeadStore(pool)
 	cosigner, err := witnessclient.NewHeadSync(witnessclient.HeadSyncConfig{
-		WitnessEndpoints:  fixture.URLs(),
-		QuorumK:           quorumK,
-		PerWitnessTimeout: 2 * time.Second,
-		NetworkID:         th.NetworkID,
-		HTTPClient:        newTunedHTTPClient(2 * time.Second),
+		EndpointResolver:       staticEndpointResolver{urls: fixture.URLs()},
+		EndpointResolverLogDID: "did:test:log",
+		QuorumK:                quorumK,
+		PerWitnessTimeout:      2 * time.Second,
+		NetworkID:              th.NetworkID,
+		HTTPClient:             newTunedHTTPClient(2 * time.Second),
 	}, treeHeadStore, logger)
 	if err != nil {
 		t.Fatalf("witnessed harness: NewHeadSync: %v", err)

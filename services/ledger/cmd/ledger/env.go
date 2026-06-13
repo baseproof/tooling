@@ -156,8 +156,8 @@ func envFloatOr(key string, fallback float64) float64 {
 }
 
 // parseCSV splits a comma-separated env value into a slice of
-// trimmed non-empty entries. Empty input → nil. Used for
-// LEDGER_WITNESS_ENDPOINTS.
+// trimmed non-empty entries. Empty input → nil. Used for the gossip
+// peer lists (LEDGER_GOSSIP_PEER_ENDPOINTS / LEDGER_GOSSIP_PEER_DIDS).
 func parseCSV(s string) []string {
 	if s == "" {
 		return nil

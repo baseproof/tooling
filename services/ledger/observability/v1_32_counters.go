@@ -7,6 +7,11 @@ for operator visibility into the L1 / L2 / L5 backdoor closures:
 	endpoint_source{source, surface}
 	  - source:   "on_log_resolver" | "config_canary_fallback" | "none"
 	  - surface:  "witness" (L1 head-sync snapshot) | "parent" (L5 anchor publish)
+	  NOTE: PRE-11 Phase B made the on-log resolver the SOLE witness-endpoint
+	  source, so surface="witness" now only ever emits source="on_log_resolver"
+	  (the config dial-list is deleted; an unresolvable set fails loud rather
+	  than falling back). source="config_canary_fallback" survives ONLY on the
+	  parent (L5) surface, which still has a LEDGER_PARENT_ADMISSION_URL canary.
 
 	auditor_scope_reject_total{reason, kind}
 	  - reason:   "no_registry" | "registry_error" | "not_registered" |
@@ -26,10 +31,12 @@ These counters answer the load-bearing rollout question:
 	"How many of my publishes today went through the on-log
 	 authoritative source vs the LEDGER_*_URL canary?"
 
-When endpoint_source{source="config_canary_fallback"} hits zero
-across a peer set, that peer set has completed the v1.32.0
-cutover and the LEDGER_WITNESS_ENDPOINTS / LEDGER_PARENT_ADMISSION_URL
-env vars can be removed from deployment manifests.
+When endpoint_source{surface="parent", source="config_canary_fallback"}
+hits zero across a peer set, that peer set has completed the parent-side
+(L5) cutover and the LEDGER_PARENT_ADMISSION_URL env var can be removed
+from deployment manifests. (The witness-side LEDGER_WITNESS_ENDPOINTS
+dial-list was deleted outright in PRE-11 Phase B — there is no witness
+canary left to watch.)
 
 Auditor-scope rejects are higher-priority signals: a
 {reason="not_registered"} reject in production is either an
@@ -91,17 +98,19 @@ func ensureInit() {
 // EndpointSource records one snapshot/publish through the
 // v1.32.0 endpoint-resolution precedence. Callers:
 //
-//   - witnessclient/head_sync.go — once per HeadSync construction
-//     (source label captures whether the on-log resolver provided
-//     URLs or the LEDGER_WITNESS_ENDPOINTS canary fell through),
-//     surface="witness".
+//   - witnessclient/head_sync.go — once per HeadSync construction.
+//     PRE-11 Phase B made the on-log resolver the SOLE source, so this
+//     always records source="on_log_resolver", surface="witness" (an
+//     unresolvable set fails construction rather than emitting a canary
+//     label). surface="witness" never carries config_canary_fallback.
 //   - anchor/resolved_submit.go — once per parent publish,
 //     surface="parent". Per-publish (not per-snapshot) because the
-//     parent path resolves fresh on every entry.
+//     parent path resolves fresh on every entry; this is the surface
+//     that can still emit source="config_canary_fallback".
 //
-// Operators alert on endpoint_source{source="config_canary_fallback"}
-// crossing zero — that is the rollout-complete signal for each
-// peer set.
+// Operators alert on
+// endpoint_source{surface="parent", source="config_canary_fallback"}
+// crossing zero — that is the parent-side rollout-complete signal.
 func EndpointSource(source, surface string) {
 	ensureInit()
 	if endpointSource == nil {

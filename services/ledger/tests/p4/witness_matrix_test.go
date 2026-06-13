@@ -63,10 +63,22 @@ func p4WitnessNetID() cosign.NetworkID {
 	return n
 }
 
+// staticEndpointResolver is the package-local test stub satisfying
+// witnessclient.WitnessEndpointResolver. PRE-11 Phase B made the on-log
+// resolver the SOLE witness-endpoint source, so the matrix feeds its
+// httptest fixture URLs to HeadSync through this seam (the deleted
+// WitnessEndpoints config field is gone). Test-only — never production.
+type staticEndpointResolver struct{ urls []string }
+
+func (r staticEndpointResolver) WitnessEndpoints(_ context.Context, _ string) ([]string, error) {
+	return r.urls, nil
+}
+
 // witnessFixture bundles one synthetic witness — its cosign-side
-// signer and the running httptest.Server. The fixture's URL
-// becomes a HeadSyncConfig.WitnessEndpoints entry; closing
-// Server simulates "this witness is offline".
+// signer and the running httptest.Server. The fixture's URL becomes
+// an entry in the staticEndpointResolver wired into
+// HeadSyncConfig.EndpointResolver; closing Server simulates "this
+// witness is offline".
 type witnessFixture struct {
 	signer cosign.WitnessSigner
 	server *httptest.Server
@@ -161,11 +173,12 @@ func runMatrixCell(
 		}
 
 		hs, err := witnessclient.NewHeadSync(witnessclient.HeadSyncConfig{
-			WitnessEndpoints:  endpoints,
-			QuorumK:           quorumK,
-			PerWitnessTimeout: 2 * time.Second,
-			NetworkID:         netID,
-			GossipPublisher:   nil,
+			EndpointResolver:       staticEndpointResolver{urls: endpoints},
+			EndpointResolverLogDID: "did:test:log",
+			QuorumK:                quorumK,
+			PerWitnessTimeout:      2 * time.Second,
+			NetworkID:              netID,
+			GossipPublisher:        nil,
 		}, treeStore, silentLogger())
 		if err != nil {
 			t.Fatalf("NewHeadSync: %v", err)
@@ -274,10 +287,11 @@ func TestP4_WitnessMatrix_SignaturesUnderQuorum(t *testing.T) {
 	}
 
 	hs, err := witnessclient.NewHeadSync(witnessclient.HeadSyncConfig{
-		WitnessEndpoints:  endpoints,
-		QuorumK:           quorumK,
-		PerWitnessTimeout: 2 * time.Second,
-		NetworkID:         netID,
+		EndpointResolver:       staticEndpointResolver{urls: endpoints},
+		EndpointResolverLogDID: "did:test:log",
+		QuorumK:                quorumK,
+		PerWitnessTimeout:      2 * time.Second,
+		NetworkID:              netID,
 	}, store.NewTreeHeadStore(pool), silentLogger())
 	if err != nil {
 		t.Fatalf("NewHeadSync: %v", err)
