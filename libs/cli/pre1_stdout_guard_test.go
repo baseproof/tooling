@@ -74,6 +74,10 @@ func TestPRE1_EnvelopeKindsArePinned(t *testing.T) {
 		"rotation-draft":         true,
 		"rotation-finalize":      true,
 		"rotation-submit":        true,
+		"network-burn-draft":     true,
+		"network-burn-consent":   true,
+		"network-burn-finalize":  true,
+		"network-burn-submit":    true,
 		"verify":                 true,
 		"witnesses":              true,
 	}
