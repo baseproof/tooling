@@ -56,6 +56,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/net/netutil"
 
 	"github.com/baseproof/baseproof/authz"
@@ -1046,7 +1047,7 @@ func composeHandlers(
 			EpochAcceptanceWindow: cfg.EpochAcceptanceWindow,
 		},
 		Identity:            buildIdentityDeps(d),
-		AuthorizedWitnesses: authorizedWitnessProvider(cfg.GenesisWitnessSet, d.Logger),
+		AuthorizedWitnesses: authorizedWitnessProvider(pool, cfg.GenesisWitnessSet, d.Logger),
 		LedgerDID:           cfg.LedgerDID,
 		LogDID:              cfg.LogDID,
 		LedgerSignerPriv:    d.LedgerSignerPriv,
@@ -1838,34 +1839,57 @@ func buildAuditorScopeAmendmentSource(
 
 // authorizedWitnessProvider returns the PRE-12 witness-endpoint enrollment
 // authorization set: the witness PubKeyIDs the network trusts to self-declare
-// endpoints (admission step 4h). Genesis witnesses come from the constitution's
-// GenesisWitnessSet (did:key ECDSA, via witness.KeysFromDIDs) and are fixed for
-// the life of the constitution, so they resolve ONCE. A resolve failure yields
-// the empty set — fail-closed (every declaration refused) rather than trust a
-// partial set.
+// endpoints (admission step 4h).
 //
-// The on-log witness-rotation chain unions in at the marked seam as the
-// steady-state extension (item 2); genesis-only is the complete authorized set
-// for a freshly bootstrapped network (the PRE-12 conformant-network case).
-func authorizedWitnessProvider(genesisDIDs []string, logger *slog.Logger) func() map[[32]byte]struct{} {
+// Authority is the LIVE on-log witness membership, read each call (never
+// cached): the active witness_sets row is the reconciled current set — the
+// constitution's GenesisWitnessSet baseline ∪ rotations, with retired witnesses
+// removed — so a rotated-in witness can enroll immediately and a retired one
+// cannot. The constitution's GenesisWitnessSet (did:key ECDSA, resolved once)
+// is the fallback for the bootstrap window before witness_sets is seeded, and
+// the fail-safe if the projection read ever fails: enrollment falls back to the
+// constitutional baseline, never opens up.
+func authorizedWitnessProvider(pool *pgxpool.Pool, genesisDIDs []string, logger *slog.Logger) func() map[[32]byte]struct{} {
 	genesis := make(map[[32]byte]struct{})
-	if len(genesisDIDs) > 0 {
-		keys, err := witness.KeysFromDIDs(genesisDIDs)
-		if err != nil {
-			logger.Error("PRE-12: KeysFromDIDs on GenesisWitnessSet failed — witness-endpoint "+
-				"declarations are refused until the constitution's witness DIDs resolve", "error", err)
-		} else {
-			for _, k := range keys {
-				genesis[k.ID] = struct{}{}
-			}
+	if keys, err := witness.KeysFromDIDs(genesisDIDs); err != nil {
+		logger.Error("PRE-12: KeysFromDIDs on GenesisWitnessSet failed — witness-endpoint "+
+			"declarations are refused until the constitution's witness DIDs resolve", "error", err)
+	} else {
+		for _, k := range keys {
+			genesis[k.ID] = struct{}{}
 		}
 	}
 	return func() map[[32]byte]struct{} {
-		// item 2 seam: union the on-log rotation chain's current witness set
-		// here. The genesis set is immutable, so it is safe to return shared
-		// (the authorizer only reads membership).
+		if pool != nil {
+			row, err := witnessclient.LoadCurrentSetRow(context.Background(), pool)
+			if err != nil {
+				logger.Warn("PRE-12: witness_sets current-set read failed; enrollment "+
+					"authorization falls back to the genesis baseline", "error", err)
+			} else if ids, perr := witnessSetPubKeyIDs(row.KeysJSON); perr != nil {
+				logger.Warn("PRE-12: witness_sets keys_json malformed; enrollment "+
+					"authorization falls back to the genesis baseline", "error", perr)
+			} else if len(ids) > 0 {
+				return ids
+			}
+		}
 		return genesis
 	}
+}
+
+// witnessSetPubKeyIDs extracts the PubKeyID set from a witness_sets row's
+// canonical keys_json ([]types.WitnessPublicKey). The .ID is the canonical
+// PubKeyID — the SAME value witness.KeysFromDIDs derives — so the resulting set
+// matches what the admission authorizer computes from a declaration's signer.
+func witnessSetPubKeyIDs(keysJSON []byte) (map[[32]byte]struct{}, error) {
+	var keys []types.WitnessPublicKey
+	if err := json.Unmarshal(keysJSON, &keys); err != nil {
+		return nil, err
+	}
+	out := make(map[[32]byte]struct{}, len(keys))
+	for i := range keys {
+		out[keys[i].ID] = struct{}{}
+	}
+	return out, nil
 }
 
 func buildAuthoritativeResolver(
