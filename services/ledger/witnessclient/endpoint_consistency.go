@@ -126,7 +126,7 @@ func HTTPDIDDocFetcher(client *http.Client) DIDDocFetcher {
 		if err != nil {
 			return nil, nil // unreachable — advisory, no alarm
 		}
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 			return nil, nil // no did:web doc here (did:key witness, etc.)
 		}

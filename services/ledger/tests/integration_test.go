@@ -712,7 +712,6 @@ func TestTreeHead_Assembly(t *testing.T) {
 	}
 }
 
-
 func TestTreeHead_MerkleInclusion(t *testing.T) {
 	mt := smt.NewStubMerkleTree()
 	mt.AppendLeaf([]byte{1})
