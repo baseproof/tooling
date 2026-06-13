@@ -2049,6 +2049,27 @@ func wireV1_32Resolver(
 
 	d.WitnessEndpointResolver = resolver
 
+	// PRE-12 item 5: the did:web consistency monitor (advisory tripwire). Wired +
+	// opt-in via LEDGER_WITNESS_DIDWEB_MONITOR_INTERVAL — a no-op for the did:key
+	// genesis topology (no did:web document to diff), so it stays off by default
+	// and an operator enables it once did:web-addressed witnesses appear.
+	if ivStr := os.Getenv("LEDGER_WITNESS_DIDWEB_MONITOR_INTERVAL"); ivStr != "" {
+		if iv, perr := time.ParseDuration(ivStr); perr == nil && iv > 0 {
+			mon := &witnessclient.WitnessEndpointMonitor{
+				Records:  func() network.WitnessEndpointDeclarationByPosition { return resolver.WitnessEndpointRecords },
+				Fetch:    witnessclient.HTTPDIDDocFetcher(d.OutboundHTTPClient),
+				Interval: iv,
+				Logger:   d.Logger,
+			}
+			lifecycle.SafeRunInWG(ctx, &d.WG, "witness-endpoint-didweb-monitor", d.Logger, nil, func() error {
+				return mon.Loop(ctx)
+			})
+		} else if perr != nil {
+			d.Logger.Warn("PRE-12: LEDGER_WITNESS_DIDWEB_MONITOR_INTERVAL ignored (unparseable duration)",
+				"value", ivStr, "error", perr)
+		}
+	}
+
 	d.AuditorRegistrySource = func(_ context.Context) ([]network.AuditorRegistrationRecord, error) {
 		return resolver.AuditorRegistryRecords, nil
 	}
