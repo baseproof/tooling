@@ -94,6 +94,18 @@ func cosignTestNetID() cosign.NetworkID {
 	return n
 }
 
+// staticEndpointResolver is the package-local test stub satisfying
+// witnessclient.WitnessEndpointResolver. PRE-11 Phase B made the on-log
+// resolver the SOLE witness-endpoint source, so these integration tests
+// feed their httptest cosign-server URLs to HeadSync through this seam
+// (the deleted WitnessEndpoints config field is gone). Test-only — a
+// static list NEVER appears in production code.
+type staticEndpointResolver struct{ urls []string }
+
+func (r staticEndpointResolver) WitnessEndpoints(_ context.Context, _ string) ([]string, error) {
+	return r.urls, nil
+}
+
 // witnessServer wraps an httptest cosign server with a Close
 // method that simulates "this witness went offline".
 type witnessServer struct {
@@ -225,10 +237,11 @@ func TestCosign_QuorumCollectedAndPublished(t *testing.T) {
 
 	// Real HeadSync — Ledger's cosign client.
 	hs, err := witnessclient.NewHeadSync(witnessclient.HeadSyncConfig{
-		WitnessEndpoints:  endpoints,
-		QuorumK:           K,
-		PerWitnessTimeout: 2 * time.Second,
-		NetworkID:         netID,
+		EndpointResolver:       staticEndpointResolver{urls: endpoints},
+		EndpointResolverLogDID: "did:test:log",
+		QuorumK:                K,
+		PerWitnessTimeout:      2 * time.Second,
+		NetworkID:              netID,
 	}, store.NewTreeHeadStore(pool), logger)
 	if err != nil {
 		t.Fatalf("NewHeadSync: %v", err)
@@ -327,10 +340,11 @@ func TestCosign_QuorumFailureNeverPublishes(t *testing.T) {
 	stack := buildEmbeddedAppender(t, ctx, logger)
 
 	hs, err := witnessclient.NewHeadSync(witnessclient.HeadSyncConfig{
-		WitnessEndpoints:  endpoints,
-		QuorumK:           K,
-		PerWitnessTimeout: 1 * time.Second,
-		NetworkID:         netID,
+		EndpointResolver:       staticEndpointResolver{urls: endpoints},
+		EndpointResolverLogDID: "did:test:log",
+		QuorumK:                K,
+		PerWitnessTimeout:      1 * time.Second,
+		NetworkID:              netID,
 	}, store.NewTreeHeadStore(pool), logger)
 	if err != nil {
 		t.Fatalf("NewHeadSync: %v", err)
@@ -399,10 +413,11 @@ func TestCosign_PublishOverwritesAtomically(t *testing.T) {
 
 	stack := buildEmbeddedAppender(t, ctx, logger)
 	hs, err := witnessclient.NewHeadSync(witnessclient.HeadSyncConfig{
-		WitnessEndpoints:  endpoints,
-		QuorumK:           K,
-		PerWitnessTimeout: 2 * time.Second,
-		NetworkID:         netID,
+		EndpointResolver:       staticEndpointResolver{urls: endpoints},
+		EndpointResolverLogDID: "did:test:log",
+		QuorumK:                K,
+		PerWitnessTimeout:      2 * time.Second,
+		NetworkID:              netID,
 	}, store.NewTreeHeadStore(pool), logger)
 	if err != nil {
 		t.Fatalf("NewHeadSync: %v", err)

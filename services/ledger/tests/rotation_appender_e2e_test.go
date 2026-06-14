@@ -198,11 +198,12 @@ func TestProductionRotationAppender_EndToEnd_RealLoopRealCosign(t *testing.T) {
 	netID := nonZeroTestNetworkID()
 	fixture := newWitnessFixture(t, netID, 1)
 	headSync, err := witnessclient.NewHeadSync(witnessclient.HeadSyncConfig{
-		WitnessEndpoints:  fixture.URLs(),
-		QuorumK:           1,
-		PerWitnessTimeout: 2 * time.Second,
-		NetworkID:         netID,
-		HTTPClient:        newTunedHTTPClient(2 * time.Second),
+		EndpointResolver:       staticEndpointResolver{urls: fixture.URLs()},
+		EndpointResolverLogDID: "did:test:log",
+		QuorumK:                1,
+		PerWitnessTimeout:      2 * time.Second,
+		NetworkID:              netID,
+		HTTPClient:             newTunedHTTPClient(2 * time.Second),
 	}, store.NewTreeHeadStore(pool), logger)
 	if err != nil {
 		t.Fatalf("NewHeadSync: %v", err)

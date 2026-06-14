@@ -20,14 +20,16 @@
 //	netID := nonZeroTestNetworkID()
 //	wfx := newWitnessFixture(t, netID, 3)  // 3 witnesses
 //	hs, _ := witnessclient.NewHeadSync(witnessclient.HeadSyncConfig{
-//	    WitnessEndpoints:  wfx.URLs(),
-//	    QuorumK:           2,
-//	    PerWitnessTimeout: 2 * time.Second,
-//	    NetworkID:         netID,
+//	    EndpointResolver:       staticEndpointResolver{urls: wfx.URLs()},
+//	    EndpointResolverLogDID: "did:test:log",
+//	    QuorumK:                2,
+//	    PerWitnessTimeout:      2 * time.Second,
+//	    NetworkID:              netID,
 //	}, treeHeadStore, logger)
 package tests
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"net/http"
 	"net/http/httptest"
@@ -40,9 +42,9 @@ import (
 
 // witnessFixture bundles N synthetic witnesses behind httptest
 // servers. Each witness has its own ECDSA key + URL. Test code
-// pulls URLs() to feed HeadSyncConfig.WitnessEndpoints, and DIDs()
-// when constructing a network bootstrap document or
-// cosign.WitnessKeySet.
+// pulls URLs() to feed a staticEndpointResolver (wired into
+// HeadSyncConfig.EndpointResolver), and DIDs() when constructing a
+// network bootstrap document or cosign.WitnessKeySet.
 type witnessFixture struct {
 	t       *testing.T
 	netID   cosign.NetworkID
@@ -104,13 +106,28 @@ func newWitnessFixture(t *testing.T, netID cosign.NetworkID, n int) *witnessFixt
 }
 
 // URLs returns the n test-server base URLs in construction order.
-// Suitable for HeadSyncConfig.WitnessEndpoints.
+// Feed these to a staticEndpointResolver (the test-only
+// WitnessEndpointResolver) via HeadSyncConfig.EndpointResolver —
+// PRE-11 Phase B removed the config dial-list, so witness URLs now
+// reach HeadSync only through the resolver seam.
 func (wf *witnessFixture) URLs() []string {
 	out := make([]string, len(wf.servers))
 	for i, s := range wf.servers {
 		out[i] = s.URL
 	}
 	return out
+}
+
+// staticEndpointResolver is the package-local test stub satisfying
+// witnessclient.WitnessEndpointResolver — it hands HeadSync a fixed URL
+// slice (typically a witnessFixture's URLs()). PRE-11 Phase B made the
+// on-log resolver the SOLE witness-endpoint source, so tests inject their
+// httptest URLs through this seam instead of the deleted WitnessEndpoints
+// config field. Static lists live in tests ONLY — never in production code.
+type staticEndpointResolver struct{ urls []string }
+
+func (r staticEndpointResolver) WitnessEndpoints(_ context.Context, _ string) ([]string, error) {
+	return r.urls, nil
 }
 
 // PublicKeys returns the n witness public-key records. Suitable

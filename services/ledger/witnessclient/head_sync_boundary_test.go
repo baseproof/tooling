@@ -43,11 +43,12 @@ func TestRequestCosignatures_RefusesInvalidHeadBeforeFanOut(t *testing.T) {
 	defer witness.Close()
 
 	hs, err := witnessclient.NewHeadSync(witnessclient.HeadSyncConfig{
-		WitnessEndpoints:  []string{witness.URL},
-		QuorumK:           1,
-		PerWitnessTimeout: time.Second,
-		NetworkID:         historyNetID(),
-		HTTPClient:        &http.Client{Timeout: time.Second},
+		EndpointResolver:       staticResolver{urls: []string{witness.URL}},
+		EndpointResolverLogDID: "did:test:log",
+		QuorumK:                1,
+		PerWitnessTimeout:      time.Second,
+		NetworkID:              historyNetID(),
+		HTTPClient:             &http.Client{Timeout: time.Second},
 	}, store.NewTreeHeadStore(nil), nil)
 	if err != nil {
 		t.Fatalf("NewHeadSync: %v", err)
@@ -85,8 +86,7 @@ func TestRequestCosignatures_NoCollectorIsTyped(t *testing.T) {
 // only as a log line at collect time.
 func TestNewHeadSync_ResolverWithoutLogDIDRefused(t *testing.T) {
 	_, err := witnessclient.NewHeadSync(witnessclient.HeadSyncConfig{
-		EndpointResolver:  staticResolver{},
-		WitnessEndpoints:  []string{"https://witness.example"}, // canary present — must NOT mask the error
+		EndpointResolver:  staticResolver{urls: []string{"https://resolved.example"}},
 		QuorumK:           1,
 		PerWitnessTimeout: time.Second,
 		NetworkID:         historyNetID(),
@@ -97,8 +97,11 @@ func TestNewHeadSync_ResolverWithoutLogDIDRefused(t *testing.T) {
 	}
 }
 
-type staticResolver struct{}
+// staticResolver is a test-only WitnessEndpointResolver returning a fixed
+// URL slice. It is the structural-typing injection point the production
+// resolver path consumes — NEVER a production static-list fallback.
+type staticResolver struct{ urls []string }
 
-func (staticResolver) WitnessEndpoints(context.Context, string) ([]string, error) {
-	return []string{"https://resolved.example"}, nil
+func (s staticResolver) WitnessEndpoints(context.Context, string) ([]string, error) {
+	return s.urls, nil
 }

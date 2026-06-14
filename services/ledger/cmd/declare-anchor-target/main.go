@@ -6,14 +6,14 @@
 // liveness data (LogDID + admission/read URLs — the amendable WHERE) as an
 // on-log declaration, signed and submitted to THIS network's ledger. The
 // SDK owns payload validation (network.EncodeAnchorTargetDeclarationPayload)
-// and the walk semantics; the wire/boot projection
-// (LEDGER_ANCHOR_TARGET_SCHEMA) turns admitted declarations into the
-// resolver's FederationGraph and the publisher's derived parent endpoints —
-// retiring the env canary.
+// and the walk semantics; the wire/boot resolver turns admitted declarations
+// into the resolver's FederationGraph and the publisher's derived parent
+// endpoints, resolved BY-KIND from idx_entry_kind (PRE-11 Phase B — the
+// LEDGER_ANCHOR_TARGET_SCHEMA position proxy is deleted).
 //
-// The entry's SchemaRef MUST point at the network's anchor-target schema
-// position (the same "did:seq" the ledger's LEDGER_ANCHOR_TARGET_SCHEMA
-// names) — that is how the walker finds declarations.
+// The entry's SchemaRef is the network's anchor-target schema position (where
+// the entry is filed); the resolver finds declarations by KIND, not by that
+// position.
 //
 // Usage:
 //
@@ -60,7 +60,7 @@ func main() {
 	var (
 		ledgerURL    = flag.String("url", "", "this network's ledger base URL (REQUIRED)")
 		logDID       = flag.String("log-did", "", "this network's log DID — the entry Destination (REQUIRED)")
-		schema       = flag.String("schema", "", `anchor-target schema position "did:seq" — must equal the ledger's LEDGER_ANCHOR_TARGET_SCHEMA (REQUIRED)`)
+		schema       = flag.String("schema", "", `anchor-target schema position "did:seq" the entry is filed under (REQUIRED). Resolution is by-kind, so this need not match any ledger env var.`)
 		targetID     = flag.String("target-network-id", "", "the constitutional target's 64-hex NetworkID (REQUIRED)")
 		targetLogDID = flag.String("target-log-did", "", "the target parent's current log DID (REQUIRED)")
 		admissionURL = flag.String("admission-url", "", "the parent's https /v1/entries admission URL (REQUIRED)")
@@ -148,7 +148,7 @@ func main() {
 	}
 	fmt.Printf("declare-anchor-target: ACCEPTED (canonical_hash=%s)\n  target    = %s\n  parent    = %s\n  admission = %s\n  read      = %s\n  signer    = %s\n",
 		hash, *targetID, *targetLogDID, *admissionURL, *readURL, signerDID)
-	fmt.Println("  NEXT: the ledger's walker projects this at boot (LEDGER_ANCHOR_TARGET_SCHEMA); the env parent canary can then be retired.")
+	fmt.Println("  NEXT: the ledger's by-kind resolver projects this at boot (idx_entry_kind); the parent env canary can then be retired.")
 }
 
 // parseSchemaPos parses "did:...:seq" — the LAST colon-separated token is the

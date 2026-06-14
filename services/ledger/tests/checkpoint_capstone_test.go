@@ -92,11 +92,12 @@ func TestCheckpoint_Capstone_RealMerkleRealSMTRealSigner(t *testing.T) {
 	// httptest) and the real collector persisting into tree_heads.
 	fixture := newWitnessFixture(t, th.NetworkID, 1)
 	headSync, err := witnessclient.NewHeadSync(witnessclient.HeadSyncConfig{
-		WitnessEndpoints:  fixture.URLs(),
-		QuorumK:           1,
-		PerWitnessTimeout: 2 * time.Second,
-		NetworkID:         th.NetworkID,
-		HTTPClient:        newTunedHTTPClient(2 * time.Second),
+		EndpointResolver:       staticEndpointResolver{urls: fixture.URLs()},
+		EndpointResolverLogDID: "did:test:log",
+		QuorumK:                1,
+		PerWitnessTimeout:      2 * time.Second,
+		NetworkID:              th.NetworkID,
+		HTTPClient:             newTunedHTTPClient(2 * time.Second),
 	}, opstore.NewTreeHeadStore(pool), logger)
 	if err != nil {
 		t.Fatalf("NewHeadSync: %v", err)

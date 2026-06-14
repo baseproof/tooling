@@ -472,25 +472,19 @@ type Config struct {
 	// posture). Both bounds zero ⇒ cache disabled.
 	// Env: LEDGER_RECENT_ENTRY_CACHE_MAX_BYTES
 	RecentEntryCacheMaxBytes int64
-	// WitnessEndpoints is the comma-separated list of peer witness
-	// URLs the builder loop's HeadSync requester posts cosign
-	// requests to. Empty (default) → no cosignature collection;
-	// the BuilderLoop tolerates a nil cosigner and emits self-
-	// signed checkpoints unwitnessed.
-	//
-	// Local-dev "self-witness K=1" pattern: set this to the
-	// ledger's own server addr (e.g. http://localhost:8080)
-	// and LEDGER_WITNESS_QUORUM_K=1 plus
-	// LEDGER_WITNESS_KEY_FILE — same code paths as production
-	// K=N witnesses, no test-mode flag.
-	WitnessEndpoints []string
-	WitnessQuorumK   int
+	// WitnessQuorumK is the K-of-N cosignature quorum. PRE-11 Phase B: the
+	// witness DIAL URLs are no longer config — they resolve on-log from
+	// WitnessEndpointDeclaration records (AuthoritativeResolver). Under rc4
+	// K itself derives from the constitution's genesis_quorum_k;
+	// LEDGER_WITNESS_QUORUM_K demotes to a cross-check (reconcileWitnessQuorumK).
+	WitnessQuorumK int
 
 	// NetworkBootstrapFile is the path to a JSON file containing
 	// the network's bootstrap document (network.BootstrapDocument).
-	// Required when witness mode is active (WitnessEndpoints set)
-	// — the cosign canonical-message preamble rejects a zero
-	// NetworkID, so a verifier without one fails at runtime.
+	// When set it is the constitution seed (NetworkID, GenesisWitnessSet,
+	// admission authorities, quorum K) — the cosign canonical-message
+	// preamble rejects a zero NetworkID, so a verifier without one fails
+	// at runtime.
 	// The same document MUST be loaded by every component
 	// participating in the network (other ledgers, JN composer,
 	// peer witnesses); cross-component signature verification
@@ -638,7 +632,6 @@ func loadConfig() (*Config, error) {
 		RecentEntryCacheSize:     envIntOr("LEDGER_RECENT_ENTRY_CACHE_SIZE", 8192),
 		RecentEntryCacheMaxBytes: envInt64Or("LEDGER_RECENT_ENTRY_CACHE_MAX_BYTES", 1<<30), // 1 GiB default
 		ArchiveShardIndexSource:  os.Getenv("LEDGER_ARCHIVE_SHARD_INDEX_SOURCE"),
-		WitnessEndpoints:         parseCSV(os.Getenv("LEDGER_WITNESS_ENDPOINTS")),
 		WitnessQuorumK:           envIntOr("LEDGER_WITNESS_QUORUM_K", 1),
 		NetworkBootstrapFile:     resolveFile("LEDGER_NETWORK_BOOTSTRAP_FILE", "/etc/ledger/bootstrap.json", "/etc/secrets/bootstrap.json"),
 		GossipPeerEndpoints:      parseCSV(os.Getenv("LEDGER_GOSSIP_PEER_ENDPOINTS")),
@@ -784,12 +777,13 @@ func loadConfig() (*Config, error) {
 	// without one fails at runtime. Load + derive at config-load so
 	// any error surfaces with a clear cause before the ledger
 	// advances any further.
-	witnessActive := len(cfg.WitnessEndpoints) > 0
-	if witnessActive {
-		if cfg.NetworkBootstrapFile == "" {
-			return nil, fmt.Errorf(
-				"LEDGER_NETWORK_BOOTSTRAP_FILE required when LEDGER_WITNESS_ENDPOINTS is set")
-		}
+	// PRE-11 Phase B: load the constitution whenever a bootstrap file is
+	// configured — decoupled from the (deleted) witness dial-list. It is
+	// the trust root: NetworkID, GenesisWitnessSet, admission authorities,
+	// and the constitutional quorum K all derive from it. Absent file ⇒
+	// no-network/test posture (the witness cosigner then resolves empty
+	// and fails closed).
+	if cfg.NetworkBootstrapFile != "" {
 		raw, err := os.ReadFile(cfg.NetworkBootstrapFile)
 		if err != nil {
 			return nil, fmt.Errorf("read network bootstrap %s: %w",
@@ -993,19 +987,11 @@ func (cfg *Config) Validate() error {
 		}
 	}
 
-	// Witness quorum K must be positive when witnesses are configured (a 0-of-N
-	// quorum would never finalize a head). Under rc4 K is the constitutional
-	// genesis_quorum_k (reconcileWitnessQuorumK), already >0 and 2K>N; this stays
-	// as a defensive floor for the legacy no-bootstrap path.
-	if len(cfg.WitnessEndpoints) > 0 && cfg.WitnessQuorumK <= 0 {
-		return fmt.Errorf("witness quorum K must be > 0 when LEDGER_WITNESS_ENDPOINTS is set (got %d)",
-			cfg.WitnessQuorumK)
-	}
-	if len(cfg.WitnessEndpoints) > 0 && cfg.WitnessQuorumK > len(cfg.WitnessEndpoints) {
-		return fmt.Errorf("witness quorum K (%d) cannot exceed LEDGER_WITNESS_ENDPOINTS count (%d): "+
-			"fewer endpoints than the constitutional quorum can never finalise a head",
-			cfg.WitnessQuorumK, len(cfg.WitnessEndpoints))
-	}
+	// PRE-11 Phase B: K-vs-N is validated at wire time against the
+	// on-log-resolved endpoint count (cosign.NewWitnessCollector is
+	// fail-closed by construction); there is no config endpoint count to
+	// check here. K itself is the constitutional genesis_quorum_k (rc4,
+	// reconcileWitnessQuorumK), already validated > 0 at load.
 
 	return nil
 }
@@ -1140,8 +1126,7 @@ func buildLogInfo(cfg *Config) api.LogInfo {
 		"tile_serve_disable": cfg.TileServeDisable,
 
 		// Witness topology — drives K-of-N quorum verification.
-		"witness_endpoint_count": len(cfg.WitnessEndpoints),
-		"witness_quorum_k":       cfg.WitnessQuorumK,
+		"witness_quorum_k": cfg.WitnessQuorumK,
 
 		// Gossip + transport posture.
 		"gossip_enabled":    !cfg.GossipDisable,

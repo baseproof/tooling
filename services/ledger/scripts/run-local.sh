@@ -18,15 +18,19 @@
 #                               generation + the daemon runner:
 #                                 cd ../tooling/services/witness
 #                                 ./scripts/run-local.sh --witnesses N
-#                               Prints LEDGER_WITNESS_ENDPOINTS /
-#                               _QUORUM_K / _NETWORK_BOOTSTRAP_FILE.
+#                               Prints LEDGER_WITNESS_QUORUM_K /
+#                               LEDGER_NETWORK_BOOTSTRAP_FILE. Witness
+#                               dial URLs are resolved on-log (from
+#                               WitnessEndpointDeclaration records), not
+#                               via env.
 #
 #   scripts/run-local.sh        The ledger binary. Consumes BOTH of
 #                               the above PURELY via env vars: infra's
 #                               DSN + S3 (auto-imported), and the
-#                               witness fleet's three vars (which YOU
-#                               export from the witness repo's output).
-#                               This repo describes ZERO witness config.
+#                               witness fleet's vars (which YOU export
+#                               from the witness repo's output). Witness
+#                               dial URLs are resolved on-log, not via
+#                               env. This repo describes ZERO witness config.
 #
 # BYTESTORE — SeaweedFS by default:
 #
@@ -41,15 +45,17 @@
 #   The Ledger and the Witness are physically separate Go modules in
 #   different repositories. The Ledger never imports witness-daemon
 #   code, never builds or runs a witness container, and talks to the
-#   fleet purely over HTTP as a cosign CLIENT. The contract between
-#   the two repos is exactly three env vars.
+#   fleet purely over HTTP as a cosign CLIENT. The two repos share the
+#   bootstrap file (NetworkID) + quorum K via env; the fleet's dial URLs
+#   are published on-log as WitnessEndpointDeclaration records and
+#   resolved from there, never passed as env.
 #
 # Usage:
 #
 #   # 1. Witness fleet (separate repo, separate terminal):
 #   cd ../tooling/services/witness && ./scripts/run-local.sh --witnesses 3
-#   export LEDGER_WITNESS_ENDPOINTS=... LEDGER_WITNESS_QUORUM_K=... \
-#          LEDGER_NETWORK_BOOTSTRAP_FILE=...
+#   export LEDGER_WITNESS_QUORUM_K=... LEDGER_NETWORK_BOOTSTRAP_FILE=...
+#   #   (witness dial URLs are resolved on-log, not exported as env)
 #
 #   # 2. Ledger (this repo):
 #   ./scripts/run-local.sh up        # infra up + ledger (SeaweedFS)
@@ -196,11 +202,13 @@ eval "$("${REPO_ROOT}/scripts/infra" env)"
 # ── Witness tier — consumed via env vars, NOT run by this repo ─────
 # The witness daemon lives in github.com/clearcompass-ai/standalone-
 # witness, which owns its own fleet runner. The ledger consumes the
-# tier PURELY through three env vars. If they're not already set,
-# point the operator at the witness repo instead of intermingling
-# its container config into this one.
-if [ -z "${LEDGER_WITNESS_ENDPOINTS:-}" ] || \
-   [ -z "${LEDGER_NETWORK_BOOTSTRAP_FILE:-}" ]; then
+# tier PURELY through env vars. Witness DIAL URLs are NO LONGER passed
+# via env (PRE-11 Phase B deleted LEDGER_WITNESS_ENDPOINTS) — they are
+# resolved on-log from WitnessEndpointDeclaration records keyed by
+# LEDGER_LOG_DID. The bootstrap file (NetworkID + genesis witness DIDs)
+# is still required. If it is not set, point the operator at the witness
+# repo instead of intermingling its container config into this one.
+if [ -z "${LEDGER_NETWORK_BOOTSTRAP_FILE:-}" ]; then
     cat <<'ERR' >&2
 
 == run-local.sh: witness tier not configured ==
@@ -215,7 +223,9 @@ Stand one up there, then import the env it exports:
   eval "$(make -s print-env)"               # sets LEDGER_* for the ledger
   # or:  source ../tooling/services/witness/.run/witness.env
 
-Then re-run ./scripts/run-local.sh up.
+Witness dial URLs come from on-log WitnessEndpointDeclaration records
+(publish them for LEDGER_LOG_DID), NOT from env. Then re-run
+./scripts/run-local.sh up.
 
 ERR
     exit 1
@@ -287,9 +297,9 @@ echo "  LEDGER_DATABASE_URL=${LEDGER_DATABASE_URL}"
 echo "  LEDGER_LOG_DID=${LEDGER_LOG_DID}"
 echo "  LEDGER_ADDR=${LEDGER_ADDR}"
 echo "  LEDGER_BYTE_STORE_BACKEND=${LEDGER_BYTE_STORE_BACKEND}  → ${BYTESTORE_DESC}"
-echo "  LEDGER_WITNESS_ENDPOINTS=${LEDGER_WITNESS_ENDPOINTS:-} (quorum_k=${LEDGER_WITNESS_QUORUM_K:-})"
+echo "  LEDGER_WITNESS_QUORUM_K=${LEDGER_WITNESS_QUORUM_K:-} (witness dial URLs resolved on-log, not via env)"
 echo "  LEDGER_NETWORK_BOOTSTRAP_FILE=${LEDGER_NETWORK_BOOTSTRAP_FILE:-}"
-echo "  witnesses: external fleet (tooling repo (services/witness)) — consumed via env vars above"
+echo "  witnesses: external fleet (tooling repo (services/witness)) — endpoints from on-log WitnessEndpointDeclaration records"
 echo
 echo "  Tear down: ./scripts/run-local.sh down   (witness fleet: cd ../tooling/services/witness && ./scripts/run-local.sh down)"
 echo

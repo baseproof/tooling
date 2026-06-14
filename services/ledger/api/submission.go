@@ -218,9 +218,18 @@ type IdentityDeps struct {
 
 // SubmissionDeps is the dependency surface for the POST /v1/entries handler.
 type SubmissionDeps struct {
-	Storage      StorageDeps
-	Admission    AdmissionConfig
-	Identity     IdentityDeps
+	Storage   StorageDeps
+	Admission AdmissionConfig
+	Identity  IdentityDeps
+
+	// AuthorizedWitnesses returns the witness PubKeyID set the network
+	// trusts for PRE-12 witness-endpoint enrollment authorization
+	// (witness.KeysFromDIDs over the constitution's GenesisWitnessSet,
+	// unioned with the on-log rotation chain). Consulted at step 4h for
+	// WitnessEndpointDeclarationV1 entries. nil ⇒ empty ⇒ fail-closed
+	// (every declaration refused). Production wires it at boot.
+	AuthorizedWitnesses func() map[[32]byte]struct{}
+
 	LogDID       string
 	LedgerDID    string
 	MaxEntrySize int64
@@ -627,6 +636,23 @@ func prepareSubmission(
 	if err := admission.VerifyNetworkPayloadEntry(entry); err != nil {
 		return nil, submissionFail(apitypes.ErrorClassEnvelopeRejected,
 			http.StatusUnprocessableEntity, "%s", err)
+	}
+
+	// ── Step 4h: network-payload AUTHORIZATION (PRE-12 enrollment) ─
+	// A WitnessEndpointDeclarationV1 that passed the structural gate must
+	// ALSO be self-attested by an AUTHORIZED witness (VERIFY+AUTHORIZE+BIND)
+	// — else the on-log dial-list is attacker-hijackable. Default-ON: a nil
+	// verifier or an empty authorized set fails closed (every declaration
+	// refused). Non-gated kinds pass through untouched.
+	{
+		var authorized map[[32]byte]struct{}
+		if deps.AuthorizedWitnesses != nil {
+			authorized = deps.AuthorizedWitnesses()
+		}
+		if err := admission.AuthorizeNetworkPayloadEntry(ctx, entry, deps.Identity.Verifier, authorized); err != nil {
+			return nil, submissionFail(apitypes.ErrorClassEnvelopeRejected,
+				http.StatusForbidden, "%s", err)
+		}
 	}
 
 	// ── Step 5: Entry size ─────────────────────────────────────────

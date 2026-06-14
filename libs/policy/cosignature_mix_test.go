@@ -144,6 +144,60 @@ func TestNewInMemoryPolicy_DuplicateRejected(t *testing.T) {
 	}
 }
 
+// ─── scope-at-publish (PRE-13b #181) ─────────────────────────────────
+
+// A GATED event (one carrying RequiredSignerRoles) is the unit the verifying
+// walk enforces provenance over; scope-at-publish makes the SCOPE that walk
+// must enforce a publish-time obligation. A network therefore cannot freeze a
+// bundle that gates an event without declaring which delegation scope
+// authorizes the cosigner — the walk always has a scope to check. The
+// accessors and ValidateScopeAtPublish are pinned together here:
+// RequiresScope ⇔ gated, and a gated rule with no scope is unpublishable.
+func TestValidateScopeAtPublish(t *testing.T) {
+	// Accessors: RequiresScope ⇔ RequiredSignerRoles non-empty.
+	gated := filedRule("amendment") // RequiredSignerRoles=["approver"], no scope set
+	nongated := signerRule("notice")
+	if !gated.RequiresScope() {
+		t.Error("a rule with RequiredSignerRoles is gated and must report RequiresScope")
+	}
+	if nongated.RequiresScope() {
+		t.Error("a rule with no RequiredSignerRoles is not gated and requires no scope")
+	}
+
+	// 1. Gated WITHOUT scope → ErrGatedEventNoScope (the publish refusal).
+	if err := ValidateScopeAtPublish([]CosignatureRule{gated}); !errors.Is(err, ErrGatedEventNoScope) {
+		t.Fatalf("a gated event with no required_scope must be unpublishable, got %v", err)
+	}
+
+	// 2. Gated WITH scope → admitted; the accessor surfaces it for the walk.
+	scoped := gated
+	scoped.RequiredScope = []string{"court.amendment"}
+	if err := ValidateScopeAtPublish([]CosignatureRule{scoped}); err != nil {
+		t.Fatalf("a gated event that declares its scope must publish: %v", err)
+	}
+	if got := scoped.RequiredScopes(); len(got) != 1 || got[0] != "court.amendment" {
+		t.Errorf("RequiredScopes must surface the declared scope for the walk, got %v", got)
+	}
+
+	// 3. Non-gated WITHOUT scope → admitted (scope is meaningless with no gate).
+	if err := ValidateScopeAtPublish([]CosignatureRule{nongated}); err != nil {
+		t.Fatalf("a non-gated event may omit scope: %v", err)
+	}
+
+	// 4. Gated with an EMPTY scope token → ErrInvalidRule (malformed, not absent).
+	empty := gated
+	empty.RequiredScope = []string{""}
+	if err := ValidateScopeAtPublish([]CosignatureRule{empty}); !errors.Is(err, ErrInvalidRule) {
+		t.Fatalf("an empty scope token is malformed and must reject with ErrInvalidRule, got %v", err)
+	}
+
+	// 5. Over a SET, the offending gated event is named in the rejection.
+	err := ValidateScopeAtPublish([]CosignatureRule{nongated, gated})
+	if !errors.Is(err, ErrGatedEventNoScope) || !strings.Contains(err.Error(), "amendment") {
+		t.Fatalf("the offending gated event must be named in the rejection, got %v", err)
+	}
+}
+
 // ─── the closed-set option: content injected, never hardcoded ────────
 
 func TestWithKnownFilerRoles_ClosesTheSet(t *testing.T) {

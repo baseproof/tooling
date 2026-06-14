@@ -259,11 +259,12 @@ func startTestLedgerWithOpts(t *testing.T, opts testLedgerOpts) *testLedger {
 		witnessNetID := nonZeroTestNetworkID()
 		witnessFx := newWitnessFixture(t, witnessNetID, 1)
 		hs, hsErr := witnessclient.NewHeadSync(witnessclient.HeadSyncConfig{
-			WitnessEndpoints:  witnessFx.URLs(),
-			QuorumK:           1,
-			PerWitnessTimeout: 2 * time.Second,
-			NetworkID:         witnessNetID,
-			HTTPClient:        newTunedHTTPClient(2 * time.Second),
+			EndpointResolver:       staticEndpointResolver{urls: witnessFx.URLs()},
+			EndpointResolverLogDID: "did:test:log",
+			QuorumK:                1,
+			PerWitnessTimeout:      2 * time.Second,
+			NetworkID:              witnessNetID,
+			HTTPClient:             newTunedHTTPClient(2 * time.Second),
 		}, treeHeadStore, logger)
 		if hsErr != nil {
 			cancel()

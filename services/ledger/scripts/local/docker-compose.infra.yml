@@ -22,12 +22,13 @@
 #
 #     cd ../tooling/services/witness
 #     ./scripts/run-local.sh --witnesses 3
-#       → prints LEDGER_WITNESS_ENDPOINTS / LEDGER_WITNESS_QUORUM_K
-#         / LEDGER_NETWORK_BOOTSTRAP_FILE
+#       → prints LEDGER_WITNESS_QUORUM_K / LEDGER_NETWORK_BOOTSTRAP_FILE
+#         (witness dial URLs are resolved on-log from
+#          WitnessEndpointDeclaration records, NOT exported as env)
 #
 #   Export those, then `./scripts/run-local.sh up` (ledger) wires
 #   them into cmd/ledger. The two repos share NOTHING but those
-#   env vars + the bootstrap file path.
+#   env vars + the bootstrap file path; dial URLs flow on-log.
 #
 # USAGE (via the orchestrator script):
 #
