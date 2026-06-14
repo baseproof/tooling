@@ -481,9 +481,10 @@ type Config struct {
 
 	// NetworkBootstrapFile is the path to a JSON file containing
 	// the network's bootstrap document (network.BootstrapDocument).
-	// Required when witness mode is active (WitnessEndpoints set)
-	// — the cosign canonical-message preamble rejects a zero
-	// NetworkID, so a verifier without one fails at runtime.
+	// When set it is the constitution seed (NetworkID, GenesisWitnessSet,
+	// admission authorities, quorum K) — the cosign canonical-message
+	// preamble rejects a zero NetworkID, so a verifier without one fails
+	// at runtime.
 	// The same document MUST be loaded by every component
 	// participating in the network (other ledgers, JN composer,
 	// peer witnesses); cross-component signature verification
